@@ -1,0 +1,22 @@
+# AegisQuantum — crypto-core dependencies
+#
+# Installation complète :
+#   pip install -r requirements.txt
+#
+# Pour liboqs (ML-KEM / ML-DSA) — nécessite cmake + gcc :
+#   Ubuntu/Debian : apt install cmake gcc libssl-dev
+#   macOS         : brew install cmake openssl
+#   puis : pip install liboqs-python
+#
+# Guide complet : https://github.com/open-quantum-safe/liboqs-python
+
+# Cryptographie classique (X25519, Ed25519, AES-GCM, ChaCha20, HKDF)
+cryptography>=42.0.0
+
+# Post-quantique — bindings Python pour liboqs (ML-KEM, ML-DSA)
+# Nécessite liboqs compilé sur le système
+liboqs-python>=0.10.0
+
+# Tests
+pytest>=8.0.0
+pytest-cov>=5.0.0
