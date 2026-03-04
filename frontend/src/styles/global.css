@@ -1,0 +1,112 @@
+/* ═══════════════════════════════════════
+   global.css — variables & base styles
+   AegisQuantum
+═══════════════════════════════════════ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg:           #111113;
+  --surface:      #18181b;
+  --surface-2:    #1f1f23;
+  --border:       #2a2a2f;
+  --border-light: #3f3f46;
+  --text:         #e4e4e7;
+  --text-muted:   #71717a;
+  --accent:       #3b82f6;
+  --accent-dim:   #1d4ed8;
+  --accent-glow:  rgba(59, 130, 246, 0.15);
+  --danger:       #ef4444;
+  --success:      #22c55e;
+  --warning:      #f59e0b;
+
+  --font-mono: 'IBM Plex Mono', monospace;
+  --font-sans: 'IBM Plex Sans', sans-serif;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  --transition: 0.15s ease;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Screens ── */
+.screen {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.screen.hidden {
+  display: none !important;
+}
+
+.screen.active {
+  display: flex;
+}
+
+/* ── Utility ── */
+.hidden { display: none !important; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar       { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
+
+/* ── Spinner ── */
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.15);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Animations ── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+/* debug fix */
+#auth-screen {
+  display: flex !important;
+}

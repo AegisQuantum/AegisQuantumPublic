@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AegisQuantum</title>
+  <link rel="stylesheet" href="/src/styles/global.css" />
+  <link rel="stylesheet" href="/src/styles/auth.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- AUTH SCREEN -->
+    <div id="auth-screen" class="screen active">
+      <div class="auth-card">
+
+        <div class="logo-block">
+          <img src="/BIGLOGO.png" alt="AegisQuantum" />
+          <h1>AEGISQUANTUM</h1>
+          <span class="tagline">end-to-end post-quantum messaging</span>
+        </div>
+
+        <div class="pqc-badge">
+          <span class="badge-dot"></span>
+          POST-QUANTUM SECURED &nbsp;·&nbsp; ML-KEM-768 &nbsp;·&nbsp; ML-DSA-65
+        </div>
+
+        <div class="form-card">
+          <div class="tabs">
+            <button class="tab-btn active" id="tab-login"    data-tab="login">Sign in</button>
+            <button class="tab-btn"        id="tab-register" data-tab="register">Create account</button>
+          </div>
+
+          <div class="field">
+            <label for="input-email">Email</label>
+            <input type="email" id="input-email" placeholder="you@example.com" autocomplete="email" />
+          </div>
+
+          <div class="field">
+            <label for="input-password">Password</label>
+            <input type="password" id="input-password" placeholder="••••••••••••" />
+            <div id="strength-wrap" class="hidden">
+              <div class="strength-bar"><div id="strength-fill" class="strength-fill"></div></div>
+              <span id="strength-label" class="strength-label"></span>
+            </div>
+          </div>
+
+          <div class="field hidden" id="field-confirm">
+            <label for="input-confirm">Confirm password</label>
+            <input type="password" id="input-confirm" placeholder="••••••••••••" />
+          </div>
+
+          <div id="status-msg" class="status-msg"></div>
+
+          <button id="submit-btn" class="btn-primary">Sign in</button>
+        </div>
+
+        <div class="crypto-info">
+          <span class="crypto-tag">AES-256-GCM</span>
+          <span class="crypto-tag">HKDF-SHA256</span>
+          <span class="crypto-tag">Double Ratchet</span>
+          <span class="crypto-tag">Argon2id</span>
+          <span class="crypto-tag">FIPS 203/204</span>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- CHAT SCREEN (chargé dynamiquement par main.ts) -->
+    <div id="chat-screen" class="screen hidden"></div>
+
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

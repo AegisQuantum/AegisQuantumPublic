@@ -1,0 +1,32 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Clés publiques ML-KEM : tout utilisateur auth peut lire, chacun écrit la sienne
+    match /publicKeys/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Messages : seuls expéditeur et destinataire peuvent lire
+    match /messages/{messageId} {
+      allow read: if request.auth != null &&
+        (request.auth.uid == resource.data.senderId ||
+         request.auth.uid == resource.data.recipientId);
+      allow create: if request.auth != null &&
+        request.auth.uid == request.resource.data.senderId;
+      allow update, delete: if false;
+    }
+
+    // Profils utilisateurs
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Refus par défaut
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,67 @@
+<!-- ═══════════════════════════════════════
+     chat.html — messaging screen template
+     Chargé dynamiquement dans #chat-screen par main.ts
+     après authentification Firebase
+═══════════════════════════════════════ -->
+<link rel="stylesheet" href="/src/styles/chat.css" />
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <div class="sidebar-logo">
+      <img src="/BIGLOGO.png" alt="AQ" />
+      <span>AEGISQUANTUM</span>
+    </div>
+    <button class="btn-icon" id="btn-new-chat" title="New conversation">+</button>
+  </div>
+
+  <div class="sidebar-user">
+    <span class="user-email" id="current-user-email">—</span>
+  </div>
+
+  <div class="contacts-list" id="contacts-list">
+    <div class="contacts-label">Conversations</div>
+    <!-- Injecté dynamiquement par chat.ts -->
+  </div>
+
+  <div class="sidebar-footer">
+    <button class="btn-signout" id="btn-signout">Sign out</button>
+  </div>
+</aside>
+
+<!-- Main area -->
+<main class="chat-main" id="chat-main">
+
+  <!-- Empty state par défaut -->
+  <div class="chat-empty" id="chat-empty">
+    <img src="/BIGLOGO.png" alt="" />
+    <p>Select a conversation or start a new one</p>
+  </div>
+
+  <!-- Zone de conversation (cachée jusqu'à sélection d'un contact) -->
+  <div id="conversation-view" class="hidden" style="display:contents">
+
+    <div class="chat-topbar">
+      <div class="chat-topbar-left">
+        <span class="chat-contact-name" id="chat-contact-name">—</span>
+        <span class="e2e-indicator">E2E Encrypted</span>
+      </div>
+      <button class="btn-fingerprint" id="btn-fingerprint">Safety Numbers</button>
+    </div>
+
+    <div class="messages-container" id="messages-container">
+      <!-- Messages injectés par chat.ts -->
+    </div>
+
+    <div class="input-bar">
+      <textarea
+        class="message-input"
+        id="message-input"
+        placeholder="Message (encrypted client-side)"
+        rows="1"
+      ></textarea>
+      <button class="btn-send" id="btn-send" title="Send">&#10148;</button>
+    </div>
+
+  </div>
+</main>

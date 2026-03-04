@@ -1,0 +1,236 @@
+/* ═══════════════════════════════════════
+   auth.css — login / register screen
+   AegisQuantum
+═══════════════════════════════════════ */
+
+#auth-screen {
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  background:
+    radial-gradient(ellipse 60% 40% at 50% 0%,
+      rgba(59, 130, 246, 0.07) 0%,
+      transparent 70%),
+    var(--bg);
+}
+
+/* ── Card ── */
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+  animation: fadeUp 0.45s ease both;
+}
+
+/* ── Logo ── */
+.logo-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.logo-block img {
+  width: 76px;
+  height: 76px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 18px rgba(59, 130, 246, 0.35));
+}
+
+.logo-block h1 {
+  font-family: var(--font-mono);
+  font-size: 1.3rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  color: var(--text);
+}
+
+.logo-block .tagline {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
+
+/* ── PQC Badge ── */
+.pqc-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.45rem 1rem;
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  border-radius: var(--radius-sm);
+  background: rgba(59, 130, 246, 0.05);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: #60a5fa;
+  letter-spacing: 0.07em;
+  margin: 0 auto;
+}
+
+.badge-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  animation: pulse 2.2s ease infinite;
+}
+
+/* ── Form card ── */
+.form-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+/* ── Tabs ── */
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.1rem;
+}
+
+.tab-btn {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 500;
+  padding: 0.55rem 0;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color var(--transition), border-color var(--transition);
+}
+
+.tab-btn.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.tab-btn:hover:not(.active) {
+  color: var(--text);
+}
+
+/* ── Fields ── */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.field label {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.field input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  padding: 0.6rem 0.8rem;
+  outline: none;
+  transition: border-color var(--transition);
+  width: 100%;
+}
+
+.field input:focus {
+  border-color: var(--accent);
+}
+
+.field input::placeholder {
+  color: #3f3f46;
+}
+
+/* ── Password strength ── */
+.strength-bar {
+  height: 2px;
+  border-radius: 2px;
+  background: var(--border);
+  margin-top: 0.4rem;
+  overflow: hidden;
+}
+
+.strength-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 2px;
+  transition: width 0.3s ease, background 0.3s ease;
+}
+
+.strength-label {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-top: 0.2rem;
+}
+
+/* ── Status ── */
+.status-msg {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-align: center;
+  min-height: 1.1rem;
+}
+
+.status-msg.error   { color: var(--danger); }
+.status-msg.success { color: var(--success); }
+.status-msg.loading { color: var(--text-muted); }
+
+/* ── Button ── */
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 0.7rem;
+  cursor: pointer;
+  transition: background var(--transition), transform 0.1s;
+  width: 100%;
+  letter-spacing: 0.02em;
+  margin-top: 0.15rem;
+}
+
+.btn-primary:hover   { background: var(--accent-dim); }
+.btn-primary:active  { transform: scale(0.99); }
+.btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ── Crypto tags ── */
+.crypto-info {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.crypto-tag {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: #3f3f46;
+  letter-spacing: 0.05em;
+}
