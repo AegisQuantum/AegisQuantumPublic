@@ -5,7 +5,6 @@
 /** Profil utilisateur stocké en mémoire après authentification. */
 export interface AQUser {
   uid: string;
-  email: string;
 }
 
 /**
@@ -14,7 +13,6 @@ export interface AQUser {
  */
 export interface PublicKeyBundle {
   uid: string;
-  email: string;
   /** Base64 — ML-KEM-768 public key (1184 bytes). Vient de kemGenerateKeyPair() dans crypto/kem.ts */
   kemPublicKey: string;
   /** Base64 — ML-DSA-65 public key. Vient de dsaGenerateKeyPair() dans crypto/dsa.ts */

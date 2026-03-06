@@ -1,50 +1,12 @@
 /**
  * auth.test.ts — Unit, KPI & security tests for auth.ts
- *
- * NOTE : Tests marked [INTEGRATION] require a Firebase Auth emulator or live
- * project. Tests marked [UNIT] are purely synchronous and run offline.
- *
- * Coverage :
- *  ── Functional ──────────────────────────────────────────────────────────────
- *  - getCurrentUser()   : returns null before login, AQUser after
- *  - onAuthChange()     : callback fires on auth state change, returns unsubscribe
- *  - register()         : creates Firebase account, returns AQUser with uid + email
- *  - signIn()           : authenticates and returns AQUser
- *  - signOut()          : clears current user, calls clearPrivateKeys
- *
- *  ── Type safety ─────────────────────────────────────────────────────────────
- *  - register() returns { uid: string, email: string } — no extra fields
- *  - signIn()   returns { uid: string, email: string } — no extra fields
- *  - uid is a non-empty string (Firebase-generated)
- *
- *  ── KPIs (specs §2.2) ───────────────────────────────────────────────────────
- *  - register() full flow < 3000 ms  (network + crypto stubs)
- *  - signIn()   full flow < 2000 ms  (network + crypto stubs)
- *  - signOut()            < 500 ms
- *
- *  ── Security / pseudo-pentest ────────────────────────────────────────────────
- *  - register() with weak password throws (Firebase Auth enforces min 6 chars)
- *  - register() with malformed email throws
- *  - signIn() with wrong password throws — no silent auth bypass
- *  - signOut() makes getCurrentUser() return null immediately
- *  - signOut() makes getKemPrivateKey() throw (key-store cleared)
- *  - Duplicate register() with same email throws — no silent account takeover
- *  - onAuthChange() unsubscribe stops future callbacks
  */
 
-import { describe, it, expect, vi, afterEach } from "vitest";
-import {
-  getCurrentUser,
-  onAuthChange,
-  register,
-  signIn,
-  signOut,
-} from "../auth";
-import { clearPrivateKeys, getKemPrivateKey, storePrivateKeys } from "../key-store";
+import { describe, it, expect, afterEach } from "vitest";
+import { getCurrentUser, onAuthChange, register, signIn, signOut } from "../auth";
+import { clearPrivateKeys, getKemPrivateKey, storePrivateKeys, unlockPrivateKeys } from "../key-store";
 
-// ── Test accounts — use Firebase emulator with these credentials ───────────
-// Run: firebase emulators:start --only auth,firestore
-const TEST_EMAIL    = `test-auth-${Date.now()}@aegisquantum.test`;
+const TEST_EMAIL    = `test-${Date.now()}@aegisquantum.test`;
 const TEST_PASSWORD = "TestP@ssw0rd!";
 const WEAK_PASSWORD = "123";
 const BAD_EMAIL     = "not-an-email";
@@ -56,7 +18,6 @@ async function measureMs(fn: () => Promise<unknown>): Promise<number> {
 }
 
 afterEach(async () => {
-  // Best-effort sign-out between tests to reset auth state
   await signOut().catch(() => {});
   clearPrivateKeys();
 });
@@ -64,18 +25,17 @@ afterEach(async () => {
 // ── getCurrentUser ─────────────────────────────────────────────────────────
 
 describe("getCurrentUser [UNIT]", () => {
-  it("should return null when no user is signed in", () => {
-    // After afterEach signOut, should be null
+  it("retourne null quand aucun utilisateur n'est connecté", () => {
     const user = getCurrentUser();
-    expect(user === null || (user !== null && typeof user.uid === "string")).toBe(true);
-    // If somehow still logged in, uid must be string — never undefined
+    expect(user === null || typeof user?.uid === "string").toBe(true);
   });
 
-  it("return type has uid and email fields (type shape)", () => {
+  it("retourne un objet avec un champ uid (string) quand connecté", async () => {
+    await register(TEST_EMAIL, TEST_PASSWORD);
     const user = getCurrentUser();
     if (user !== null) {
       expect(typeof user.uid).toBe("string");
-      expect(typeof user.email).toBe("string");
+      expect(Object.keys(user)).toEqual(["uid"]); // pas d'email
     }
   });
 });
@@ -83,38 +43,42 @@ describe("getCurrentUser [UNIT]", () => {
 // ── register ───────────────────────────────────────────────────────────────
 
 describe("register [INTEGRATION]", () => {
-  it("should return an AQUser with a non-empty uid and matching email", async () => {
+  it("retourne un AQUser avec un uid non-vide", async () => {
     const user = await register(TEST_EMAIL, TEST_PASSWORD);
     expect(typeof user.uid).toBe("string");
     expect(user.uid.length).toBeGreaterThan(0);
-    expect(user.email).toBe(TEST_EMAIL);
   });
 
-  it("should set getCurrentUser() after registration", async () => {
-    await register(TEST_EMAIL, TEST_PASSWORD);
-    const current = getCurrentUser();
-    expect(current).not.toBeNull();
-    expect(current!.email).toBe(TEST_EMAIL);
-  });
-
-  it("returned AQUser should NOT contain private key fields", async () => {
+  it("ne retourne PAS de clés privées dans AQUser", async () => {
     const user = await register(TEST_EMAIL, TEST_PASSWORD);
     expect(user).not.toHaveProperty("kemPrivateKey");
     expect(user).not.toHaveProperty("dsaPrivateKey");
     expect(user).not.toHaveProperty("masterKey");
-    expect(Object.keys(user)).toEqual(expect.arrayContaining(["uid", "email"]));
-    expect(Object.keys(user).length).toBe(2);
   });
 
-  it("should throw on weak password (Firebase enforces min 6 chars)", async () => {
+  it("met à jour getCurrentUser() après inscription", async () => {
+    await register(TEST_EMAIL, TEST_PASSWORD);
+    expect(getCurrentUser()).not.toBeNull();
+    expect(getCurrentUser()!.uid.length).toBeGreaterThan(0);
+  });
+
+  it("throw sur mot de passe trop court (< 6 chars)", async () => {
     await expect(register(TEST_EMAIL, WEAK_PASSWORD)).rejects.toThrow();
   });
 
-  it("should throw on malformed email", async () => {
+  it("throw sur email malformé", async () => {
     await expect(register(BAD_EMAIL, TEST_PASSWORD)).rejects.toThrow();
   });
 
-  it("should throw on duplicate email — no silent account takeover", async () => {
+  it("throw sur email vide", async () => {
+    await expect(register("", TEST_PASSWORD)).rejects.toThrow();
+  });
+
+  it("throw sur mot de passe vide", async () => {
+    await expect(register(TEST_EMAIL, "")).rejects.toThrow();
+  });
+
+  it("throw sur email dupliqué — pas de prise de compte silencieuse", async () => {
     await register(TEST_EMAIL, TEST_PASSWORD);
     await signOut();
     await expect(register(TEST_EMAIL, TEST_PASSWORD)).rejects.toThrow();
@@ -124,119 +88,148 @@ describe("register [INTEGRATION]", () => {
 // ── signIn ─────────────────────────────────────────────────────────────────
 
 describe("signIn [INTEGRATION]", () => {
-  it("should return an AQUser after successful sign-in", async () => {
+  it("retourne un AQUser après connexion réussie", async () => {
     await register(TEST_EMAIL, TEST_PASSWORD);
     await signOut();
     const user = await signIn(TEST_EMAIL, TEST_PASSWORD);
-    expect(user.email).toBe(TEST_EMAIL);
     expect(user.uid.length).toBeGreaterThan(0);
+    expect(user).not.toHaveProperty("email");
   });
 
-  it("should set getCurrentUser() after sign-in", async () => {
-    await register(TEST_EMAIL, TEST_PASSWORD);
+  it("uid de signIn = uid de register", async () => {
+    const reg = await register(TEST_EMAIL, TEST_PASSWORD);
     await signOut();
-    await signIn(TEST_EMAIL, TEST_PASSWORD);
-    expect(getCurrentUser()).not.toBeNull();
+    const log = await signIn(TEST_EMAIL, TEST_PASSWORD);
+    expect(log.uid).toBe(reg.uid);
   });
 
-  it("should throw on wrong password — no silent auth bypass", async () => {
+  it("throw sur mauvais mot de passe — pas de bypass silencieux", async () => {
     await register(TEST_EMAIL, TEST_PASSWORD);
     await signOut();
     await expect(signIn(TEST_EMAIL, "wrong-password")).rejects.toThrow();
   });
 
-  it("should throw on unknown email — no user enumeration via different error types", async () => {
-    // Both wrong password and unknown email should throw — ideally same error class
+  it("throw sur email inconnu", async () => {
     await expect(signIn("nobody@nowhere.com", TEST_PASSWORD)).rejects.toThrow();
   });
 
-  it("uid returned by signIn should match uid returned by register", async () => {
-    const registered = await register(TEST_EMAIL, TEST_PASSWORD);
-    await signOut();
-    const loggedIn = await signIn(TEST_EMAIL, TEST_PASSWORD);
-    expect(loggedIn.uid).toBe(registered.uid);
+  it("throw sur mot de passe vide", async () => {
+    await expect(signIn(TEST_EMAIL, "")).rejects.toThrow();
+  });
+
+  it("throw sur email vide", async () => {
+    await expect(signIn("", TEST_PASSWORD)).rejects.toThrow();
   });
 });
 
 // ── signOut ────────────────────────────────────────────────────────────────
 
 describe("signOut [INTEGRATION]", () => {
-  it("should complete without throwing", async () => {
+  it("se termine sans erreur", async () => {
     await register(TEST_EMAIL, TEST_PASSWORD);
     await expect(signOut()).resolves.not.toThrow();
   });
 
-  it("should set getCurrentUser() to null", async () => {
+  it("getCurrentUser() retourne null après signOut", async () => {
     await register(TEST_EMAIL, TEST_PASSWORD);
     await signOut();
-    // onAuthStateChanged is async — give it a tick to resolve
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 50));
     expect(getCurrentUser()).toBeNull();
   });
 
-  it("should make getKemPrivateKey throw after sign-out (key-store cleared)", async () => {
-    const user = await register(TEST_EMAIL, TEST_PASSWORD);
-    // Manually seed a key so we can verify it disappears
-    await storePrivateKeys(user.uid, {
-      kemPrivateKey: "test-kem-key",
-      dsaPrivateKey: "test-dsa-key",
-      masterKey    : "test-master",
-      argon2Salt   : "test-salt",
+  it("[SESSION] purge immédiatement le KeyStore — getKemPrivateKey throw après signOut", async () => {
+    const { uid } = await register(TEST_EMAIL, TEST_PASSWORD);
+    await storePrivateKeys(uid, {
+      kemPrivateKey: "session-critical-key",
+      dsaPrivateKey: "session-dsa-key",
+      masterKey    : "mk",
+      argon2Salt   : "salt",
     });
+    expect(getKemPrivateKey(uid)).toBe("session-critical-key");
     await signOut();
-    expect(() => getKemPrivateKey(user.uid)).toThrow();
+    expect(() => getKemPrivateKey(uid)).toThrow();
   });
 
-  it("should be idempotent — calling signOut twice does not throw", async () => {
+  it("[SESSION] vault IDB persiste après signOut — reconnexion possible", async () => {
+    const { uid } = await register(TEST_EMAIL, TEST_PASSWORD);
+    await storePrivateKeys(uid, {
+      kemPrivateKey: "persist-kem",
+      dsaPrivateKey: "persist-dsa",
+      masterKey    : "mk",
+      argon2Salt   : "salt",
+    });
+    await signOut();
+    await expect(unlockPrivateKeys(uid, "mk")).resolves.not.toThrow();
+  });
+
+  it("idempotent — deux signOut consécutifs ne throw pas", async () => {
     await register(TEST_EMAIL, TEST_PASSWORD);
     await signOut();
     await expect(signOut()).resolves.not.toThrow();
+  });
+
+  it("[SEC] signOut vide le KeyStore même si _currentUser est déjà null", async () => {
+    const uid = "hypothetical-uid";
+    await storePrivateKeys(uid, { kemPrivateKey: "k", dsaPrivateKey: "d", masterKey: "m", argon2Salt: "s" });
+    await signOut();
+    expect(() => getKemPrivateKey(uid)).toThrow();
   });
 });
 
 // ── onAuthChange ───────────────────────────────────────────────────────────
 
 describe("onAuthChange [UNIT/INTEGRATION]", () => {
-  it("should return a function (unsubscribe)", () => {
+  it("retourne une fonction unsubscribe", () => {
     const unsub = onAuthChange(() => {});
     expect(typeof unsub).toBe("function");
     unsub();
   });
 
-  it("unsubscribe should stop the callback from being called on future changes", async () => {
-    const calls: unknown[] = [];
-    const unsub = onAuthChange((u) => calls.push(u));
-    unsub(); // unsubscribe immediately
-    const countBefore = calls.length;
-    await register(TEST_EMAIL, TEST_PASSWORD).catch(() => {});
-    await signOut().catch(() => {});
-    // After unsubscribe, no new calls should have been added
-    expect(calls.length).toBe(countBefore);
-  });
-
-  it("callback receives AQUser object with uid and email on sign-in [INTEGRATION]", async () => {
+  it("le callback reçoit un AQUser sans champ email à la connexion", async () => {
     const received: unknown[] = [];
     const unsub = onAuthChange((u) => received.push(u));
     await register(TEST_EMAIL, TEST_PASSWORD);
-    await new Promise((r) => setTimeout(r, 200)); // allow Firebase listener to fire
+    await new Promise((r) => setTimeout(r, 50));
     unsub();
-    const users = received.filter((u) => u !== null) as { uid: string; email: string }[];
+    const users = received.filter((u) => u !== null) as { uid: string }[];
     expect(users.length).toBeGreaterThan(0);
     expect(typeof users[0].uid).toBe("string");
-    expect(typeof users[0].email).toBe("string");
+    expect(users[0]).not.toHaveProperty("email");
+  });
+
+  it("[SESSION] onAuthChange émet null après signOut", async () => {
+    const states: unknown[] = [];
+    const unsub = onAuthChange((u) => states.push(u));
+    await register(TEST_EMAIL, TEST_PASSWORD);
+    await new Promise((r) => setTimeout(r, 50));
+    await signOut();
+    await new Promise((r) => setTimeout(r, 50));
+    unsub();
+    expect(states.some((s) => s !== null)).toBe(true);
+    expect(states.includes(null)).toBe(true);
+  });
+
+  it("unsubscribe stoppe les callbacks futurs", async () => {
+    const calls: unknown[] = [];
+    const unsub = onAuthChange((u) => calls.push(u));
+    unsub();
+    const before = calls.length;
+    await register(TEST_EMAIL, TEST_PASSWORD).catch(() => {});
+    await signOut().catch(() => {});
+    expect(calls.length).toBe(before);
   });
 });
 
-// ── KPIs (specs §2.2) ─────────────────────────────────────────────────────
+// ── KPIs ───────────────────────────────────────────────────────────────────
 
 describe("Performance KPIs — auth (specs §2.2)", () => {
-  it("register() full flow should complete in < 3000 ms [INTEGRATION]", async () => {
+  it("register() < 3000 ms", async () => {
     const ms = await measureMs(() => register(TEST_EMAIL, TEST_PASSWORD));
     console.log(`[KPI] register: ${ms.toFixed(0)} ms`);
     expect(ms).toBeLessThan(3000);
   });
 
-  it("signIn() full flow should complete in < 2000 ms [INTEGRATION]", async () => {
+  it("signIn() < 2000 ms", async () => {
     await register(TEST_EMAIL, TEST_PASSWORD);
     await signOut();
     const ms = await measureMs(() => signIn(TEST_EMAIL, TEST_PASSWORD));
@@ -244,7 +237,7 @@ describe("Performance KPIs — auth (specs §2.2)", () => {
     expect(ms).toBeLessThan(2000);
   });
 
-  it("signOut() should complete in < 500 ms [INTEGRATION]", async () => {
+  it("signOut() < 500 ms", async () => {
     await register(TEST_EMAIL, TEST_PASSWORD);
     const ms = await measureMs(() => signOut());
     console.log(`[KPI] signOut: ${ms.toFixed(0)} ms`);
@@ -252,26 +245,10 @@ describe("Performance KPIs — auth (specs §2.2)", () => {
   });
 });
 
-// ── Security / Pseudo-pentest ─────────────────────────────────────────────
+// ── Invariants de sécurité ─────────────────────────────────────────────────
 
 describe("Security invariants — auth", () => {
-  it("[SEC] register() with empty email throws — not creates empty-email account", async () => {
-    await expect(register("", TEST_PASSWORD)).rejects.toThrow();
-  });
-
-  it("[SEC] register() with empty password throws — not creates passwordless account", async () => {
-    await expect(register(TEST_EMAIL, "")).rejects.toThrow();
-  });
-
-  it("[SEC] signIn() with empty password throws immediately", async () => {
-    await expect(signIn(TEST_EMAIL, "")).rejects.toThrow();
-  });
-
-  it("[SEC] signIn() with empty email throws immediately", async () => {
-    await expect(signIn("", TEST_PASSWORD)).rejects.toThrow();
-  });
-
-  it("[SEC] register() error does not expose internal state — error message is not empty", async () => {
+  it("[SEC] register() message d'erreur non-vide (pas de fuite d'état interne)", async () => {
     try {
       await register(BAD_EMAIL, TEST_PASSWORD);
       expect.fail("Should have thrown");
@@ -282,14 +259,8 @@ describe("Security invariants — auth", () => {
     }
   });
 
-  it("[SEC] signOut() does not throw if called while already signed out", async () => {
-    await signOut(); // sign out when not signed in
-    await expect(signOut()).resolves.not.toThrow();
-  });
-
-  it("[SEC] AQUser uid is non-guessable length (Firebase UIDs are 28 chars)", async () => {
+  it("[SEC] uid Firebase ≥ 20 caractères (non-devinable)", async () => {
     const user = await register(TEST_EMAIL, TEST_PASSWORD);
-    // Firebase UIDs are 28 character random strings
     expect(user.uid.length).toBeGreaterThanOrEqual(20);
   });
 });

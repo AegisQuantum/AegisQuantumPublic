@@ -330,7 +330,7 @@ export async function sendMessage(
   await addDoc(messagesCol(convId), {
     conversationId : convId,
     senderUid      : myUid,
-    ciphertext     : btoa(plaintext), // Base64 du plaintext, PAS du chiffrement
+    ciphertext: btoa(String.fromCodePoint(...new TextEncoder().encode(plaintext))), // Base64 du plaintext, PAS du chiffrement
     nonce          : "",
     kemCiphertext  : "",
     signature      : "",

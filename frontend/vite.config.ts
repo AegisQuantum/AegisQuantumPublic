@@ -9,15 +9,21 @@ export default defineConfig({
   },
   test: {
     globals: true,
+    // node pour les tests crypto (WASM), jsdom pour les tests services (IndexedDB + Firebase)
     environment: "node",
+    environmentMatchGlobs: [
+      ["src/services/__tests__/**", "jsdom"],
+    ],
+    // Setup : fake-indexeddb + mocks Firebase (auth + firestore)
+    setupFiles: ["src/services/__tests__/setup.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "html"],
-      include: ["src/crypto/**/*.ts"],
+      include: ["src/crypto/**/*.ts", "src/services/**/*.ts"],
       thresholds: {
-        lines: 80,
-        functions: 80,
-        branches: 80,
+        lines     : 80,
+        functions : 80,
+        branches  : 80,
         statements: 80,
       },
     },

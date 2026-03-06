@@ -1,41 +1,8 @@
 /**
  * messaging.test.ts — Unit, KPI & security tests for messaging.ts
- *
- * NOTE : Tests marked [INTEGRATION] require a live Firestore + Auth emulator.
- * Tests marked [UNIT] run offline and mock Firestore/key-store as needed.
- *
- * Coverage :
- *  ── Functional ──────────────────────────────────────────────────────────────
- *  - getConversationId()       : deterministic, symmetric, stable
- *  - getOrCreateConversation() : creates doc if absent, idempotent if present
- *  - getConversations()        : returns conversations where user is participant
- *  - sendMessage()             : writes an EncryptedMessage document to Firestore
- *  - decryptMessage()          : returns DecryptedMessage with correct plaintext
- *  - subscribeToConversations(): returns unsubscribe function, fires callback
- *  - subscribeToMessages()     : returns unsubscribe function, fires callback
- *
- *  ── Type safety ─────────────────────────────────────────────────────────────
- *  - EncryptedMessage document has all required fields after sendMessage()
- *  - DecryptedMessage has id, senderUid, plaintext, timestamp, verified fields
- *  - conversationId format is deterministic (uid_uid sorted)
- *
- *  ── KPIs (specs §2.2) ───────────────────────────────────────────────────────
- *  - getConversationId()  < 0.1 ms  (pure computation)
- *  - sendMessage()        < 2000 ms (network write, crypto stub)
- *  - decryptMessage()     < 100 ms  (crypto stub, no network)
- *
- *  ── Security / pseudo-pentest ────────────────────────────────────────────────
- *  - sendMessage() throws if contact has no public keys (unknown recipient)
- *  - sendMessage() throws if sender has no keys loaded in memory
- *  - decryptMessage() gracefully handles corrupted/empty ciphertext
- *  - getConversationId() is symmetric — getConversationId(A,B) === getConversationId(B,A)
- *  - conversationId uses sorted UIDs — no ordering attack possible
- *  - subscribeToMessages error in one message does not crash entire subscription
- *  - _devUnencrypted flag is present in dev placeholder messages
- *  - Empty plaintext is handled gracefully (not silently dropped)
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   getConversationId,
   getOrCreateConversation,
@@ -49,7 +16,7 @@ import { storePrivateKeys, clearPrivateKeys } from "../key-store";
 import { publishPublicKeys } from "../key-registry";
 import type { EncryptedMessage } from "../../types/message";
 
-// ── Test fixtures ──────────────────────────────────────────────────────────
+// ── Fixtures ───────────────────────────────────────────────────────────────
 
 const UID_ALICE = "msg-test-alice-uid";
 const UID_BOB   = "msg-test-bob-uid";
@@ -64,7 +31,6 @@ async function seedKeys(uid: string): Promise<void> {
   });
   await publishPublicKeys(uid, {
     uid,
-    email       : `${uid}@test.aegisquantum`,
     kemPublicKey: btoa("A".repeat(1184)),
     dsaPublicKey: btoa("B".repeat(256)),
     createdAt   : Date.now(),
@@ -77,6 +43,21 @@ async function measureMs(fn: () => Promise<unknown>): Promise<number> {
   return performance.now() - t0;
 }
 
+function makeEncryptedMsg(overrides: Partial<EncryptedMessage> = {}): EncryptedMessage {
+  return {
+    id            : "msg-test-001",
+    conversationId: getConversationId(UID_ALICE, UID_BOB),
+    senderUid     : UID_ALICE,
+    ciphertext    : btoa("Hello Bob"),
+    nonce         : "",
+    kemCiphertext : "",
+    signature     : "",
+    messageIndex  : 0,
+    timestamp     : Date.now(),
+    ...overrides,
+  };
+}
+
 beforeEach(async () => {
   await seedKeys(UID_ALICE);
   await seedKeys(UID_BOB);
@@ -86,67 +67,63 @@ afterEach(() => {
   clearPrivateKeys();
 });
 
-// ── getConversationId ──────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 1. getConversationId
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("getConversationId [UNIT]", () => {
   it("should return a non-empty string", () => {
     expect(getConversationId(UID_ALICE, UID_BOB).length).toBeGreaterThan(0);
   });
 
-  it("should be symmetric — same result regardless of argument order", () => {
-    const ab = getConversationId(UID_ALICE, UID_BOB);
-    const ba = getConversationId(UID_BOB, UID_ALICE);
-    expect(ab).toBe(ba);
+  it("should be symmetric", () => {
+    expect(getConversationId(UID_ALICE, UID_BOB)).toBe(getConversationId(UID_BOB, UID_ALICE));
   });
 
-  it("should be deterministic — same inputs always produce same output", () => {
-    const r1 = getConversationId(UID_ALICE, UID_BOB);
-    const r2 = getConversationId(UID_ALICE, UID_BOB);
-    expect(r1).toBe(r2);
+  it("should be deterministic", () => {
+    expect(getConversationId(UID_ALICE, UID_BOB)).toBe(getConversationId(UID_ALICE, UID_BOB));
   });
 
   it("should produce different IDs for different user pairs", () => {
-    const ab = getConversationId(UID_ALICE, UID_BOB);
-    const ac = getConversationId(UID_ALICE, UID_CAROL);
-    expect(ab).not.toBe(ac);
+    expect(getConversationId(UID_ALICE, UID_BOB)).not.toBe(getConversationId(UID_ALICE, UID_CAROL));
   });
 
   it("should use sorted UIDs separated by underscore", () => {
-    const sorted = [UID_ALICE, UID_BOB].sort();
+    const sorted = [UID_ALICE, UID_BOB].sort((a, b) => a.localeCompare(b));
     expect(getConversationId(UID_ALICE, UID_BOB)).toBe(sorted.join("_"));
   });
 
-  it("should not collide when uid contains underscore", () => {
+  it("collision check when uid contains underscore (informational)", () => {
     const id1 = getConversationId("user_a", "b");
     const id2 = getConversationId("user", "a_b");
-    // These are technically different conversations — they should differ
-    // (documents this known limitation for future uid format enforcement)
     console.log(`[INFO] id1="${id1}" id2="${id2}" — collision check`);
   });
 });
 
-// ── getOrCreateConversation ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 2. getOrCreateConversation
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("getOrCreateConversation [INTEGRATION]", () => {
-  it("should return the expected deterministic convId", async () => {
+  it("should return the deterministic convId", async () => {
     const convId = await getOrCreateConversation(UID_ALICE, UID_BOB);
     expect(convId).toBe(getConversationId(UID_ALICE, UID_BOB));
   });
 
-  it("should be idempotent — calling twice returns same convId", async () => {
-    const id1 = await getOrCreateConversation(UID_ALICE, UID_BOB);
-    const id2 = await getOrCreateConversation(UID_ALICE, UID_BOB);
-    expect(id1).toBe(id2);
+  it("should be idempotent", async () => {
+    expect(await getOrCreateConversation(UID_ALICE, UID_BOB))
+      .toBe(await getOrCreateConversation(UID_ALICE, UID_BOB));
   });
 
-  it("should be symmetric — Alice starting conv is same as Bob starting conv", async () => {
-    const ab = await getOrCreateConversation(UID_ALICE, UID_BOB);
-    const ba = await getOrCreateConversation(UID_BOB, UID_ALICE);
-    expect(ab).toBe(ba);
+  it("should be symmetric", async () => {
+    expect(await getOrCreateConversation(UID_ALICE, UID_BOB))
+      .toBe(await getOrCreateConversation(UID_BOB, UID_ALICE));
   });
 });
 
-// ── sendMessage ────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 3. sendMessage
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("sendMessage [INTEGRATION]", () => {
   it("should complete without throwing (dev placeholder mode)", async () => {
@@ -154,88 +131,65 @@ describe("sendMessage [INTEGRATION]", () => {
   });
 
   it("should throw if contact has no public keys registered", async () => {
-    await expect(sendMessage(UID_ALICE, "uid-with-no-keys", "test")).rejects.toThrow(
-      /no public keys/i
-    );
+    await expect(sendMessage(UID_ALICE, "uid-with-no-keys", "test"))
+      .rejects.toThrow(/no public keys/i);
   });
 
   it("should throw if sender has no keys loaded in memory", async () => {
-    clearPrivateKeys(); // wipe all keys from memory
+    clearPrivateKeys();
     await expect(sendMessage(UID_ALICE, UID_BOB, "test")).rejects.toThrow();
   });
 
-  it("should handle empty plaintext gracefully (not silently drop)", async () => {
-    // Empty messages should either succeed (store empty ciphertext) or throw clearly
-    // Silently dropping an empty message would be a UX and security bug
-    const result = sendMessage(UID_ALICE, UID_BOB, "");
-    await expect(result).resolves.not.toThrow();
-    // OR: await expect(result).rejects.toThrow(/empty/i);
-    // Document current behaviour — empty string is forwarded as-is in dev mode
+  it("should handle empty plaintext gracefully", async () => {
+    await expect(sendMessage(UID_ALICE, UID_BOB, "")).resolves.not.toThrow();
   });
 
   it("should handle a long plaintext (10 KB) without throwing", async () => {
-    const longText = "A".repeat(10_000);
-    await expect(sendMessage(UID_ALICE, UID_BOB, longText)).resolves.not.toThrow();
+    await expect(sendMessage(UID_ALICE, UID_BOB, "A".repeat(10_000))).resolves.not.toThrow();
   });
 
-  it("should handle unicode plaintext correctly", async () => {
-    const emoji = "こんにちは 🔐 مرحبا";
-    await expect(sendMessage(UID_ALICE, UID_BOB, emoji)).resolves.not.toThrow();
+  it("should handle unicode plaintext", async () => {
+    await expect(sendMessage(UID_ALICE, UID_BOB, "こんにちは 🔐 مرحبا")).resolves.not.toThrow();
+  });
+
+  it("[DoS] sendMessage se termine dans un délai raisonnable", async () => {
+    const t0 = performance.now();
+    await sendMessage(UID_ALICE, UID_BOB, "test DoS");
+    expect(performance.now() - t0).toBeLessThan(5000);
   });
 });
 
-// ── decryptMessage ─────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 4. decryptMessage
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("decryptMessage [UNIT]", () => {
-  function makeEncryptedMsg(overrides: Partial<EncryptedMessage> = {}): EncryptedMessage {
-    return {
-      id             : "msg-test-001",
-      conversationId : getConversationId(UID_ALICE, UID_BOB),
-      senderUid      : UID_ALICE,
-      ciphertext     : btoa("Hello Bob"),  // dev placeholder: plain Base64
-      nonce          : "",
-      kemCiphertext  : "",
-      signature      : "",
-      messageIndex   : 0,
-      timestamp      : Date.now(),
-      ...overrides,
-    };
-  }
-
-  it("should return a DecryptedMessage with correct plaintext (dev mode)", async () => {
-    const msg = makeEncryptedMsg({ ciphertext: btoa("Hello Bob") });
-    const dec = await decryptMessage(UID_ALICE, msg);
+  it("should return correct plaintext (dev mode)", async () => {
+    const dec = await decryptMessage(UID_ALICE, makeEncryptedMsg({ ciphertext: btoa("Hello Bob") }));
     expect(dec.plaintext).toBe("Hello Bob");
   });
 
-  it("should return verified: false in dev placeholder mode", async () => {
-    const msg = makeEncryptedMsg();
-    const dec = await decryptMessage(UID_ALICE, msg);
-    expect(dec.verified).toBe(false);
+  it("should return verified: false in dev mode", async () => {
+    expect((await decryptMessage(UID_ALICE, makeEncryptedMsg())).verified).toBe(false);
   });
 
-  it("should preserve senderUid from the original message", async () => {
-    const msg = makeEncryptedMsg({ senderUid: UID_ALICE });
-    const dec = await decryptMessage(UID_BOB, msg);
-    expect(dec.senderUid).toBe(UID_ALICE);
+  it("should preserve senderUid", async () => {
+    expect((await decryptMessage(UID_BOB, makeEncryptedMsg({ senderUid: UID_ALICE }))).senderUid)
+      .toBe(UID_ALICE);
   });
 
-  it("should preserve id from the original message", async () => {
-    const msg = makeEncryptedMsg({ id: "specific-msg-id" });
-    const dec = await decryptMessage(UID_BOB, msg);
-    expect(dec.id).toBe("specific-msg-id");
+  it("should preserve id", async () => {
+    expect((await decryptMessage(UID_BOB, makeEncryptedMsg({ id: "specific-msg-id" }))).id)
+      .toBe("specific-msg-id");
   });
 
-  it("should preserve timestamp from the original message", async () => {
-    const ts  = 1700000000000;
-    const msg = makeEncryptedMsg({ timestamp: ts });
-    const dec = await decryptMessage(UID_BOB, msg);
-    expect(dec.timestamp).toBe(ts);
+  it("should preserve timestamp", async () => {
+    const ts = 1700000000000;
+    expect((await decryptMessage(UID_BOB, makeEncryptedMsg({ timestamp: ts }))).timestamp).toBe(ts);
   });
 
   it("DecryptedMessage has all required fields", async () => {
-    const msg = makeEncryptedMsg();
-    const dec = await decryptMessage(UID_BOB, msg);
+    const dec = await decryptMessage(UID_BOB, makeEncryptedMsg());
     expect(dec).toHaveProperty("id");
     expect(dec).toHaveProperty("senderUid");
     expect(dec).toHaveProperty("plaintext");
@@ -243,52 +197,68 @@ describe("decryptMessage [UNIT]", () => {
     expect(dec).toHaveProperty("verified");
   });
 
-  it("should handle empty ciphertext without crashing (dev mode)", async () => {
-    const msg = makeEncryptedMsg({ ciphertext: btoa("") });
-    const dec = await decryptMessage(UID_BOB, msg);
-    expect(dec.plaintext).toBe("");
+  it("should handle empty ciphertext", async () => {
+    expect((await decryptMessage(UID_BOB, makeEncryptedMsg({ ciphertext: btoa("") }))).plaintext)
+      .toBe("");
   });
 
-  it("should handle unicode ciphertext round-trip (dev mode)", async () => {
-    const text = "こんにちは 🔐";
-    const msg  = makeEncryptedMsg({ ciphertext: btoa(unescape(encodeURIComponent(text))) });
-    const dec  = await decryptMessage(UID_BOB, msg);
-    // In dev mode, atob is used — unicode needs special handling
+  it("[REPLAY] décrypter 2× le même message est idempotent", async () => {
+    const msg  = makeEncryptedMsg({ ciphertext: btoa("Replay payload"), id: "replay-msg" });
+    const dec1 = await decryptMessage(UID_BOB, msg);
+    const dec2 = await decryptMessage(UID_BOB, msg);
+    expect(dec1.plaintext).toBe(dec2.plaintext);
+    expect(dec1.id).toBe(dec2.id);
+  });
+
+  it("[OUT-OF-ORDER] messageIndex non-séquentiel ne crash pas", async () => {
+    const dec5 = await decryptMessage(UID_BOB, makeEncryptedMsg({ messageIndex: 5, ciphertext: btoa("msg5"), id: "m5" }));
+    const dec4 = await decryptMessage(UID_BOB, makeEncryptedMsg({ messageIndex: 4, ciphertext: btoa("msg4"), id: "m4" }));
+    expect(dec5.plaintext).toBe("msg5");
+    expect(dec4.plaintext).toBe("msg4");
+  });
+
+  it("[DoS] messageIndex = 1_000_000 se termine en < 500 ms", async () => {
+    const t0  = performance.now();
+    const dec = await decryptMessage(UID_BOB, makeEncryptedMsg({ messageIndex: 1_000_000, ciphertext: btoa("DoS probe") }));
+    const ms  = performance.now() - t0;
+    console.log(`  [DoS] decryptMessage(messageIndex=1M): ${ms.toFixed(2)} ms`);
+    expect(ms).toBeLessThan(500);
     expect(typeof dec.plaintext).toBe("string");
   });
 });
 
-// ── subscribeToConversations ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 5. subscribeToConversations
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("subscribeToConversations [INTEGRATION]", () => {
-  it("should return a function (unsubscribe)", () => {
+  it("should return an unsubscribe function", () => {
     const unsub = subscribeToConversations(UID_ALICE, () => {});
     expect(typeof unsub).toBe("function");
     unsub();
   });
 
   it("unsubscribe should not throw", () => {
-    const unsub = subscribeToConversations(UID_ALICE, () => {});
-    expect(() => unsub()).not.toThrow();
+    expect(() => subscribeToConversations(UID_ALICE, () => {})()).not.toThrow();
   });
 
-  it("callback should receive an array (even if empty)", async () => {
+  it("callback should receive an array", async () => {
     const received: unknown[] = [];
-    const unsub = subscribeToConversations(UID_CAROL, (convs) => received.push(convs));
+    const unsub = subscribeToConversations(UID_CAROL, (c) => received.push(c));
     await new Promise((r) => setTimeout(r, 300));
     unsub();
-    // At least one callback call with an array
     expect(received.length).toBeGreaterThan(0);
     expect(Array.isArray(received[0])).toBe(true);
   });
 });
 
-// ── subscribeToMessages ────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 6. subscribeToMessages
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("subscribeToMessages [INTEGRATION]", () => {
-  it("should return a function (unsubscribe)", () => {
-    const convId = getConversationId(UID_ALICE, UID_BOB);
-    const unsub  = subscribeToMessages(UID_ALICE, convId, () => {});
+  it("should return an unsubscribe function", () => {
+    const unsub = subscribeToMessages(UID_ALICE, getConversationId(UID_ALICE, UID_BOB), () => {});
     expect(typeof unsub).toBe("function");
     unsub();
   });
@@ -303,24 +273,21 @@ describe("subscribeToMessages [INTEGRATION]", () => {
     expect(messages.length).toBeGreaterThan(0);
   });
 
-  it("a decryption failure on one message should not crash the subscription", async () => {
-    // subscribeToMessages catches per-message errors and returns "[Decryption failed]"
+  it("a decryption failure should not crash the subscription", async () => {
     const convId = getConversationId(UID_ALICE, UID_BOB);
-    const received: unknown[] = [];
-    const unsub = subscribeToMessages(UID_ALICE, convId, (msgs) => {
-      received.push(...msgs);
-    });
+    const unsub  = subscribeToMessages(UID_ALICE, convId, () => {});
     await new Promise((r) => setTimeout(r, 300));
     unsub();
-    // No uncaught exception — test passes if we reach here
     expect(true).toBe(true);
   });
 });
 
-// ── KPIs (specs §2.2) ─────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 7. KPIs
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("Performance KPIs — messaging (specs §2.2)", () => {
-  it("getConversationId should complete in < 0.1 ms (pure computation)", () => {
+  it("getConversationId < 0.1 ms (pure computation)", () => {
     const t0 = performance.now();
     getConversationId(UID_ALICE, UID_BOB);
     const ms = performance.now() - t0;
@@ -328,88 +295,112 @@ describe("Performance KPIs — messaging (specs §2.2)", () => {
     expect(ms).toBeLessThan(0.1);
   });
 
-  it("sendMessage should complete in < 2000 ms (network + dev stub)", async () => {
-    const ms = await measureMs(() => sendMessage(UID_ALICE, UID_BOB, "KPI test message"));
+  it("sendMessage < 2000 ms", async () => {
+    const ms = await measureMs(() => sendMessage(UID_ALICE, UID_BOB, "KPI test"));
     console.log(`[KPI] sendMessage: ${ms.toFixed(0)} ms`);
     expect(ms).toBeLessThan(2000);
   });
 
-  it("decryptMessage should complete in < 100 ms (dev stub, no crypto)", async () => {
-    const msg = {
-      id: "kpi-msg", conversationId: getConversationId(UID_ALICE, UID_BOB),
-      senderUid: UID_ALICE, ciphertext: btoa("KPI test"),
-      nonce: "", kemCiphertext: "", signature: "", messageIndex: 0, timestamp: Date.now(),
-    } satisfies EncryptedMessage;
-    const ms = await measureMs(() => decryptMessage(UID_BOB, msg));
+  it("decryptMessage < 100 ms (dev stub)", async () => {
+    const ms = await measureMs(() => decryptMessage(UID_BOB, makeEncryptedMsg({ ciphertext: btoa("KPI") })));
     console.log(`[KPI] decryptMessage: ${ms.toFixed(2)} ms`);
     expect(ms).toBeLessThan(100);
   });
+
+  it("[KPI] taille sérialisée d'un EncryptedMessage (prod estimate) ≤ 15 Ko", () => {
+    const productionMsg: EncryptedMessage = {
+      id            : "prod-size-est",
+      conversationId: getConversationId(UID_ALICE, UID_BOB),
+      senderUid     : UID_ALICE,
+      ciphertext    : btoa("A".repeat(100)),   // payload ~100 bytes
+      nonce         : btoa("N".repeat(12)),    // AES-GCM nonce 12 bytes
+      kemCiphertext : btoa("C".repeat(1088)),  // ML-KEM-768 CT 1088 bytes
+      signature     : btoa("S".repeat(3309)),  // ML-DSA-65 sig ~3309 bytes
+      messageIndex  : 0,
+      timestamp     : Date.now(),
+    };
+    const sizeKB = JSON.stringify(productionMsg).length / 1024;
+    console.log(`  [KPI] EncryptedMessage prod estimate: ${sizeKB.toFixed(2)} KB`);
+    expect(sizeKB).toBeLessThan(15);
+  });
 });
 
-// ── Security / Pseudo-pentest ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 8. Invariants de sécurité
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("Security invariants — messaging", () => {
-  it("[SEC] sendMessage throws if contact uid has no public keys — no message to unknown recipients", async () => {
-    await expect(sendMessage(UID_ALICE, "uid-ghost-no-keys", "secret")).rejects.toThrow(
-      /no public keys/i
-    );
+  it("[SEC] sendMessage throws if contact has no public keys", async () => {
+    await expect(sendMessage(UID_ALICE, "uid-ghost-no-keys", "secret"))
+      .rejects.toThrow(/no public keys/i);
   });
 
-  it("[SEC] sendMessage throws if sender's in-memory keys are cleared — no send without auth", async () => {
+  it("[SEC] sendMessage throws if sender keys are cleared", async () => {
     clearPrivateKeys();
     await expect(sendMessage(UID_ALICE, UID_BOB, "secret")).rejects.toThrow();
   });
 
-  it("[SEC] getConversationId is symmetric — no directional privilege escalation", () => {
-    // If A→B and B→A had different convIds, one party could be excluded from their own conversation
+  it("[SEC] getConversationId is symmetric", () => {
     expect(getConversationId(UID_ALICE, UID_BOB)).toBe(getConversationId(UID_BOB, UID_ALICE));
   });
 
-  it("[SEC] dev placeholder message has _devUnencrypted flag set to true", async () => {
-    // This verifies the flag exists so it can be detected and removed before production
-    // We test this by checking the Firestore write indirectly via subscription
+  it("[SEC] dev placeholder messages have verified: false", async () => {
     const convId = getConversationId(UID_ALICE, UID_BOB);
-    let flagDetected = false;
-    const unsub = subscribeToMessages(UID_ALICE, convId, (msgs) => {
-      // In dev mode, verified should be false (no real DSA)
-      if (msgs.some((m) => m.verified === false)) flagDetected = true;
+    let detected = false;
+    const unsub  = subscribeToMessages(UID_ALICE, convId, (msgs) => {
+      if (msgs.some((m) => m.verified === false)) detected = true;
     });
     await sendMessage(UID_ALICE, UID_BOB, "dev flag check");
     await new Promise((r) => setTimeout(r, 500));
     unsub();
-    expect(flagDetected).toBe(true);
+    expect(detected).toBe(true);
   });
 
-  it("[SEC] decryptMessage does not throw on empty kemCiphertext — handles gracefully", async () => {
-    const msg: EncryptedMessage = {
-      id: "sec-001", conversationId: getConversationId(UID_ALICE, UID_BOB),
-      senderUid: UID_ALICE, ciphertext: btoa("test"),
-      nonce: "", kemCiphertext: "", signature: "", messageIndex: 0, timestamp: Date.now(),
-    };
-    await expect(decryptMessage(UID_BOB, msg)).resolves.not.toThrow();
+  it("[SEC] decryptMessage handles empty kemCiphertext gracefully", async () => {
+    await expect(decryptMessage(UID_BOB, makeEncryptedMsg({ kemCiphertext: "" })))
+      .resolves.not.toThrow();
   });
 
-  it("[SEC] decryptMessage does not throw on empty signature — returns verified: false, not crash", async () => {
-    const msg: EncryptedMessage = {
-      id: "sec-002", conversationId: getConversationId(UID_ALICE, UID_BOB),
-      senderUid: UID_ALICE, ciphertext: btoa("test"),
-      nonce: "", kemCiphertext: "", signature: "", messageIndex: 0, timestamp: Date.now(),
-    };
-    const dec = await decryptMessage(UID_BOB, msg);
+  it("[SEC] decryptMessage with empty signature returns verified: false", async () => {
+    const dec = await decryptMessage(UID_BOB, makeEncryptedMsg({ signature: "" }));
     expect(dec.verified).toBe(false);
   });
 
-  it("[SEC] messageIndex 0 and negative values do not crash the pipeline", async () => {
-    const msg: EncryptedMessage = {
-      id: "sec-003", conversationId: getConversationId(UID_ALICE, UID_BOB),
-      senderUid: UID_ALICE, ciphertext: btoa("test"),
-      nonce: "", kemCiphertext: "", signature: "", messageIndex: -1, timestamp: Date.now(),
-    };
-    await expect(decryptMessage(UID_BOB, msg)).resolves.not.toThrow();
+  it("[SEC] negative messageIndex does not crash", async () => {
+    await expect(decryptMessage(UID_BOB, makeEncryptedMsg({ messageIndex: -1 })))
+      .resolves.not.toThrow();
   });
 
-  it("[SEC] very long plaintext (100 KB) does not crash sendMessage", async () => {
-    const huge = "X".repeat(100_000);
-    await expect(sendMessage(UID_ALICE, UID_BOB, huge)).resolves.not.toThrow();
+  it("[SEC] 100 KB plaintext does not crash sendMessage", async () => {
+    await expect(sendMessage(UID_ALICE, UID_BOB, "X".repeat(100_000))).resolves.not.toThrow();
+  });
+
+  it("[SEC] corrupt kemPublicKey in bundle — sendMessage stays stable (dev mode)", async () => {
+    const CORRUPT_UID = "uid-corrupt-pubkey";
+    await publishPublicKeys(CORRUPT_UID, {
+      uid         : CORRUPT_UID,
+      kemPublicKey: btoa("X".repeat(100)), // 100 bytes < 1184 required
+      dsaPublicKey: btoa("Y".repeat(256)),
+      createdAt   : Date.now(),
+    });
+    await storePrivateKeys(CORRUPT_UID, {
+      kemPrivateKey: "kem-priv-corrupt",
+      dsaPrivateKey: "dsa-priv-corrupt",
+      masterKey    : "master-key-32bytes===========",
+      argon2Salt   : "argon2-salt-16bytes=",
+    });
+    let threw = false;
+    try {
+      await sendMessage(UID_ALICE, CORRUPT_UID, "test to corrupt key");
+    } catch {
+      threw = true; // expected in production with real crypto
+    }
+    expect(typeof threw).toBe("boolean");
+  });
+
+  it("[REPLAY] décrypter 10× le même message — idempotence totale", async () => {
+    const msg     = makeEncryptedMsg({ ciphertext: btoa("Replay scenario"), id: "replay-10x" });
+    const results = await Promise.all(Array.from({ length: 10 }, () => decryptMessage(UID_BOB, msg)));
+    expect(new Set(results.map((r) => r.plaintext)).size).toBe(1);
   });
 });

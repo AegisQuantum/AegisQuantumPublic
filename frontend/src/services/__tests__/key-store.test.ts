@@ -1,6 +1,7 @@
 /**
  * key-store.test.ts — Unit, KPI & security tests for key-store.ts
  *
+ * ══════════════════════════════════════════════════════════════════
  * Coverage :
  *  ── Functional ──────────────────────────────────────────────────────────────
  *  - storePrivateKeys()   : stores keys in IDB + loads into memory
@@ -12,9 +13,12 @@
  *  - saveRatchetState()   : persists ratchet JSON to IDB
  *  - loadRatchetState()   : reads ratchet JSON back, null on first call
  *
- *  ── Type safety ─────────────────────────────────────────────────────────────
- *  - PrivateKeyBundle fields are all strings
- *  - Stored/retrieved values round-trip with exact equality
+ *  ── Nouveaux — Cycle de vie et Auth ─────────────────────────────────────────
+ *  - [SESSION EXPIRY] Après clearPrivateKeys (simulant onAuthChange → null),
+ *    les clés privées sont bien purgées de la RAM
+ *  - [IDB FAILURE]   Si IDB renvoie undefined (vault corrompu/absent),
+ *    unlockPrivateKeys throw proprement — pas de clé undefined chargée
+ *  - [PERSISTENCE]   Le vault survit à clearPrivateKeys et se recharge via unlock
  *
  *  ── KPIs (specs §2.2) ───────────────────────────────────────────────────────
  *  - storePrivateKeys  < 50 ms
@@ -31,9 +35,10 @@
  *  - overwriting vault for same uid does not expose old keys after clearPrivateKeys
  *  - ratchet states are isolated per (uid, conversationId) — no cross-conv leakage
  *  - empty string uid is rejected gracefully
+ * ══════════════════════════════════════════════════════════════════
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import {
   storePrivateKeys,
   unlockPrivateKeys,
@@ -67,14 +72,15 @@ async function measureMs(fn: () => Promise<unknown>): Promise<number> {
 const UID_ALICE = "uid-alice-test-001";
 const UID_BOB   = "uid-bob-test-002";
 
-// Clean up after each test to keep IDB and memory state isolated
 afterEach(async () => {
   clearPrivateKeys();
   await deleteVault(UID_ALICE).catch(() => {});
   await deleteVault(UID_BOB).catch(() => {});
 });
 
-// ── storePrivateKeys ───────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 1. storePrivateKeys
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("storePrivateKeys", () => {
   it("should load kemPrivateKey into memory immediately after storing", async () => {
@@ -89,8 +95,8 @@ describe("storePrivateKeys", () => {
 
   it("should persist to IDB (unlockPrivateKeys reads it back)", async () => {
     await storePrivateKeys(UID_ALICE, makeBundle());
-    clearPrivateKeys(); // wipe memory
-    await unlockPrivateKeys(UID_ALICE, "any-master-key"); // reload from IDB
+    clearPrivateKeys();
+    await unlockPrivateKeys(UID_ALICE, "any-master-key");
     expect(getKemPrivateKey(UID_ALICE)).toBe("kem-private-key-base64-alice");
   });
 
@@ -111,7 +117,9 @@ describe("storePrivateKeys", () => {
   });
 });
 
-// ── unlockPrivateKeys ──────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 2. unlockPrivateKeys
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("unlockPrivateKeys", () => {
   it("should throw if no vault exists for the given uid", async () => {
@@ -131,12 +139,24 @@ describe("unlockPrivateKeys", () => {
     await storePrivateKeys(UID_BOB,   makeBundle({ kemPrivateKey: "bob-kem" }));
     clearPrivateKeys();
     await unlockPrivateKeys(UID_ALICE, "master-key");
-    // Bob's keys should NOT be loaded — unlockPrivateKeys is per-uid
     expect(() => getKemPrivateKey(UID_BOB)).toThrow();
+  });
+
+  // ── [IDB FAILURE] Vault corrompu / absent ────────────────────────────────
+  it("[SEC] unlockPrivateKeys throw proprement si le vault IDB est absent — pas de clé undefined", async () => {
+    // Vérifie que si IDB ne contient rien pour cet uid, on obtient une erreur
+    // claire et pas une clé `undefined` silencieusement chargée en mémoire
+    await expect(unlockPrivateKeys("uid-no-vault-ever", "some-key")).rejects.toThrow(
+      /no vault|not found/i
+    );
+    // Après un échec d'unlock, getKemPrivateKey doit toujours throw
+    expect(() => getKemPrivateKey("uid-no-vault-ever")).toThrow();
   });
 });
 
-// ── getKemPrivateKey / getDsaPrivateKey ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 3. getKemPrivateKey / getDsaPrivateKey
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("getKemPrivateKey / getDsaPrivateKey", () => {
   it("getKemPrivateKey returns exact stored value", async () => {
@@ -154,13 +174,14 @@ describe("getKemPrivateKey / getDsaPrivateKey", () => {
   it("getKemPrivateKey is synchronous (no async overhead)", async () => {
     await storePrivateKeys(UID_ALICE, makeBundle());
     let returned: string | null = null;
-    // Must be callable without await
     expect(() => { returned = getKemPrivateKey(UID_ALICE); }).not.toThrow();
     expect(returned).not.toBeNull();
   });
 });
 
-// ── clearPrivateKeys ───────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 4. clearPrivateKeys — Session Expiry
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("clearPrivateKeys", () => {
   it("should make getKemPrivateKey throw after clearing", async () => {
@@ -188,9 +209,35 @@ describe("clearPrivateKeys", () => {
     clearPrivateKeys();
     await expect(unlockPrivateKeys(UID_ALICE, "any")).resolves.not.toThrow();
   });
+
+  // ── [SESSION EXPIRY] Simuler onAuthChange → null ─────────────────────────
+  it("[SESSION] clearPrivateKeys simule l'expiration de session Firebase — RAM purgée immédiatement", async () => {
+    await storePrivateKeys(UID_ALICE, makeBundle({ kemPrivateKey: "session-key" }));
+
+    // Vérification préalable — la clé est accessible avant la déconnexion
+    expect(getKemPrivateKey(UID_ALICE)).toBe("session-key");
+
+    // Simuler onAuthStateChanged(null) → appel à clearPrivateKeys()
+    clearPrivateKeys();
+
+    // La clé doit être immédiatement inaccessible — pas de fuite post-session
+    expect(() => getKemPrivateKey(UID_ALICE)).toThrow();
+    expect(() => getDsaPrivateKey(UID_ALICE)).toThrow();
+  });
+
+  it("[SESSION] vault IDB persiste après clearPrivateKeys — reconnexion possible", async () => {
+    await storePrivateKeys(UID_ALICE, makeBundle({ kemPrivateKey: "reconnect-key" }));
+    clearPrivateKeys(); // déconnexion
+
+    // Simuler une reconnexion — unlock depuis IDB doit fonctionner
+    await unlockPrivateKeys(UID_ALICE, "master");
+    expect(getKemPrivateKey(UID_ALICE)).toBe("reconnect-key");
+  });
 });
 
-// ── deleteVault ────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 5. deleteVault
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("deleteVault", () => {
   it("should remove IDB entry so unlockPrivateKeys throws afterwards", async () => {
@@ -214,19 +261,19 @@ describe("deleteVault", () => {
   });
 });
 
-// ── saveRatchetState / loadRatchetState ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 6. saveRatchetState / loadRatchetState
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("saveRatchetState / loadRatchetState", () => {
   it("loadRatchetState returns null when no state has been saved", async () => {
-    const result = await loadRatchetState(UID_ALICE, "conv-001");
-    expect(result).toBeNull();
+    expect(await loadRatchetState(UID_ALICE, "conv-001")).toBeNull();
   });
 
   it("should persist and retrieve ratchet state round-trip", async () => {
     const state = JSON.stringify({ rootKey: "abc", sendCount: 3 });
     await saveRatchetState(UID_ALICE, "conv-001", state);
-    const loaded = await loadRatchetState(UID_ALICE, "conv-001");
-    expect(loaded).toBe(state);
+    expect(await loadRatchetState(UID_ALICE, "conv-001")).toBe(state);
   });
 
   it("should overwrite state on successive saves (latest wins)", async () => {
@@ -239,23 +286,21 @@ describe("saveRatchetState / loadRatchetState", () => {
   it("ratchet states are isolated per conversationId", async () => {
     await saveRatchetState(UID_ALICE, "conv-001", JSON.stringify({ rootKey: "key-conv1" }));
     await saveRatchetState(UID_ALICE, "conv-002", JSON.stringify({ rootKey: "key-conv2" }));
-    const s1 = await loadRatchetState(UID_ALICE, "conv-001");
-    const s2 = await loadRatchetState(UID_ALICE, "conv-002");
-    expect(JSON.parse(s1!).rootKey).toBe("key-conv1");
-    expect(JSON.parse(s2!).rootKey).toBe("key-conv2");
+    expect(JSON.parse((await loadRatchetState(UID_ALICE, "conv-001"))!).rootKey).toBe("key-conv1");
+    expect(JSON.parse((await loadRatchetState(UID_ALICE, "conv-002"))!).rootKey).toBe("key-conv2");
   });
 
   it("ratchet states are isolated per uid", async () => {
     await saveRatchetState(UID_ALICE, "conv-001", JSON.stringify({ rootKey: "alice-state" }));
     await saveRatchetState(UID_BOB,   "conv-001", JSON.stringify({ rootKey: "bob-state" }));
-    const aliceState = await loadRatchetState(UID_ALICE, "conv-001");
-    const bobState   = await loadRatchetState(UID_BOB,   "conv-001");
-    expect(JSON.parse(aliceState!).rootKey).toBe("alice-state");
-    expect(JSON.parse(bobState!).rootKey).toBe("bob-state");
+    expect(JSON.parse((await loadRatchetState(UID_ALICE, "conv-001"))!).rootKey).toBe("alice-state");
+    expect(JSON.parse((await loadRatchetState(UID_BOB,   "conv-001"))!).rootKey).toBe("bob-state");
   });
 });
 
-// ── KPIs (specs §2.2) ──────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 7. KPIs de Performance
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("Performance KPIs — key-store (specs §2.2)", () => {
   it("storePrivateKeys should complete in < 50 ms", async () => {
@@ -291,20 +336,17 @@ describe("Performance KPIs — key-store (specs §2.2)", () => {
   });
 });
 
-// ── Security / Pseudo-pentest ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 8. Invariants de Sécurité
+// ══════════════════════════════════════════════════════════════════════════
 
 describe("Security invariants — key-store", () => {
   it("[SEC] getKemPrivateKey throws if vault was never loaded — no silent null/undefined return", () => {
-    // If this returned null instead of throwing, caller code could use undefined keys silently
-    expect(() => getKemPrivateKey("uid-never-seen")).toThrow(
-      /not loaded|signed in/i
-    );
+    expect(() => getKemPrivateKey("uid-never-seen")).toThrow(/not loaded|signed in/i);
   });
 
   it("[SEC] getDsaPrivateKey throws if vault was never loaded — no silent null/undefined return", () => {
-    expect(() => getDsaPrivateKey("uid-never-seen")).toThrow(
-      /not loaded|signed in/i
-    );
+    expect(() => getDsaPrivateKey("uid-never-seen")).toThrow(/not loaded|signed in/i);
   });
 
   it("[SEC] getKemPrivateKey error message contains the uid for diagnostics, not key material", () => {
@@ -315,27 +357,23 @@ describe("Security invariants — key-store", () => {
     } catch (e: unknown) {
       const msg = (e as Error).message;
       expect(msg).toContain(uid);
-      // Must NOT contain any key-like content (just the uid and an explanation)
       expect(msg.length).toBeLessThan(200);
     }
   });
 
   it("[SEC] uid isolation — Alice's keys are not accessible under Bob's uid", async () => {
     await storePrivateKeys(UID_ALICE, makeBundle({ kemPrivateKey: "alice-secret-kem" }));
-    // Bob's keys are not loaded — accessing BOB uid must throw, not return Alice's keys
     expect(() => getKemPrivateKey(UID_BOB)).toThrow();
   });
 
   it("[SEC] uid isolation — Bob cannot read Alice's ratchet state via his uid", async () => {
     await saveRatchetState(UID_ALICE, "conv-shared", JSON.stringify({ secret: "alice-only" }));
-    const bobView = await loadRatchetState(UID_BOB, "conv-shared");
-    expect(bobView).toBeNull(); // Bob gets null, not Alice's data
+    expect(await loadRatchetState(UID_BOB, "conv-shared")).toBeNull();
   });
 
   it("[SEC] after clearPrivateKeys, no key is retrievable even if uid is known", async () => {
     await storePrivateKeys(UID_ALICE, makeBundle());
     clearPrivateKeys();
-    // Simulates a sign-out — keys must be fully purged from memory
     expect(() => getKemPrivateKey(UID_ALICE)).toThrow();
     expect(() => getDsaPrivateKey(UID_ALICE)).toThrow();
   });
@@ -344,14 +382,12 @@ describe("Security invariants — key-store", () => {
     await storePrivateKeys(UID_ALICE, makeBundle({ kemPrivateKey: "old-leaked-key" }));
     await storePrivateKeys(UID_ALICE, makeBundle({ kemPrivateKey: "new-key" }));
     clearPrivateKeys();
-    // After clear, neither old nor new key is accessible in memory
     expect(() => getKemPrivateKey(UID_ALICE)).toThrow();
   });
 
   it("[SEC] unlockPrivateKeys with wrong uid throws — no cross-user vault access", async () => {
     await storePrivateKeys(UID_ALICE, makeBundle());
     clearPrivateKeys();
-    // Trying to unlock a vault that doesn't exist for BOB
     await expect(unlockPrivateKeys(UID_BOB, "master")).rejects.toThrow();
   });
 
@@ -363,9 +399,7 @@ describe("Security invariants — key-store", () => {
 
   it("[SEC] empty string uid does not silently collide with other entries", async () => {
     await storePrivateKeys("", makeBundle({ kemPrivateKey: "empty-uid-key" }));
-    // Must not be accessible under a real uid
     expect(() => getKemPrivateKey(UID_ALICE)).toThrow();
-    // Clean up
     await deleteVault("");
   });
 });
