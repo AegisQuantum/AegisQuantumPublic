@@ -37,7 +37,7 @@ export interface KemEncapResult {
 
 /** Encode a Uint8Array to a Base64 string. */
 export function toBase64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
+  return btoa(String.fromCodePoint(...bytes));
 }
 
 /** Decode a Base64 string to a Uint8Array. */

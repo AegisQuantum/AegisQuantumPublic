@@ -10,7 +10,11 @@
     "lint": "eslint --ext .ts src",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:ui": "vitest --ui",
+    "test:sec": "vitest run -t '\\[SEC\\]'",
+    "test:perf": "vitest run -t 'KPI'",
+    "test:crypto": "vitest run src/crypto/",
+    "coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@openforge-sh/liboqs": "latest",
