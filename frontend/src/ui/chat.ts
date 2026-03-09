@@ -1,13 +1,5 @@
 /**
  * chat.ts — UI du chat branchée sur messaging.ts et auth.ts
- *
- * Responsabilités :
- *  - Charger le template chat.html dans #chat-screen
- *  - Afficher la liste des conversations en temps réel
- *  - Permettre d'ouvrir une conversation par UID de contact
- *  - Envoyer et recevoir des messages
- *  - Gérer la déconnexion
- *  - Afficher la crypto box avec les étapes de chiffrement/déchiffrement
  */
 
 import { signOut }                          from '../services/auth';
@@ -19,10 +11,50 @@ import {
 }                                           from '../services/messaging';
 import type { Conversation, DecryptedMessage } from '../types/message';
 
-let _unsubConvs:     (() => void) | null = null;
-let _unsubMessages:  (() => void) | null = null;
-let _currentConvId:  string | null       = null;
-let _myUid:          string              = '';
+let _unsubConvs:        (() => void) | null = null;
+let _unsubMessages:     (() => void) | null = null;
+let _currentConvId:     string | null       = null;
+let _currentContactUid: string | null       = null;
+let _myUid:             string              = '';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LocalStorage — noms locaux des conversations + avatar
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Retourne le nom local d'une conversation (renommage côté client uniquement). */
+function getLocalConvName(convId: string): string | null {
+  return localStorage.getItem(`aq:conv:name:${convId}`);
+}
+
+/** Sauvegarde un nom local pour une conversation. */
+function setLocalConvName(convId: string, name: string): void {
+  if (name.trim()) {
+    localStorage.setItem(`aq:conv:name:${convId}`, name.trim());
+  } else {
+    localStorage.removeItem(`aq:conv:name:${convId}`);
+  }
+}
+
+/** Retourne la couleur de fond de l'avatar de l'utilisateur (stockée localement). */
+function getAvatarColor(): string {
+  return localStorage.getItem(`aq:avatar:color:${_myUid}`) ?? '#6b8ff5';
+}
+
+/** Sauvegarde la couleur d'avatar. */
+function setAvatarColor(color: string): void {
+  localStorage.setItem(`aq:avatar:color:${_myUid}`, color);
+}
+
+/** Retourne les initiales personnalisées de l'avatar (max 2 chars). */
+function getAvatarInitials(): string {
+  return localStorage.getItem(`aq:avatar:initials:${_myUid}`) ?? _myUid.slice(0, 2).toUpperCase();
+}
+
+/** Sauvegarde des initiales personnalisées. */
+function setAvatarInitials(initials: string): void {
+  const clean = initials.trim().slice(0, 2).toUpperCase();
+  if (clean) localStorage.setItem(`aq:avatar:initials:${_myUid}`, clean);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Point d'entrée — appelé par main.ts après connexion
@@ -34,7 +66,6 @@ export async function initChat(uid: string): Promise<void> {
   const container = document.getElementById('chat-screen')!;
 
   try {
-    // Charger le template HTML du chat
     const res  = await fetch('/chat.html');
     if (!res.ok) throw new Error(`Failed to load chat.html: ${res.status}`);
     const html = await res.text();
@@ -50,40 +81,32 @@ export async function initChat(uid: string): Promise<void> {
     throw err;
   }
 
-  // Remplir identité
-  const topnavAvatar       = document.getElementById('topnav-avatar');
+  // ── Remplir identité ──
+  refreshAvatar();
   const profileDropdownUid = document.getElementById('profile-dropdown-uid');
   const settingsUid        = document.getElementById('settings-uid');
-  // Le premier text node de l'avatar contient les initiales (avant le dropdown div)
-  if (topnavAvatar) {
-    const textNode = Array.from(topnavAvatar.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
-    if (textNode) textNode.textContent = uid.slice(0, 2).toUpperCase();
-  }
   if (profileDropdownUid) profileDropdownUid.textContent = uid;
   if (settingsUid)        settingsUid.textContent = uid;
 
-  // ── Déconnexion (dropdown + settings) ──
+  // ── Déconnexion ──
   document.getElementById('btn-signout')?.addEventListener('click', handleSignOut);
   document.getElementById('btn-signout-settings')?.addEventListener('click', handleSignOut);
 
-  // ── Bouton envoi + input ──
+  // ── Envoi ──
   document.getElementById('btn-send')?.addEventListener('click', handleSendMessage);
   const msgInput = document.getElementById('message-input') as HTMLTextAreaElement | null;
   msgInput?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); }
   });
 
-  // ── Navigation settings via topnav + dropdown ──
+  // ── Navigation settings ──
   document.getElementById('rail-btn-settings')?.addEventListener('click', () => switchView('settings'));
   document.getElementById('btn-profile-settings')?.addEventListener('click', () => {
     closeProfileDropdown();
     switchView('settings');
   });
 
-  // ── Toggle sidebar (1/3 gauche) ──
+  // ── Sidebar toggle ──
   document.getElementById('btn-toggle-sidebar')?.addEventListener('click', toggleSidebar);
 
   // ── Dropdown profil ──
@@ -93,20 +116,48 @@ export async function initChat(uid: string): Promise<void> {
   });
   document.addEventListener('click', () => closeProfileDropdown());
 
+  // ── Changer avatar (click sur avatar dans settings) ──
+  document.getElementById('btn-change-avatar')?.addEventListener('click', openAvatarModal);
+  document.getElementById('avatar-modal-close')?.addEventListener('click', closeAvatarModal);
+  document.getElementById('avatar-modal-cancel')?.addEventListener('click', closeAvatarModal);
+  document.getElementById('avatar-modal-confirm')?.addEventListener('click', confirmAvatarChange);
+  // Sélecteur de couleurs
+  document.querySelectorAll<HTMLElement>('.avatar-color-swatch').forEach((swatch) => {
+    swatch.addEventListener('click', () => {
+      document.querySelectorAll('.avatar-color-swatch').forEach(s => s.classList.remove('selected'));
+      swatch.classList.add('selected');
+      const preview = document.getElementById('avatar-modal-preview');
+      if (preview) preview.style.background = swatch.dataset.color ?? '#6b8ff5';
+    });
+  });
+
   // ── Modal nouvelle conversation ──
-  document.getElementById('btn-new-chat')?.addEventListener('click',    () => openModal());
-  document.getElementById('modal-close')?.addEventListener('click',     () => closeModal());
-  document.getElementById('modal-cancel')?.addEventListener('click',    () => closeModal());
+  document.getElementById('btn-new-chat')?.addEventListener('click',    () => openNewConvModal());
+  document.getElementById('modal-close')?.addEventListener('click',     () => closeNewConvModal());
+  document.getElementById('modal-cancel')?.addEventListener('click',    () => closeNewConvModal());
   document.getElementById('modal-confirm')?.addEventListener('click',   () => confirmNewConv());
   document.getElementById('modal-uid-input')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter')  confirmNewConv();
-    if (e.key === 'Escape') closeModal();
+    if (e.key === 'Escape') closeNewConvModal();
   });
 
-  // ── Copier UID (dropdown + settings) ──
-  const copyUid = () => {
-    navigator.clipboard.writeText(uid).then(() => showToast('UID copié !')).catch(() => {});
-  };
+  // ── Renommer conversation (double-clic sur nom dans topbar) ──
+  document.getElementById('chat-contact-name')?.addEventListener('dblclick', () => {
+    if (_currentConvId) openRenameModal(_currentConvId);
+  });
+  document.getElementById('btn-rename-conv')?.addEventListener('click', () => {
+    if (_currentConvId) openRenameModal(_currentConvId);
+  });
+  document.getElementById('rename-modal-close')?.addEventListener('click',   closeRenameModal);
+  document.getElementById('rename-modal-cancel')?.addEventListener('click',  closeRenameModal);
+  document.getElementById('rename-modal-confirm')?.addEventListener('click', confirmRename);
+  document.getElementById('rename-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter')  confirmRename();
+    if (e.key === 'Escape') closeRenameModal();
+  });
+
+  // ── Copier UID ──
+  const copyUid = () => navigator.clipboard.writeText(uid).then(() => showToast('UID copié !')).catch(() => {});
   document.getElementById('btn-copy-uid')?.addEventListener('click', copyUid);
   document.getElementById('btn-copy-uid-settings')?.addEventListener('click', copyUid);
 
@@ -121,6 +172,113 @@ export async function initChat(uid: string): Promise<void> {
 
   // ── S'abonner aux conversations ──
   _unsubConvs = subscribeToConversations(uid, renderConversationList);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Avatar
+// ─────────────────────────────────────────────────────────────────────────────
+
+function refreshAvatar(): void {
+  const initials = getAvatarInitials();
+  const color    = getAvatarColor();
+
+  // Topnav avatar (texte seul — pas le dropdown)
+  const topnavAvatar = document.getElementById('topnav-avatar');
+  if (topnavAvatar) {
+    const textNode = Array.from(topnavAvatar.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
+    if (textNode) textNode.textContent = initials;
+    (topnavAvatar as HTMLElement).style.background = color;
+  }
+
+  // Avatar dans les settings
+  const settingsAvatar = document.getElementById('settings-avatar-preview');
+  if (settingsAvatar) {
+    settingsAvatar.textContent  = initials;
+    settingsAvatar.style.background = color;
+  }
+}
+
+function openAvatarModal(): void {
+  const modal    = document.getElementById('avatar-modal');
+  const preview  = document.getElementById('avatar-modal-preview');
+  const input    = document.getElementById('avatar-initials-input') as HTMLInputElement | null;
+  const curColor = getAvatarColor();
+
+  if (modal)   modal.style.display = 'flex';
+  if (preview) { preview.textContent = getAvatarInitials(); preview.style.background = curColor; }
+  if (input)   input.value = getAvatarInitials();
+
+  // Marquer la couleur active
+  document.querySelectorAll<HTMLElement>('.avatar-color-swatch').forEach((s) => {
+    s.classList.toggle('selected', s.dataset.color === curColor);
+  });
+
+  // Mise à jour live du preview via l'input initiales
+  input?.removeEventListener('input', _onInitialsInput);
+  input?.addEventListener('input', _onInitialsInput);
+
+  setTimeout(() => input?.focus(), 50);
+}
+
+function _onInitialsInput(e: Event): void {
+  const val     = (e.target as HTMLInputElement).value.trim().slice(0, 2).toUpperCase();
+  const preview = document.getElementById('avatar-modal-preview');
+  if (preview) preview.textContent = val || '?';
+}
+
+function closeAvatarModal(): void {
+  const modal = document.getElementById('avatar-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function confirmAvatarChange(): void {
+  const input    = document.getElementById('avatar-initials-input') as HTMLInputElement | null;
+  const selected = document.querySelector<HTMLElement>('.avatar-color-swatch.selected');
+  const color    = selected?.dataset.color ?? getAvatarColor();
+
+  if (input?.value.trim()) setAvatarInitials(input.value);
+  setAvatarColor(color);
+  refreshAvatar();
+  closeAvatarModal();
+  showToast('Avatar mis à jour !');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Modal renommer conversation
+// ─────────────────────────────────────────────────────────────────────────────
+
+function openRenameModal(convId: string): void {
+  const modal = document.getElementById('rename-modal');
+  const input = document.getElementById('rename-input') as HTMLInputElement | null;
+  if (modal) modal.style.display = 'flex';
+  if (input) {
+    input.value = getLocalConvName(convId) ?? (_currentContactUid?.slice(0, 24) ?? '');
+    input.select();
+  }
+  setTimeout(() => input?.focus(), 50);
+}
+
+function closeRenameModal(): void {
+  const modal = document.getElementById('rename-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function confirmRename(): void {
+  if (!_currentConvId) return;
+  const input = document.getElementById('rename-input') as HTMLInputElement | null;
+  const name  = input?.value.trim() ?? '';
+  setLocalConvName(_currentConvId, name);
+
+  // Mettre à jour le nom dans la topbar
+  const nameEl = document.getElementById('chat-contact-name');
+  if (nameEl) nameEl.textContent = name || (_currentContactUid?.slice(0, 24) ?? '—');
+
+  // Mettre à jour dans la sidebar sans reload complet
+  const item = document.querySelector<HTMLElement>(`.contact-item[data-conv-id="${_currentConvId}"] .contact-name`);
+  if (item) item.textContent = name || (_currentContactUid?.slice(0, 20) ?? '—');
+
+  closeRenameModal();
+  showToast('Conversation renommée.');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -142,7 +300,6 @@ function toggleSidebar(): void {
 function toggleProfileDropdown(): void {
   document.getElementById('topnav-avatar')?.classList.toggle('open');
 }
-
 function closeProfileDropdown(): void {
   document.getElementById('topnav-avatar')?.classList.remove('open');
 }
@@ -155,7 +312,6 @@ function switchView(view: 'chat' | 'settings'): void {
   const viewChat     = document.getElementById('view-chat');
   const viewSettings = document.getElementById('view-settings');
   const btnSettings  = document.getElementById('rail-btn-settings');
-
   if (view === 'chat') {
     if (viewChat)     viewChat.style.display     = '';
     if (viewSettings) viewSettings.style.display = 'none';
@@ -164,38 +320,31 @@ function switchView(view: 'chat' | 'settings'): void {
     if (viewChat)     viewChat.style.display     = 'none';
     if (viewSettings) viewSettings.style.display = '';
     btnSettings?.classList.add('active');
+    refreshAvatar(); // synchroniser l'aperçu avatar dans settings
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Crypto Box — afficher les étapes
+// Crypto Box
 // ─────────────────────────────────────────────────────────────────────────────
 
 type CryptoStepType = 'send' | 'recv' | 'done' | 'warn' | 'active';
-
-interface CryptoStepDef {
-  icon: string;
-  type: CryptoStepType;
-  label: string;
-  detail?: string;
-  delay: number;
-}
+interface CryptoStepDef { icon: string; type: CryptoStepType; label: string; detail?: string; delay: number; }
 
 const SEND_STEPS: CryptoStepDef[] = [
-  { icon: '🔑', type: 'send',   label: 'Génération des clés éphémères',         detail: 'ML-KEM-768 keypair',                              delay: 0   },
-  { icon: '🔗', type: 'active', label: 'Établissement liaison Kyber',            detail: 'KEM encapsulate → sharedSecret + kemCiphertext',  delay: 300 },
-  { icon: '🔒', type: 'send',   label: 'Chiffrement AES-256-GCM',               detail: 'HKDF(sharedSecret) → messageKey + encrypt(msg)',  delay: 600 },
-  { icon: '📡', type: 'send',   label: 'Récupération clé publique de Bob',       detail: 'key-registry ← Firestore',                       delay: 900 },
-  { icon: '✍️', type: 'send',   label: 'Signature ML-DSA-65',                   detail: 'sign(ciphertext ‖ nonce ‖ kemCiphertext)',        delay: 1100 },
-  { icon: '📤', type: 'done',   label: 'Message envoyé',                        detail: 'EncryptedMessage → Firestore',                    delay: 1400 },
+  { icon: '🔑', type: 'send',   label: 'Génération des clés éphémères',        detail: 'ML-KEM-768 keypair',                             delay: 0    },
+  { icon: '🔗', type: 'active', label: 'Établissement liaison Kyber',           detail: 'KEM encapsulate → sharedSecret + kemCiphertext', delay: 300  },
+  { icon: '🔒', type: 'send',   label: 'Chiffrement AES-256-GCM',              detail: 'HKDF(sharedSecret) → messageKey + encrypt(msg)', delay: 600  },
+  { icon: '📡', type: 'send',   label: 'Récupération clé publique du contact', detail: 'key-registry ← Firestore',                      delay: 900  },
+  { icon: '✍️', type: 'send',   label: 'Signature ML-DSA-65',                  detail: 'sign(ciphertext ‖ nonce ‖ kemCiphertext)',       delay: 1100 },
+  { icon: '📤', type: 'done',   label: 'Message envoyé',                       detail: 'EncryptedMessage → Firestore',                   delay: 1400 },
 ];
-
 const RECV_STEPS: CryptoStepDef[] = [
-  { icon: '📡', type: 'recv',   label: 'Récupération clé publique d\'Alice',    detail: 'key-registry ← Firestore',                       delay: 0   },
-  { icon: '🔍', type: 'active', label: 'Vérification signature ML-DSA-65',      detail: 'dsaVerify(sig, dsaPubKey, payload)',              delay: 250 },
-  { icon: '🔓', type: 'recv',   label: 'Décapsulation KEM',                     detail: 'kemDecapsulate(kemCT, privKey) → sharedSecret',  delay: 500 },
-  { icon: '🧩', type: 'recv',   label: 'Dérivation clé HKDF',                  detail: 'HKDF(sharedSecret, info) → messageKey',          delay: 750 },
-  { icon: '✅', type: 'done',   label: 'Déchiffrement AES-256-GCM',             detail: 'aesGcmDecrypt(ct, nonce, key) → plaintext',      delay: 1000 },
+  { icon: '📡', type: 'recv',   label: 'Récupération clé publique sender',     detail: 'key-registry ← Firestore',                      delay: 0   },
+  { icon: '🔍', type: 'active', label: 'Vérification signature ML-DSA-65',     detail: 'dsaVerify(sig, dsaPubKey, payload)',             delay: 250 },
+  { icon: '🔓', type: 'recv',   label: 'Décapsulation KEM',                    detail: 'kemDecapsulate(kemCT, privKey) → sharedSecret', delay: 500 },
+  { icon: '🧩', type: 'recv',   label: 'Dérivation clé HKDF',                 detail: 'HKDF(sharedSecret, info) → messageKey',         delay: 750 },
+  { icon: '✅', type: 'done',   label: 'Déchiffrement AES-256-GCM',            detail: 'aesGcmDecrypt(ct, nonce, key) → plaintext',     delay: 1000 },
 ];
 
 const ICONS_SVG: Record<CryptoStepType, string> = {
@@ -222,26 +371,22 @@ function clearCryptoBox(): void {
 function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCEPTION'): void {
   const container = document.getElementById('crypto-steps');
   if (!container) return;
-
-  // Vider l'idle placeholder si présent, sinon garder l'historique
   const idle = container.querySelector('.crypto-idle');
   if (idle) container.innerHTML = '';
-
-  // Ajouter un séparateur si ce n'est pas le tout premier bloc
-  if (container.children.length > 0) {
-    const sep = document.createElement('div');
-    sep.className = 'crypto-sep';
-    sep.innerHTML = `<span>${direction}</span>`;
-    container.appendChild(sep);
-  } else {
-    const sep = document.createElement('div');
-    sep.className = 'crypto-sep';
-    sep.innerHTML = `<span>${direction}</span>`;
-    container.appendChild(sep);
-  }
-
-  stepsData.forEach((step) => {
+  const sep = document.createElement('div');
+  sep.className = 'crypto-sep';
+  sep.innerHTML = `<span>── ${direction} ──</span>`;
+  container.appendChild(sep);
+  const stepEls: HTMLElement[] = [];
+  stepsData.forEach((step, i) => {
     setTimeout(() => {
+      if (i > 0 && stepEls[i - 1]) {
+        const prevIcon = stepEls[i - 1].querySelector('.crypto-step-icon');
+        if (prevIcon && prevIcon.classList.contains('active')) {
+          prevIcon.className = 'crypto-step-icon done';
+          prevIcon.innerHTML = ICONS_SVG['done'];
+        }
+      }
       const el = document.createElement('div');
       el.className = `crypto-step${step.type === 'done' ? ' done-step' : ''}`;
       el.innerHTML = `
@@ -249,20 +394,17 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
         <div class="crypto-step-body">
           <div class="crypto-step-label">${step.label}</div>
           ${step.detail ? `<div class="crypto-step-detail">${step.detail}</div>` : ''}
-        </div>
-      `;
+        </div>`;
       container.appendChild(el);
+      stepEls[i] = el;
       container.scrollTop = container.scrollHeight;
     }, step.delay);
   });
-
-  // Reset dot status après la dernière étape
-  const lastDelay = stepsData[stepsData.length - 1].delay + 600;
-  setTimeout(() => setCryptoStatus('idle'), lastDelay);
+  setTimeout(() => setCryptoStatus('idle'), stepsData[stepsData.length - 1].delay + 600);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Rendu de la liste des conversations (sidebar)
+// Rendu de la liste des conversations
 // ─────────────────────────────────────────────────────────────────────────────
 
 function renderConversationList(convs: Conversation[]): void {
@@ -277,10 +419,13 @@ function renderConversationList(convs: Conversation[]): void {
   }
 
   for (const conv of convs) {
-    const contactUid = conv.participants.find((p) => p !== _myUid) ?? conv.participants[0];
-    const isActive   = conv.id === _currentConvId;
-    const preview    = conv.lastMessagePreview ?? '🔒 Message chiffré';
-    const timeStr    = conv.lastMessageAt
+    const contactUid  = conv.participants.find((p) => p !== _myUid) ?? conv.participants[0];
+    const isActive    = conv.id === _currentConvId;
+    // Nom local (renommé) ou fallback UID
+    const displayName = getLocalConvName(conv.id) ?? contactUid.slice(0, 20);
+    // Aperçu du dernier message
+    const preview     = conv.lastMessagePreview ?? '🔒 Chiffré';
+    const timeStr     = conv.lastMessageAt
       ? new Date(conv.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : '';
 
@@ -289,15 +434,14 @@ function renderConversationList(convs: Conversation[]): void {
     item.dataset.convId     = conv.id;
     item.dataset.contactUid = contactUid;
     item.innerHTML = `
-      <div class="contact-avatar">${contactUid.slice(0, 2).toUpperCase()}</div>
+      <div class="contact-avatar">${displayName.slice(0, 2).toUpperCase()}</div>
       <div class="contact-body">
         <div class="contact-row">
-          <span class="contact-name">${contactUid.slice(0, 20)}</span>
+          <span class="contact-name">${escapeHtml(displayName)}</span>
           <span class="contact-time">${timeStr}</span>
         </div>
         <div class="contact-preview">${escapeHtml(preview)}</div>
-      </div>
-    `;
+      </div>`;
     item.addEventListener('click', () => openConversation(conv.id, contactUid));
     list.appendChild(item);
   }
@@ -308,12 +452,10 @@ function renderConversationList(convs: Conversation[]): void {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function openConversation(convId: string, contactUid: string): void {
-  if (_unsubMessages) {
-    _unsubMessages();
-    _unsubMessages = null;
-  }
+  if (_unsubMessages) { _unsubMessages(); _unsubMessages = null; }
 
-  _currentConvId = convId;
+  _currentConvId     = convId;
+  _currentContactUid = contactUid;
 
   const emptyState    = document.getElementById('chat-empty');
   const convView      = document.getElementById('conversation-view');
@@ -322,79 +464,75 @@ function openConversation(convId: string, contactUid: string): void {
 
   emptyState?.classList.add('hidden');
   convView?.classList.remove('hidden');
-  if (contactNameEl) contactNameEl.textContent = contactUid.slice(0, 24);
-  if (topbarAvatar)  topbarAvatar.textContent  = contactUid.slice(0, 2).toUpperCase();
 
+  const displayName = getLocalConvName(convId) ?? contactUid.slice(0, 24);
+  if (contactNameEl) contactNameEl.textContent = displayName;
+  if (topbarAvatar)  topbarAvatar.textContent  = displayName.slice(0, 2).toUpperCase();
+
+  // Vider le DOM et l'état de rendu pour la nouvelle conversation
   const msgContainer = document.getElementById('messages-container');
   if (msgContainer) msgContainer.innerHTML = '';
+  _renderedCount = 0;
 
   document.querySelectorAll('.contact-item').forEach((el) => {
     el.classList.toggle('active', (el as HTMLElement).dataset.convId === convId);
   });
 
-  _unsubMessages = subscribeToMessages(_myUid, convId, (messages) => {
-    renderMessages(messages);
-  });
-
-  // Ensure chat view is shown
-  switchView('chat');
+  _unsubMessages = subscribeToMessages(_myUid, convId, renderMessages);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rendu des messages
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Nombre de messages déjà rendus pour la conversation courante.
+// On compare uniquement la longueur : Firestore renvoie toujours la liste
+// complète triée par timestamp, donc les nouveaux sont toujours en fin de liste.
+let _renderedCount = 0;
+
 function renderMessages(messages: DecryptedMessage[]): void {
   const container = document.getElementById('messages-container');
   if (!container) return;
 
-  const prevCount = container.querySelectorAll('.message-bubble').length;
-  const hasNew    = messages.length > prevCount;
+  // Nouveaux messages = ceux après l'index _renderedCount
+  const newMessages     = messages.slice(_renderedCount);
+  const hasNewFromOther = newMessages.some(m => m.senderUid !== _myUid);
 
-  container.innerHTML = '';
+  if (newMessages.length === 0) return;
 
-  for (const msg of messages) {
+  for (const msg of newMessages) {
     const isMine = msg.senderUid === _myUid;
     const bubble = document.createElement('div');
-    bubble.className = `message-bubble ${isMine ? 'mine' : 'theirs'}`;
+    bubble.className     = `message-bubble ${isMine ? 'mine' : 'theirs'}`;
+    bubble.dataset.msgId = msg.id;
 
-    const time = new Date(msg.timestamp).toLocaleTimeString([], {
-      hour: '2-digit', minute: '2-digit',
-    });
-
+    const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     bubble.innerHTML = `
       <div class="message-text-wrap">
         <p class="message-text">${escapeHtml(msg.plaintext)}</p>
       </div>
       <div class="message-meta">
         <span class="message-time">${time}</span>
-        ${msg.verified
-          ? '<span class="sig-ok">✓</span>'
-          : '<span class="sig-pending">⦿</span>'
-        }
-      </div>
-    `;
+        ${msg.verified ? '<span class="sig-ok">✓</span>' : '<span class="sig-pending">⦿</span>'}
+      </div>`;
     container.appendChild(bubble);
   }
 
+  _renderedCount = messages.length;
   container.scrollTop = container.scrollHeight;
 
-  // Si nouveau message reçu (pas envoyé par moi), afficher les étapes de réception
-  if (hasNew && messages.length > 0) {
-    const lastMsg = messages[messages.length - 1];
-    if (lastMsg.senderUid !== _myUid) {
-      setCryptoStatus('active');
-      showCryptoSteps(RECV_STEPS, 'RÉCEPTION');
-    }
+  if (hasNewFromOther) {
+    setCryptoStatus('active');
+    showCryptoSteps(RECV_STEPS, 'RÉCEPTION');
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Envoi d'un message
+// Envoi d'un message — FIX : ne pas réinitialiser _currentConvId
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSendMessage(): Promise<void> {
-  if (!_currentConvId) return;
+  if (!_currentConvId || !_currentContactUid) return;
 
   const input = document.getElementById('message-input') as HTMLTextAreaElement | null;
   if (!input) return;
@@ -402,28 +540,32 @@ async function handleSendMessage(): Promise<void> {
   const text = input.value.trim();
   if (!text) return;
 
-  const activeItem = document.querySelector('.contact-item.active') as HTMLElement | null;
-  const contactUid = activeItem?.dataset.contactUid;
-  if (!contactUid) return;
+  // Sauvegarder la conv courante AVANT l'await pour éviter tout reset
+  const convId     = _currentConvId;
+  const contactUid = _currentContactUid;
 
   input.value    = '';
   input.disabled = true;
 
-  // Afficher les étapes de chiffrement
   setCryptoStatus('sending');
   showCryptoSteps(SEND_STEPS, 'ENVOI');
 
   try {
     await sendMessage(_myUid, contactUid, text);
   } catch (err) {
-    console.error('sendMessage failed:', err);
-    showToast('Failed to send message. Check the console.');
+    console.error('[AQ] sendMessage failed:', err);
+    showToast('Envoi échoué. Vérifiez la console.');
     input.value = text;
     clearCryptoBox();
     setCryptoStatus('idle');
   } finally {
     input.disabled = false;
     input.focus();
+    // Restaurer la conv courante si elle a changé pendant l'await (ne devrait pas arriver)
+    if (_currentConvId !== convId) {
+      _currentConvId     = convId;
+      _currentContactUid = contactUid;
+    }
   }
 }
 
@@ -431,46 +573,40 @@ async function handleSendMessage(): Promise<void> {
 // Modal nouvelle conversation
 // ─────────────────────────────────────────────────────────────────────────────
 
-function openModal(): void {
+function openNewConvModal(): void {
   const modal = document.getElementById('modal-new-conv');
   if (modal) modal.style.display = 'flex';
   setTimeout(() => document.getElementById('modal-uid-input')?.focus(), 50);
 }
-
-function closeModal(): void {
+function closeNewConvModal(): void {
   const modal = document.getElementById('modal-new-conv');
   if (modal) modal.style.display = 'none';
   const input = document.getElementById('modal-uid-input') as HTMLInputElement | null;
   if (input) input.value = '';
 }
-
 async function confirmNewConv(): Promise<void> {
-  const input = document.getElementById('modal-uid-input') as HTMLInputElement | null;
+  const input      = document.getElementById('modal-uid-input') as HTMLInputElement | null;
   const contactUid = input?.value.trim();
-  if (!contactUid || contactUid === _myUid) {
-    showToast('UID invalide.');
-    return;
-  }
-  closeModal();
-  switchView('chat');
+  if (!contactUid || contactUid === _myUid) { showToast('UID invalide.'); return; }
+  closeNewConvModal();
   try {
     const convId = await getOrCreateConversation(_myUid, contactUid);
+    switchView('chat');
     openConversation(convId, contactUid);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error('getOrCreateConversation failed:', err);
-    showToast(`Erreur : ${msg}`);
+    showToast(`Erreur : ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Déconnexion
+// Déconnexion — vider les IDs rendus
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSignOut(): Promise<void> {
   _unsubConvs?.();
   _unsubMessages?.();
   _currentConvId = null;
+  _renderedCount  = 0;
   await signOut();
 }
 
@@ -479,12 +615,7 @@ async function handleSignOut(): Promise<void> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
 }
 
 function showToast(msg: string): void {

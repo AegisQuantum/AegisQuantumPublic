@@ -1021,6 +1021,78 @@
 }
 
 /* ═══════════════════════════════════════
+   AVATAR — settings + modal
+═══════════════════════════════════════ */
+
+.avatar-settings-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-avatar-preview {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--c-accent);
+  border: 2px solid var(--c-border3);
+  flex-shrink: 0;
+  letter-spacing: 0.05em;
+}
+
+/* Grand avatar dans la modale */
+.avatar-preview-large {
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--c-accent);
+  border: 2.5px solid var(--c-border3);
+  flex-shrink: 0;
+  letter-spacing: 0.06em;
+  transition: background 0.2s;
+}
+
+/* Grille de swatches couleur */
+.avatar-color-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.avatar-color-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: transform 0.12s, border-color 0.12s, box-shadow 0.12s;
+  flex-shrink: 0;
+}
+.avatar-color-swatch:hover {
+  transform: scale(1.12);
+  border-color: rgba(255,255,255,0.35);
+}
+.avatar-color-swatch.selected {
+  border-color: #fff;
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.25);
+  transform: scale(1.08);
+}
+
+/* ═══════════════════════════════════════
    UTILITAIRES
 ═══════════════════════════════════════ */
 

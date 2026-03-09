@@ -1,11 +1,11 @@
 <!-- chat.html — template chargé dynamiquement dans #chat-screen après auth -->
+<!-- SERVI DEPUIS public/ — c'est CE fichier qui est utilisé en dev et en prod -->
 <link rel="stylesheet" href="/src/styles/chat.css" />
 
 <div id="chat-root">
 
-  <!-- ══ TOP NAVIGATION BAR ══ -->
+  <!-- ══ TOP NAV ══ -->
   <header class="topnav">
-
     <div class="topnav-left">
       <button class="topnav-btn" id="btn-toggle-sidebar" title="Afficher / masquer les conversations">
         <svg viewBox="0 0 20 20" fill="none" width="17" height="17">
@@ -22,7 +22,6 @@
       </button>
     </div>
 
-    <!-- Logo unique, petit, centré -->
     <div class="topnav-center">
       <img src="/BIGLOGO.png" alt="AegisQuantum" class="topnav-logo" />
       <span class="topnav-brand">AEGISQUANTUM</span>
@@ -57,16 +56,14 @@
         </div>
       </div>
     </div>
-
   </header>
 
   <!-- ══ BODY ══ -->
   <div class="chat-body">
 
-    <!-- ══ PANNEAU GAUCHE 1/3 ══ -->
+    <!-- ══ PANNEAU GAUCHE ══ -->
     <div class="left-panel" id="left-panel">
 
-      <!-- 2/3 haut — liste conversations -->
       <aside class="sidebar" id="sidebar-chat">
         <div class="sidebar-header">
           <div class="sidebar-title">Messages</div>
@@ -85,13 +82,10 @@
         </div>
         <div class="contacts-list" id="contacts-list">
           <div class="contacts-section-label">Récent</div>
-          <div class="contacts-empty" id="contacts-empty">
-            Aucune conversation.<br/>Cliquez sur <strong>+</strong> pour commencer.
-          </div>
+          <div class="contacts-empty">Aucune conversation.<br/>Cliquez sur <strong>+</strong> pour commencer.</div>
         </div>
       </aside>
 
-      <!-- 1/3 bas — crypto box -->
       <div class="crypto-box" id="crypto-box">
         <div class="crypto-box-header">
           <span class="crypto-box-title">
@@ -107,9 +101,9 @@
         <div class="crypto-steps" id="crypto-steps">
           <div class="crypto-idle">
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.2" width="20" height="20">
-              <rect x="4" y="8" width="12" height="10" rx="2" opacity="0.4"/>
-              <path d="M7 8V6a3 3 0 0 1 6 0v2" opacity="0.4"/>
-              <circle cx="10" cy="13" r="1.2" opacity="0.4"/>
+              <rect x="4" y="8" width="12" height="10" rx="2" opacity="0.35"/>
+              <path d="M7 8V6a3 3 0 0 1 6 0v2" opacity="0.35"/>
+              <circle cx="10" cy="13" r="1.2" opacity="0.35"/>
             </svg>
             <span>En attente d'activité…</span>
           </div>
@@ -118,10 +112,9 @@
 
     </div>
 
-    <!-- ══ PANNEAU DROIT 2/3 — chat ══ -->
+    <!-- ══ PANNEAU DROIT — Chat ══ -->
     <main class="chat-main" id="view-chat">
 
-      <!-- Empty state SANS logo -->
       <div class="chat-empty" id="chat-empty">
         <div class="chat-empty-icon">
           <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.2" width="38" height="38">
@@ -140,7 +133,8 @@
           <div class="topbar-contact">
             <div class="topbar-avatar" id="topbar-avatar">—</div>
             <div class="topbar-info">
-              <span class="chat-contact-name" id="chat-contact-name">—</span>
+              <!-- Double-clic sur le nom pour renommer -->
+              <span class="chat-contact-name" id="chat-contact-name" title="Double-cliquer pour renommer">—</span>
               <span class="e2e-indicator">
                 <span class="e2e-dot"></span>
                 Chiffrement de bout en bout
@@ -148,6 +142,12 @@
             </div>
           </div>
           <div class="topbar-actions">
+            <button class="btn-topbar" id="btn-rename-conv" title="Renommer cette conversation">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="11" height="11">
+                <path d="M11 2.5a1.5 1.5 0 0 1 2.5 1.5L5 12.5 2 13.5l1-3L11 2.5Z"/>
+              </svg>
+              Renommer
+            </button>
             <button class="btn-topbar" id="btn-fingerprint">Safety Numbers</button>
           </div>
         </div>
@@ -170,16 +170,36 @@
         <h2>Paramètres</h2>
         <p>Configuration de votre compte AegisQuantum</p>
       </div>
+
+      <!-- Profil / Avatar -->
       <div class="settings-section">
-        <div class="settings-section-title">Identité</div>
-        <div>
-          <div class="modal-label" style="margin-bottom:6px">Votre UID public</div>
-          <div class="settings-uid-block">
-            <span class="settings-uid" id="settings-uid">—</span>
-            <button class="btn-copy" id="btn-copy-uid-settings">Copier</button>
+        <div class="settings-section-title">Profil</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-row-left">
+              <span class="settings-row-label">Photo de profil</span>
+              <span class="settings-row-desc">Initiales et couleur affichées dans l'interface</span>
+            </div>
+            <div class="avatar-settings-right">
+              <div class="settings-avatar-preview" id="settings-avatar-preview">AQ</div>
+              <button class="btn-copy" id="btn-change-avatar">Modifier</button>
+            </div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-left">
+              <span class="settings-row-label">Votre UID public</span>
+              <span class="settings-row-desc">Partagez-le avec vos contacts</span>
+            </div>
+          </div>
+          <div style="padding:0 16px 13px">
+            <div class="settings-uid-block">
+              <span class="settings-uid" id="settings-uid">—</span>
+              <button class="btn-copy" id="btn-copy-uid-settings">Copier</button>
+            </div>
           </div>
         </div>
       </div>
+
       <div class="settings-section">
         <div class="settings-section-title">Sécurité & Chiffrement</div>
         <div class="settings-card">
@@ -220,13 +240,14 @@
           </div>
         </div>
       </div>
+
       <div class="settings-section">
         <div class="settings-section-title">Compte</div>
         <div class="settings-card">
           <div class="settings-row">
             <div class="settings-row-left">
               <span class="settings-row-label">Authentification</span>
-              <span class="settings-row-desc">Email/Password via Firebase Auth</span>
+              <span class="settings-row-desc">Username uniquement — aucun email stocké</span>
             </div>
             <span class="settings-badge badge-green">Connecté</span>
           </div>
@@ -239,6 +260,7 @@
           </div>
         </div>
       </div>
+
       <div class="settings-section">
         <div class="settings-section-title">Session</div>
         <button class="btn-signout-settings" id="btn-signout-settings">
@@ -250,11 +272,10 @@
       </div>
     </section>
 
-  </div><!-- /.chat-body -->
+  </div>
+</div>
 
-</div><!-- /#chat-root -->
-
-<!-- ══ MODAL ══ -->
+<!-- ══ MODAL — Nouvelle conversation ══ -->
 <div class="modal-overlay" id="modal-new-conv" style="display:none">
   <div class="modal">
     <div class="modal-header">
@@ -266,11 +287,69 @@
       <input type="text" class="modal-input" id="modal-uid-input"
         placeholder="Collez l'UID Firebase du contact…"
         spellcheck="false" autocomplete="off"/>
-      <div class="modal-hint">L'UID est visible dans Paramètres → Identité de votre contact.</div>
+      <div class="modal-hint">L'UID est visible dans Paramètres → Profil de votre contact.</div>
     </div>
     <div class="modal-actions">
       <button class="btn-modal-cancel" id="modal-cancel">Annuler</button>
       <button class="btn-modal-confirm" id="modal-confirm">Démarrer</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MODAL — Renommer conversation ══ -->
+<div class="modal-overlay" id="rename-modal" style="display:none">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Renommer la conversation</span>
+      <button class="modal-close" id="rename-modal-close">×</button>
+    </div>
+    <div>
+      <div class="modal-label">Nouveau nom (local uniquement)</div>
+      <input type="text" class="modal-input" id="rename-input"
+        placeholder="Ex : Alice, Projet X…" maxlength="40" autocomplete="off"/>
+      <div class="modal-hint">Ce nom est uniquement visible par vous. Laissez vide pour réinitialiser.</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" id="rename-modal-cancel">Annuler</button>
+      <button class="btn-modal-confirm" id="rename-modal-confirm">Renommer</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MODAL — Modifier l'avatar ══ -->
+<div class="modal-overlay" id="avatar-modal" style="display:none">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Photo de profil</span>
+      <button class="modal-close" id="avatar-modal-close">×</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;align-items:center;gap:16px">
+        <div class="avatar-preview-large" id="avatar-modal-preview">AQ</div>
+        <div style="flex:1">
+          <div class="modal-label" style="margin-bottom:6px">Initiales (max 2 caractères)</div>
+          <input type="text" class="modal-input" id="avatar-initials-input"
+            maxlength="2" placeholder="AQ" autocomplete="off"
+            style="text-transform:uppercase;font-size:16px;text-align:center;letter-spacing:0.1em"/>
+        </div>
+      </div>
+      <div>
+        <div class="modal-label" style="margin-bottom:8px">Couleur</div>
+        <div class="avatar-color-grid">
+          <div class="avatar-color-swatch" data-color="#6b8ff5" style="background:#6b8ff5"></div>
+          <div class="avatar-color-swatch" data-color="#5eead4" style="background:#5eead4"></div>
+          <div class="avatar-color-swatch" data-color="#f472b6" style="background:#f472b6"></div>
+          <div class="avatar-color-swatch" data-color="#fb923c" style="background:#fb923c"></div>
+          <div class="avatar-color-swatch" data-color="#a78bfa" style="background:#a78bfa"></div>
+          <div class="avatar-color-swatch" data-color="#34d399" style="background:#34d399"></div>
+          <div class="avatar-color-swatch" data-color="#f87171" style="background:#f87171"></div>
+          <div class="avatar-color-swatch" data-color="#60a5fa" style="background:#60a5fa"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" id="avatar-modal-cancel">Annuler</button>
+      <button class="btn-modal-confirm" id="avatar-modal-confirm">Enregistrer</button>
     </div>
   </div>
 </div>
