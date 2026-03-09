@@ -10,9 +10,22 @@
  *  - jamais stocké dans Firestore
  *  - jamais retourné dans AQUser (qui ne contient que `uid`)
  *
+ * Pipeline register() :
+ *  1. Firebase createUser(fakeEmail, password) → uid
+ *  2. kemGenerateKeyPair()  → kemKeyPair
+ *  3. dsaGenerateKeyPair()  → dsaKeyPair
+ *  4. argon2Derive(password) → { masterKey, salt }
+ *  5. storePrivateKeys(uid, { kem, dsa, masterKey, salt }) → IDB chiffré
+ *  6. publishPublicKeys(uid, { kemPublicKey, dsaPublicKey }) → Firestore
+ *
+ * Pipeline signIn() :
+ *  1. Firebase signIn(fakeEmail, password) → uid
+ *  2. fetchArgon2Salt(uid) ← Firestore /users/{uid}
+ *  3. argon2Derive(password, salt) → masterKey
+ *  4. unlockPrivateKeys(uid, masterKey) ← IDB → mémoire
+ *
  * Prérequis Firebase console :
  *  Authentication → Sign-in method → Email/Password → ENABLED
- *  (le second toggle "Email link / passwordless" doit rester OFF)
  */
 
 import {
@@ -22,49 +35,25 @@ import {
   onAuthStateChanged,
   type User,
 } from "firebase/auth";
-import { auth } from "./firebase";
-import { clearPrivateKeys } from "./key-store";
+import { doc, setDoc, getDoc } from "firebase/firestore";
+import { auth, db } from "./firebase";
+import { storePrivateKeys, clearPrivateKeys, unlockPrivateKeys } from "./key-store";
+import { publishPublicKeys } from "./key-registry";
+import { kemGenerateKeyPair, dsaGenerateKeyPair, argon2Derive } from "../crypto";
 import type { AQUser } from "../types/user";
-import type { KemKeyPair, DsaKeyPair, Argon2Result } from "../types/crypto";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Stubs crypto (branchés quand crypto/ sera implémenté)
+// Utilitaires internes
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function _generateKemKeyPair(): Promise<KemKeyPair> {
-  throw new Error("TODO: kemGenerateKeyPair()");
-}
-void _generateKemKeyPair;
-
-async function _generateDsaKeyPair(): Promise<DsaKeyPair> {
-  throw new Error("TODO: dsaGenerateKeyPair()");
-}
-void _generateDsaKeyPair;
-
-async function _argon2Derive(_password: string, _salt?: string): Promise<Argon2Result> {
-  throw new Error("TODO: argon2Derive()");
-}
-void _argon2Derive;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Utilitaire interne : username → faux email Firebase
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Dérive un email fictif à partir d'un username.
- * Firebase Auth requiert un email valide — on utilise ce faux email uniquement
- * comme clé de connexion interne. Il n'est jamais visible ni stocké ailleurs.
- */
+/** Dérive un email fictif pour Firebase Auth — jamais affiché ni stocké. */
 function toFakeEmail(username: string): string {
   const clean = username.toLowerCase().replace(/[^a-z0-9._-]/g, "");
   if (!clean) throw new Error("Invalid username");
   return `${clean}@aq.local`;
 }
 
-/**
- * Valide qu'un username est acceptable (3–24 chars, alphanum + . _ -)
- * Retourne un message d'erreur ou null si OK.
- */
+/** Valide un username (3–24 chars, alphanum + . _ -). Retourne null si OK. */
 export function validateUsername(username: string): string | null {
   if (username.length < 3)  return "Username must be at least 3 characters.";
   if (username.length > 24) return "Username must be at most 24 characters.";
@@ -83,7 +72,7 @@ export function getCurrentUser(): AQUser | null {
   return _currentUser;
 }
 
-// Synchroniser _currentUser avec Firebase Auth (ex : rechargement de page)
+// Synchroniser _currentUser avec Firebase Auth (rechargement de page)
 onAuthStateChanged(auth, (firebaseUser: User | null) => {
   _currentUser = firebaseUser ? { uid: firebaseUser.uid } : null;
 });
@@ -97,22 +86,32 @@ export async function register(username: string, password: string): Promise<AQUs
   const credential = await createUserWithEmailAndPassword(auth, fakeEmail, password);
   const uid        = credential.user.uid;
 
-  // TODO: décommenter quand crypto/ sera implémenté
-  // const kemKeyPair = await _generateKemKeyPair();
-  // const dsaKeyPair = await _generateDsaKeyPair();
-  // const { key: masterKey, salt: argon2Salt } = await _argon2Derive(password);
-  // await storePrivateKeys(uid, {
-  //   kemPrivateKey: kemKeyPair.privateKey,
-  //   dsaPrivateKey: dsaKeyPair.privateKey,
-  //   masterKey,
-  //   argon2Salt,
-  // });
-  // await publishPublicKeys(uid, {
-  //   uid,
-  //   kemPublicKey: kemKeyPair.publicKey,
-  //   dsaPublicKey: dsaKeyPair.publicKey,
-  //   createdAt   : Date.now(),
-  // });
+  // Générer les paires de clés post-quantiques
+  const kemKeyPair = await kemGenerateKeyPair();
+  const dsaKeyPair = await dsaGenerateKeyPair();
+
+  // Dériver la master key depuis le password (génère un salt aléatoire)
+  const { key: masterKey, salt: argon2Salt } = await argon2Derive(password);
+
+  // Chiffrer et persister les clés privées dans IndexedDB
+  await storePrivateKeys(uid, {
+    kemPrivateKey: kemKeyPair.privateKey,
+    dsaPrivateKey: dsaKeyPair.privateKey,
+    masterKey,
+    argon2Salt,
+  });
+
+  // Stocker le salt Argon2 dans Firestore (nécessaire pour la reconnexion)
+  // /users/{uid} → { argon2Salt }  — pas de clés privées ici, jamais
+  await setDoc(doc(db, "users", uid), { argon2Salt });
+
+  // Publier les clés publiques dans Firestore /publicKeys/{uid}
+  await publishPublicKeys(uid, {
+    uid,
+    kemPublicKey: kemKeyPair.publicKey,
+    dsaPublicKey: dsaKeyPair.publicKey,
+    createdAt   : Date.now(),
+  });
 
   _currentUser = { uid };
   return _currentUser;
@@ -127,10 +126,18 @@ export async function signIn(username: string, password: string): Promise<AQUser
   const credential = await signInWithEmailAndPassword(auth, fakeEmail, password);
   const uid        = credential.user.uid;
 
-  // TODO: décommenter quand crypto/ sera implémenté
-  // const argon2Salt = await fetchArgon2Salt(uid);
-  // const { key: masterKey } = await _argon2Derive(password, argon2Salt);
-  // await unlockPrivateKeys(uid, masterKey);
+  // Récupérer le salt Argon2 depuis Firestore pour recalculer la master key
+  const userDoc = await getDoc(doc(db, "users", uid));
+  if (!userDoc.exists()) {
+    throw new Error("User profile not found — account may be incomplete.");
+  }
+  const { argon2Salt } = userDoc.data() as { argon2Salt: string };
+
+  // Recalculer la master key avec le même salt (même password → même key)
+  const { key: masterKey } = await argon2Derive(password, argon2Salt);
+
+  // Déchiffrer les clés privées depuis IndexedDB et les charger en mémoire
+  await unlockPrivateKeys(uid, masterKey);
 
   _currentUser = { uid };
   return _currentUser;
@@ -141,7 +148,7 @@ export async function signIn(username: string, password: string): Promise<AQUser
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function signOut(): Promise<void> {
-  clearPrivateKeys();
+  clearPrivateKeys();         // purge RAM immédiatement
   await firebaseSignOut(auth);
   _currentUser = null;
 }

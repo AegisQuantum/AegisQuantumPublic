@@ -8,18 +8,14 @@ export default defineConfig({
     exclude: ["@openforge-sh/liboqs"],
   },
   test: {
+    // Les environnements et setupFiles sont définis dans vitest.workspace.ts.
+    // Ce bloc gère uniquement la config globale (coverage, reporter).
     globals: true,
-    // node pour les tests crypto (WASM), jsdom pour les tests services (IndexedDB + Firebase)
-    environment: "node",
-    environmentMatchGlobs: [
-      ["src/services/__tests__/**", "jsdom"],
-    ],
-    // Setup : fake-indexeddb + mocks Firebase (auth + firestore)
-    setupFiles: ["src/services/__tests__/setup.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "html"],
-      include: ["src/crypto/**/*.ts", "src/services/**/*.ts"],
+      include  : ["src/crypto/**/*.ts", "src/services/**/*.ts"],
+      exclude  : ["src/**/__tests__/**"],
       thresholds: {
         lines     : 80,
         functions : 80,

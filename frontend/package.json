@@ -11,15 +11,34 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
-    "test:sec": "vitest run -t '\\[SEC\\]'",
-    "test:perf": "vitest run -t 'KPI'",
-    "test:crypto": "vitest run src/crypto/",
     "coverage": "vitest run --coverage",
+
+    "test:kem": "vitest run src/crypto/__tests__/kem.test.ts",
     "test:kem:cov": "npm run test -- run src/crypto/__tests__/kem.test.ts --coverage.enabled --coverage.include='src/crypto/kem.ts' --coverage.reporter='lcov' --coverage.reporter='text'",
+    "test:dsa": "vitest run src/crypto/__tests__/dsa.test.ts",
+    "test:hkdf": "vitest run src/crypto/__tests__/hkdf.test.ts",
+    "test:aes": "vitest run src/crypto/__tests__/aes-gcm.test.ts",
+    "test:argon2": "vitest run src/crypto/__tests__/argon2.test.ts",
+    "test:ratchet-state": "vitest run src/crypto/__tests__/ratchet-state.test.ts",
+    "test:crypto": "vitest run src/crypto/__tests__/",
+    "test:crypto:cov": "npm run test -- run src/crypto/__tests__/ --coverage.enabled --coverage.include='src/crypto/*.ts' --coverage.reporter='lcov' --coverage.reporter='text'",
+
+    "test:auth": "vitest run src/services/__tests__/auth.test.ts",
+    "test:key-store": "vitest run src/services/__tests__/key-store.test.ts",
+    "test:key-registry": "vitest run src/services/__tests__/key-registry.test.ts",
+    "test:messaging": "vitest run src/services/__tests__/messaging.test.ts",
+    "test:db": "vitest run src/services/__tests__/db.test.ts",
     "test:services": "vitest run src/services/__tests__/",
     "test:services:cov": "npm run test -- run src/services/__tests__/ --coverage.enabled --coverage.include='src/services/*.ts' --coverage.reporter='lcov' --coverage.reporter='text'",
-    "test:db": "vitest run src/services/__tests__/db.test.ts",
-    "test:pentest": "vitest run -t '\\[P'"
+
+    "test:all": "vitest run",
+    "test:all:cov": "vitest run --coverage",
+
+    "test:kpi": "vitest run -t '\\[KPI\\]'",
+    "test:sec": "vitest run -t '\\[SEC\\]|\\[PENTEST\\]|\\[SIDE-CHANNEL\\]|\\[SESSION\\]'",
+    "test:pentest": "vitest run -t '\\[PENTEST\\]'",
+    "test:pentest:crypto": "vitest run src/crypto/__tests__/ -t '\\[PENTEST\\]'",
+    "test:pentest:services": "vitest run src/services/__tests__/ -t '\\[PENTEST\\]|\\[SEC\\]|\\[SESSION\\]'"
   },
   "dependencies": {
     "@openforge-sh/liboqs": "latest",
