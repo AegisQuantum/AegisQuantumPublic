@@ -37,6 +37,7 @@ async function _aesGcmEncrypt(
 ): Promise<{ ciphertext: string; nonce: string }> {
   throw new Error("TODO: brancher aesGcmEncrypt() depuis crypto/aes-gcm.ts");
 }
+void _aesGcmEncrypt;
 
 async function _aesGcmDecrypt(
   _ciphertext: string,
@@ -45,6 +46,7 @@ async function _aesGcmDecrypt(
 ): Promise<string> {
   throw new Error("TODO: brancher aesGcmDecrypt() depuis crypto/aes-gcm.ts");
 }
+void _aesGcmDecrypt;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types internes
@@ -58,8 +60,11 @@ interface PrivateKeyMemory {
   dsaPrivateKey: string;
 }
 
-/** Format du vault chiffré persisté dans IndexedDB. */
-interface EncryptedVault {
+/** Format du vault chiffré persisté dans IndexedDB.
+ * @todo Utilisé quand aesGcmEncrypt sera branché dans storePrivateKeys/unlockPrivateKeys.
+ */
+// @todo : branché dans storePrivateKeys/unlockPrivateKeys quand aesGcmEncrypt sera implémenté.
+export type EncryptedVault = {
   /** Base64 — AES-256-GCM encrypted JSON(PrivateKeyMemory). Chiffré via aesGcmEncrypt() */
   ciphertext: string;
   /** Base64 — nonce AES-GCM (12 bytes). Produit par aesGcmEncrypt() */

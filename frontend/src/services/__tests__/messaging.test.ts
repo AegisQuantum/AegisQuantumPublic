@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   getConversationId,
   getOrCreateConversation,
-  getConversations,
+  // getConversations testé via getConversationId + subscribeToConversations
   sendMessage,
   decryptMessage,
   subscribeToConversations,

@@ -17,7 +17,9 @@
     "coverage": "vitest run --coverage",
     "test:kem:cov": "npm run test -- run src/crypto/__tests__/kem.test.ts --coverage.enabled --coverage.include='src/crypto/kem.ts' --coverage.reporter='lcov' --coverage.reporter='text'",
     "test:services": "vitest run src/services/__tests__/",
-    "test:services:cov": "npm run test -- run src/services/__tests__/ --coverage.enabled --coverage.include='src/services/*.ts' --coverage.reporter='lcov' --coverage.reporter='text'"
+    "test:services:cov": "npm run test -- run src/services/__tests__/ --coverage.enabled --coverage.include='src/services/*.ts' --coverage.reporter='lcov' --coverage.reporter='text'",
+    "test:db": "vitest run src/services/__tests__/db.test.ts",
+    "test:pentest": "vitest run -t '\\[P'"
   },
   "dependencies": {
     "@openforge-sh/liboqs": "latest",

@@ -1,15 +1,15 @@
 /**
  * setup.ts — Environnement de test pour src/services/
  *
- * Problèmes résolus :
- *  1. `indexedDB is not defined`       → fake-indexeddb injecté dans globalThis
- *  2. `auth/configuration-not-found`   → mock offline firebase/auth + firebase/firestore
+ * Résout :
+ *  1. `indexedDB is not defined`     → fake-indexeddb injecté dans globalThis
+ *  2. `auth/configuration-not-found` → mock offline de firebase/auth + firebase/firestore
  *
  * Conception :
- *  - Pas d'email stocké nulle part — l'identité est uniquement le uid Firebase.
- *  - Le mock Auth utilise email+password comme vecteur de connexion (Firebase le requiert)
- *    mais l'uid retourné dans AQUser ne contient PAS d'email.
- *  - Le mock Firestore est un Map en mémoire qui simule setDoc/getDoc/addDoc/onSnapshot.
+ *  - L'utilisateur saisit USERNAME + PASSWORD, jamais d'email.
+ *  - auth.ts dérive en interne un fakeEmail @aq.local pour Firebase Auth.
+ *  - Le mock Auth accepte ce fakeEmail comme clé de lookup uniquement.
+ *  - AQUser ne contient que `uid` — aucun email n'est retourné ou stocké.
  *  - Tout est réinitialisé entre chaque test via beforeEach.
  */
 
@@ -22,13 +22,9 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 // ── 2. Mock Firebase Auth ─────────────────────────────────────────────────
 import { vi, beforeEach } from "vitest";
 
-// Compteur d'UIDs — garantit l'unicité même si plusieurs tests créent le même email
 let _uidCounter = 0;
-
-// Stocke email → { uid, password } — email utilisé UNIQUEMENT comme clé de lookup Auth
-// Il n'est jamais exposé dans les retours de service ni dans Firestore
+// fakeEmail (@aq.local) → { uid, password }
 const _accounts = new Map<string, { uid: string; password: string }>();
-
 let   _currentFirebaseUser: { uid: string } | null = null;
 const _authListeners: Array<(user: { uid: string } | null) => void> = [];
 
@@ -41,35 +37,34 @@ vi.mock("firebase/auth", async () => {
   const actual = await vi.importActual<typeof import("firebase/auth")>("firebase/auth");
   return {
     ...actual,
-
     getAuth: vi.fn(() => ({ _mock: true })),
 
-    createUserWithEmailAndPassword: vi.fn(async (_auth: unknown, email: string, password: string) => {
-      if (!email?.includes("@"))
-        throw Object.assign(new Error("Firebase: Error (auth/invalid-email)."),   { code: "auth/invalid-email" });
+    // auth.ts appelle ceci avec fakeEmail = username@aq.local
+    createUserWithEmailAndPassword: vi.fn(async (_auth: unknown, fakeEmail: string, password: string) => {
+      if (!fakeEmail?.includes("@"))
+        throw Object.assign(new Error("Firebase: Error (auth/invalid-email)."), { code: "auth/invalid-email" });
       if (!password || password.length < 6)
-        throw Object.assign(new Error("Firebase: Error (auth/weak-password)."),   { code: "auth/weak-password" });
-      if (_accounts.has(email))
+        throw Object.assign(new Error("Firebase: Error (auth/weak-password)."), { code: "auth/weak-password" });
+      if (_accounts.has(fakeEmail))
         throw Object.assign(new Error("Firebase: Error (auth/email-already-in-use)."), { code: "auth/email-already-in-use" });
 
       const uid = `mock-uid-${++_uidCounter}-${Date.now()}`;
-      _accounts.set(email, { uid, password });
+      _accounts.set(fakeEmail, { uid, password });
       _notifyAuth({ uid });
-      // email présent dans le user Firebase (requis par l'API) mais ignoré par nos services
-      return { user: { uid, email } };
+      return { user: { uid } }; // pas d'email dans le retour — auth.ts n'en extrait que uid
     }),
 
-    signInWithEmailAndPassword: vi.fn(async (_auth: unknown, email: string, password: string) => {
-      if (!email?.includes("@"))
-        throw Object.assign(new Error("Firebase: Error (auth/invalid-email)."),    { code: "auth/invalid-email" });
+    signInWithEmailAndPassword: vi.fn(async (_auth: unknown, fakeEmail: string, password: string) => {
+      if (!fakeEmail?.includes("@"))
+        throw Object.assign(new Error("Firebase: Error (auth/invalid-email)."), { code: "auth/invalid-email" });
       if (!password)
         throw Object.assign(new Error("Firebase: Error (auth/missing-password)."), { code: "auth/missing-password" });
-      const account = _accounts.get(email);
-      if (account?.password !== password)
-        throw Object.assign(new Error("Firebase: Error (auth/wrong-password)."),   { code: "auth/wrong-password" });
+      const account = _accounts.get(fakeEmail);
+      if (!account || account.password !== password)
+        throw Object.assign(new Error("Firebase: Error (auth/wrong-password)."), { code: "auth/wrong-password" });
 
       _notifyAuth({ uid: account.uid });
-      return { user: { uid: account.uid, email } };
+      return { user: { uid: account.uid } };
     }),
 
     signOut: vi.fn(async (_auth: unknown) => {
@@ -88,25 +83,13 @@ vi.mock("firebase/auth", async () => {
 });
 
 // ── 3. Mock Firebase Firestore ────────────────────────────────────────────
-// Store en mémoire : Map<docPath, data>
-// Paths : "col/docId" pour un document, "col/docId/subCol/subDocId" pour sous-collection
-
-const _store       = new Map<string, unknown>();
+const _store        = new Map<string, unknown>();
 const _snapListeners = new Map<string, Array<(snap: unknown) => void>>();
 
-/** Construit un snapshot Firestore-like à partir du store en mémoire */
 function _buildSnap(colPath: string) {
   const docs = [..._store.entries()]
-    .filter(([k]) => {
-      if (!k.startsWith(colPath + "/")) return false;
-      // Uniquement les documents directs (pas les sous-collections)
-      return !k.slice(colPath.length + 1).includes("/");
-    })
-    .map(([k, v]) => ({
-      id  : k.split("/").pop()!,
-      data: () => v,
-      ...(v as object),
-    }));
+    .filter(([k]) => k.startsWith(colPath + "/") && !k.slice(colPath.length + 1).includes("/"))
+    .map(([k, v]) => ({ id: k.split("/").pop()!, data: () => v, ...(v as object) }));
   return {
     docs,
     empty  : docs.length === 0,
@@ -123,34 +106,22 @@ vi.mock("firebase/firestore", async () => {
   const actual = await vi.importActual<typeof import("firebase/firestore")>("firebase/firestore");
   return {
     ...actual,
-
     getFirestore: vi.fn(() => ({ _mock: true })),
 
-    // Références — retournent des objets avec _path pour les autres mocks
-    collection: vi.fn((_db: unknown, ...segs: string[]) => ({
-      _path: segs.join("/"),
-      _type: "collection",
-    })),
-    doc: vi.fn((_db: unknown, ...segs: string[]) => ({
-      _path: segs.join("/"),
-      _type: "doc",
-    })),
+    collection: vi.fn((_db: unknown, ...segs: string[]) => ({ _path: segs.join("/"), _type: "collection" })),
+    doc       : vi.fn((_db: unknown, ...segs: string[]) => ({ _path: segs.join("/"), _type: "doc" })),
 
-    // Écriture document
     setDoc: vi.fn(async (ref: { _path: string }, data: unknown) => {
       _store.set(ref._path, data);
-      const parts = ref._path.split("/");
-      parts.pop();
+      const parts = ref._path.split("/"); parts.pop();
       _fireSnap(parts.join("/"));
     }),
 
-    // Lecture document
     getDoc: vi.fn(async (ref: { _path: string }) => {
       const data = _store.get(ref._path);
       return { exists: () => data !== undefined, data: () => data };
     }),
 
-    // Ajout document avec ID auto
     addDoc: vi.fn(async (ref: { _path: string }, data: unknown) => {
       const id       = `doc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const fullPath = `${ref._path}/${id}`;
@@ -159,26 +130,19 @@ vi.mock("firebase/firestore", async () => {
       return { id };
     }),
 
-    // Lecture collection (query simplifiée — pas de filtrage réel en mock)
     getDocs: vi.fn(async (queryRef: { _path: string }) => _buildSnap(queryRef._path)),
 
-    // Helpers query (stub — le mock getDocs ne filtre pas)
     query  : vi.fn((colRef: { _path: string }, ...constraints: unknown[]) => ({
-      _path       : colRef._path,
-      _constraints: constraints,
+      _path: colRef._path, _constraints: constraints,
     })),
     where  : vi.fn(() => ({})),
     orderBy: vi.fn(() => ({})),
 
-    // Listener temps-réel
     onSnapshot: vi.fn((queryRef: { _path: string }, cb: (snap: unknown) => void) => {
       const path = queryRef._path;
       if (!_snapListeners.has(path)) _snapListeners.set(path, []);
       _snapListeners.get(path)!.push(cb);
-
-      // Appel initial asynchrone (comme Firestore)
       setTimeout(() => cb(_buildSnap(path)), 0);
-
       return () => {
         const list = _snapListeners.get(path) ?? [];
         const i    = list.indexOf(cb);
@@ -193,16 +157,11 @@ vi.mock("firebase/firestore", async () => {
 // ── 4. Reset entre chaque test ────────────────────────────────────────────
 
 beforeEach(() => {
-  // Auth
   _accounts.clear();
   _uidCounter          = 0;
   _currentFirebaseUser = null;
   _authListeners.length = 0;
-
-  // Firestore
   _store.clear();
   _snapListeners.clear();
-
-  // IndexedDB — nouvelle instance vierge (isolation complète)
   (globalThis as Record<string, unknown>).indexedDB = new IDBFactory();
 });

@@ -25,7 +25,7 @@
   --warning:      #f59e0b;
 
   --font-mono: 'IBM Plex Mono', monospace;
-  --font-sans: 'IBM Plex Sans', sans-serif;
+  --font-sans: 'Inter', 'IBM Plex Sans', sans-serif;
 
   --radius-sm: 4px;
   --radius-md: 8px;

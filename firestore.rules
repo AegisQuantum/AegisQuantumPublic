@@ -2,13 +2,19 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Clés publiques ML-KEM : tout utilisateur auth peut lire, chacun écrit la sienne
+    // ── PUBLIC KEYS ─────────────────────────────────────────────────────────
+    // Tout utilisateur authentifié peut lire n'importe quelle clé publique.
+    // Chaque utilisateur ne peut écrire QUE son propre document.
     match /publicKeys/{userId} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null && request.auth.uid == userId;
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null
+                   && request.auth.uid == userId;
     }
 
-    // Messages : seuls expéditeur et destinataire peuvent lire
+    // ── MESSAGES (collection plate, architecture document) ──────────────────
+    // Seuls l'expéditeur et le destinataire peuvent lire un message.
+    // Seul l'expéditeur peut créer un message (senderId == auth.uid).
+    // Aucun update ni delete n'est jamais autorisé (immutabilité).
     match /messages/{messageId} {
       allow read: if request.auth != null &&
         (request.auth.uid == resource.data.senderId ||
@@ -18,13 +24,43 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // Profils utilisateurs
-    match /users/{userId} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null && request.auth.uid == userId;
+    // ── CONVERSATIONS ────────────────────────────────────────────────────────
+    // Un utilisateur peut lire/créer une conversation dont il est participant.
+    // Un utilisateur peut mettre à jour une conversation dont il est participant
+    // (ex: lastMessageAt, lastMessagePreview après envoi).
+    // Aucun delete n'est autorisé.
+    match /conversations/{convId} {
+      allow read, create: if request.auth != null &&
+        request.auth.uid in resource.data.participants;
+      allow update: if request.auth != null &&
+        request.auth.uid in resource.data.participants;
+      allow delete: if false;
+
+      // ── MESSAGES DE CONVERSATION (sous-collection) ─────────────────────
+      // Seuls les participants de la conversation parente peuvent lire.
+      // Seul l'expéditeur peut créer (senderUid == auth.uid).
+      // Aucun update ni delete.
+      match /messages/{messageId} {
+        allow read: if request.auth != null &&
+          request.auth.uid in get(/databases/$(database)/documents/conversations/$(convId)).data.participants;
+        allow create: if request.auth != null &&
+          request.auth.uid == request.resource.data.senderUid;
+        allow update, delete: if false;
+      }
     }
 
-    // Refus par défaut
+    // ── USER PROFILES ────────────────────────────────────────────────────────
+    // Tout utilisateur authentifié peut lire n'importe quel profil
+    // (nécessaire pour la recherche de contacts).
+    // Chaque utilisateur ne peut écrire QUE son propre profil.
+    match /users/{userId} {
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null
+                   && request.auth.uid == userId;
+    }
+
+    // ── CATCH-ALL ────────────────────────────────────────────────────────────
+    // Tout chemin non couvert ci-dessus est refusé par défaut.
     match /{document=**} {
       allow read, write: if false;
     }

@@ -376,3 +376,88 @@
   font-size: 0.78rem;
   letter-spacing: 0.05em;
 }
+
+/* ── Bulles (classes .mine / .theirs utilisées par chat.ts) ── */
+.message-bubble.mine {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius-md);
+  border-bottom-right-radius: var(--radius-sm);
+  padding: 0.6rem 0.9rem;
+  max-width: 68%;
+  word-break: break-word;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.message-bubble.theirs {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  border-bottom-left-radius: var(--radius-sm);
+  padding: 0.6rem 0.9rem;
+  max-width: 68%;
+  word-break: break-word;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.message-bubble .message-text {
+  margin: 0;
+}
+
+.message-bubble .message-meta {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: rgba(255,255,255,0.6);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.25rem;
+}
+
+.message-bubble.theirs .message-meta {
+  color: var(--text-muted);
+}
+
+.sig-ok     { color: var(--success); }
+.sig-pending { color: var(--warning, #f59e0b); }
+
+.messages-container {
+  display: flex;
+  flex-direction: column;
+}
+
+.contacts-empty {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  padding: 1rem;
+  text-align: center;
+  line-height: 1.6;
+}
+
+/* ── Toast notifications ── */
+.toast {
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 0.6rem 1.2rem;
+  border-radius: var(--radius-md);
+  z-index: 1000;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}

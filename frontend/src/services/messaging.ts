@@ -40,7 +40,9 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { getPublicKeys } from "./key-registry";
-import { getKemPrivateKey, getDsaPrivateKey, saveRatchetState, loadRatchetState } from "./key-store";
+import { getKemPrivateKey, getDsaPrivateKey, loadRatchetState } from "./key-store";
+// saveRatchetState sera branché quand le Double Ratchet sera implémenté
+// import { saveRatchetState } from "./key-store";
 import type { EncryptedMessage, Conversation, DecryptedMessage } from "../types/message";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,9 +62,11 @@ import type { EncryptedMessage, Conversation, DecryptedMessage } from "../types/
 async function _kemEncapsulate(_recipientPublicKey: string): Promise<{ sharedSecret: string; ciphertext: string }> {
   throw new Error("TODO: brancher kemEncapsulate() depuis crypto/kem.ts");
 }
+void _kemEncapsulate;
 async function _kemDecapsulate(_ciphertext: string, _privateKey: string): Promise<string> {
   throw new Error("TODO: brancher kemDecapsulate() depuis crypto/kem.ts");
 }
+void _kemDecapsulate;
 
 /**
  * TODO: importer hkdfDerive() depuis crypto/hkdf.ts
@@ -78,6 +82,7 @@ async function _kemDecapsulate(_ciphertext: string, _privateKey: string): Promis
 async function _hkdfDerive(_secret: string, _info: string): Promise<string> {
   throw new Error("TODO: brancher hkdfDerive() depuis crypto/hkdf.ts");
 }
+void _hkdfDerive;
 
 /**
  * TODO: importer aesGcmEncrypt() et aesGcmDecrypt() depuis crypto/aes-gcm.ts
@@ -95,9 +100,11 @@ async function _hkdfDerive(_secret: string, _info: string): Promise<string> {
 async function _aesGcmEncrypt(_plaintext: string, _key: string): Promise<{ ciphertext: string; nonce: string }> {
   throw new Error("TODO: brancher aesGcmEncrypt() depuis crypto/aes-gcm.ts");
 }
+void _aesGcmEncrypt;
 async function _aesGcmDecrypt(_ciphertext: string, _nonce: string, _key: string): Promise<string> {
   throw new Error("TODO: brancher aesGcmDecrypt() depuis crypto/aes-gcm.ts");
 }
+void _aesGcmDecrypt;
 
 /**
  * TODO: importer dsaSign() et dsaVerify() depuis crypto/dsa.ts
@@ -114,9 +121,11 @@ async function _aesGcmDecrypt(_ciphertext: string, _nonce: string, _key: string)
 async function _dsaSign(_message: string, _privateKey: string): Promise<string> {
   throw new Error("TODO: brancher dsaSign() depuis crypto/dsa.ts");
 }
+void _dsaSign;
 async function _dsaVerify(_message: string, _signature: string, _publicKey: string): Promise<boolean> {
   throw new Error("TODO: brancher dsaVerify() depuis crypto/dsa.ts");
 }
+void _dsaVerify;
 
 /**
  * TODO: importer doubleRatchetEncrypt() et doubleRatchetDecrypt() depuis crypto/double-ratchet.ts
@@ -156,6 +165,7 @@ async function _doubleRatchetEncrypt(
 ): Promise<{ ciphertext: string; nonce: string; messageIndex: number; newStateJson: string }> {
   throw new Error("TODO: brancher doubleRatchetEncrypt() depuis crypto/double-ratchet.ts");
 }
+void _doubleRatchetEncrypt;
 async function _doubleRatchetDecrypt(
   _ciphertext: string,
   _nonce: string,
@@ -167,6 +177,7 @@ async function _doubleRatchetDecrypt(
 ): Promise<{ plaintext: string; newStateJson: string }> {
   throw new Error("TODO: brancher doubleRatchetDecrypt() depuis crypto/double-ratchet.ts");
 }
+void _doubleRatchetDecrypt;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Paths Firestore
