@@ -1,15 +1,29 @@
 import { defineConfig } from "vite";
+import topLevelAwait  from "vite-plugin-top-level-await";
+import loggerPlugin   from "./vite-plugin-logger";
 
 export default defineConfig({
+  plugins: [
+    topLevelAwait(),
+    loggerPlugin(),
+  ],
   build: {
-    target: "es2020",
+    target: "es2022",
+    rollupOptions: {
+      // argon2-browser ne peut pas être bundlé par Rollup (WASM non-standard + imports Node)
+      // On l'exclut du bundle — il est chargé via <script> CDN dans index.html
+      external: ["argon2-browser"],
+      output: {
+        globals: {
+          "argon2-browser": "argon2",
+        },
+      },
+    },
   },
   optimizeDeps: {
-    exclude: ["@openforge-sh/liboqs"],
+    exclude: ["@openforge-sh/liboqs", "argon2-browser"],
   },
   test: {
-    // Les environnements et setupFiles sont définis dans vitest.workspace.ts.
-    // Ce bloc gère uniquement la config globale (coverage, reporter).
     globals: true,
     coverage: {
       provider: "v8",

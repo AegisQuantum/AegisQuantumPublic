@@ -51,7 +51,7 @@ export async function aesGcmEncrypt(
   // Importer la clé AES-GCM
   const key = await crypto.subtle.importKey(
     "raw",
-    keyBytes,       // déjà décodé et validé ci-dessus
+    keyBytes.buffer as ArrayBuffer,
     { name: "AES-GCM" },
     false,
     ["encrypt"]
@@ -94,16 +94,16 @@ export async function aesGcmDecrypt(
 ): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
-    fromBase64(keyB64),
+    fromBase64(keyB64).buffer as ArrayBuffer,
     { name: "AES-GCM" },
     false,
     ["decrypt"]
   );
 
   const plaintextBytes = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: fromBase64(nonceB64), tagLength: 128 },
+    { name: "AES-GCM", iv: fromBase64(nonceB64).buffer as ArrayBuffer, tagLength: 128 },
     key,
-    fromBase64(ciphertextB64)
+    fromBase64(ciphertextB64).buffer as ArrayBuffer
   );
 
   return new TextDecoder().decode(plaintextBytes);

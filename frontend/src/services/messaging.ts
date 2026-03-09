@@ -40,7 +40,7 @@
  */
 
 import {
-  collection, doc, addDoc, getDoc, getDocs,
+  collection, doc, addDoc, setDoc, getDoc, getDocs,
   query, where, orderBy, onSnapshot, serverTimestamp,
   type Unsubscribe,
 } from "firebase/firestore";
@@ -84,7 +84,9 @@ export async function getOrCreateConversation(myUid: string, contactUid: string)
   const convId = getConversationId(myUid, contactUid);
   const snap   = await getDoc(convDoc(convId));
   if (!snap.exists()) {
-    await addDoc(convsCol(), {
+    // setDoc avec l'ID déterministe — addDoc génèrerait un ID aléatoire
+    // ce qui casserait les règles Firestore et la récupération par ID
+    await setDoc(convDoc(convId), {
       id                : convId,
       participants      : [myUid, contactUid],
       lastMessageAt     : serverTimestamp(),
@@ -209,8 +211,13 @@ export async function decryptMessage(
   }
 
   // 2. KEM decapsulate → sharedSecret
-  const myKemPrivateKey = getKemPrivateKey(myUid);
-  const sharedSecret    = await kemDecapsulate(msg.kemCiphertext, myKemPrivateKey);
+  let myKemPrivateKey: string;
+  try {
+    myKemPrivateKey = getKemPrivateKey(myUid);
+  } catch {
+    throw new Error(`Clés privées non chargées pour ${myUid} — reconnectez-vous pour déchiffrer le vault.`);
+  }
+  const sharedSecret = await kemDecapsulate(msg.kemCiphertext, myKemPrivateKey);
 
   // 3. HKDF(sharedSecret) → messageKey
   //    TODO — Double Ratchet : cette étape sera internalisée dans doubleRatchetDecrypt()

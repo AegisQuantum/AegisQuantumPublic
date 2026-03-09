@@ -65,11 +65,18 @@
       <div class="auth-right">
         <div class="auth-form-wrap">
 
+          <!-- REGISTER DÉSACTIVÉ — Les comptes sont créés par l'admin via admin/create-user.js -->
+          <!--
           <div class="form-header">
             <div class="form-tabs">
               <button class="tab-btn active" id="tab-login"    data-tab="login">Sign in</button>
               <button class="tab-btn"        id="tab-register" data-tab="register">Create account</button>
             </div>
+          </div>
+          -->
+          <div class="form-header">
+            <h2 class="form-title">Sign in</h2>
+            <p class="form-subtitle">Enter your credentials to continue</p>
           </div>
 
           <div class="form-body">
@@ -103,13 +110,16 @@
                   <svg id="eye-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z"/><circle cx="8" cy="8" r="2"/></svg>
                 </button>
               </div>
+              <!-- REGISTER DÉSACTIVÉ — indicateur de force du mot de passe
               <div id="strength-wrap" class="strength-wrap hidden">
                 <div class="strength-bar"><div id="strength-fill" class="strength-fill"></div></div>
                 <span id="strength-label" class="strength-label"></span>
               </div>
+              -->
             </div>
 
-            <div class="field hidden" id="field-confirm">
+            <!-- REGISTER DÉSACTIVÉ — champ confirm password
+            <div class="field" id="field-confirm">
               <label for="input-confirm">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 4 6 11l-3-3"/></svg>
                 Confirm password
@@ -118,6 +128,7 @@
                 <input type="password" id="input-confirm" placeholder="••••••••••••" autocomplete="new-password" />
               </div>
             </div>
+            -->
 
             <div id="status-msg" class="status-msg"></div>
 
@@ -134,10 +145,39 @@
       </div>
     </div>
 
+    <!-- CHANGE PASSWORD SCREEN (première connexion) -->
+    <div id="change-password-screen" class="screen hidden">
+      <div class="cp-wrap">
+        <div class="cp-card">
+          <div class="cp-logo">
+            <img src="/BIGLOGO.png" alt="AQ" />
+          </div>
+          <h2 class="cp-title">Choisir un mot de passe</h2>
+          <p class="cp-subtitle">C'est ta première connexion. Choisis un mot de passe personnel sécurisé.</p>
+          <div id="cp-form">
+            <div class="cp-field">
+              <label for="cp-input">Nouveau mot de passe</label>
+              <input type="password" id="cp-input" placeholder="••••••••••••" autocomplete="new-password" />
+            </div>
+            <div class="cp-field">
+              <label for="cp-confirm">Confirmer</label>
+              <input type="password" id="cp-confirm" placeholder="••••••••••••" autocomplete="new-password" />
+            </div>
+            <div id="cp-status" class="status-msg"></div>
+            <button id="cp-btn" class="btn-primary">Confirmer</button>
+          </div>
+          <p class="cp-hint">Minimum 8 caractères · Non récupérable sans ton mot de passe</p>
+        </div>
+      </div>
+    </div>
+
     <!-- CHAT SCREEN -->
     <div id="chat-screen" class="screen hidden"></div>
 
   </div>
+
+  <!-- argon2-browser via CDN (ne peut pas être bundlé par Vite — WASM non-standard) -->
+  <script src="https://cdn.jsdelivr.net/npm/argon2-browser@1.18.0/dist/argon2-bundled.min.js"></script>
 
   <script type="module" src="/src/main.ts"></script>
 </body>

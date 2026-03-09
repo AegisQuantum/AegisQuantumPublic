@@ -1,34 +1,39 @@
 /**
  * main.ts — Point d'entrée de l'application AegisQuantum
  *
- * Responsabilités :
- *  - Initialiser l'écran d'auth au chargement
- *  - Écouter les changements d'état Firebase Auth
- *  - Basculer entre l'écran d'auth et l'écran de chat
+ * Architecture de navigation :
+ *  - login.ts appelle navigateToChat(uid) ou navigateToChangePassword(uid) directement
+ *    après un signIn() réussi → les clés sont déjà en mémoire.
+ *  - onAuthChange gère UNIQUEMENT la déconnexion automatique (token expiré, signOut).
+ *  - Au rechargement de page avec session Firebase persistée → on force le re-login
+ *    car les clés privées ne sont plus en mémoire (volatile).
  */
 
-import { onAuthChange } from './services/auth';
-import { initAuth }     from './ui/login';
-import { initChat }     from './ui/chat';
+import './utils/logger';
+import { onAuthChange }   from './services/auth';
+import { initAuth }       from './ui/login';
 
-// ── Initialiser l'UI d'authentification ──────────────────────────────────
+// Initialiser l'UI auth (login form)
 initAuth();
 
-// ── Réagir aux changements d'état Auth ───────────────────────────────────
+// onAuthChange gère SEULEMENT la déconnexion
+// (le login positif est géré directement dans login.ts via navigateToChat)
 onAuthChange((user) => {
-  const authScreen = document.getElementById('auth-screen')!;
-  const chatScreen = document.getElementById('chat-screen')!;
+  if (!user) {
+    // Déconnexion (signOut ou token expiré) → retour écran auth
+    console.log('[AQ] Session terminée → retour auth');
+    const chatScreen = document.getElementById('chat-screen')!;
+    const pwScreen   = document.getElementById('change-password-screen')!;
+    const authScreen = document.getElementById('auth-screen')!;
 
-  if (user) {
-    authScreen.classList.add('hidden');
-    authScreen.classList.remove('active');
-    chatScreen.classList.remove('hidden');
-    chatScreen.classList.add('active');
-    initChat(user.uid);
-  } else {
     chatScreen.classList.add('hidden');
     chatScreen.classList.remove('active');
+    pwScreen.classList.add('hidden');
+    pwScreen.classList.remove('active');
     authScreen.classList.remove('hidden');
     authScreen.classList.add('active');
   }
+  // Si user != null au chargement (session persistée Firebase) :
+  // on NE fait rien — l'écran auth est déjà visible et l'utilisateur
+  // doit se reconnecter pour recharger ses clés privées en mémoire.
 });

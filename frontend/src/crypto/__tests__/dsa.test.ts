@@ -70,13 +70,15 @@ function flipBit(b64: string, byteOffset: number): string {
 let alicePK: string;
 let aliceSK: string;
 let bobPK  : string;
-let bobSK  : string;
 let msgA   : string;
 let sigA   : string;
 
 beforeAll(async () => {
-  [{ publicKey: alicePK, privateKey: aliceSK }, { publicKey: bobPK, privateKey: bobSK }] =
-    await Promise.all([dsaGenerateKeyPair(), dsaGenerateKeyPair()]);
+  const [aliceKP, bobKP] = await Promise.all([dsaGenerateKeyPair(), dsaGenerateKeyPair()]);
+  alicePK = aliceKP.publicKey;
+  aliceSK = aliceKP.privateKey;
+  bobPK   = bobKP.publicKey;
+  // bobKP.privateKey non utilisé — seule la clé publique de Bob est testée (cross-key verify)
   msgA = "Hello AegisQuantum — message A";
   sigA = await dsaSign(msgA, aliceSK);
 });

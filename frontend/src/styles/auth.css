@@ -187,6 +187,21 @@
   color: #a1a1aa;
 }
 
+/* Form title (mode sign-in seul, sans tabs) */
+.form-title {
+  font-family: 'Inter', var(--font-sans);
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.01em;
+  margin-bottom: 0.2rem;
+}
+
+.form-subtitle {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
 /* Form body */
 .form-body {
   display: flex;
@@ -381,4 +396,97 @@
     width: 100%;
     padding: 1.5rem 1rem 2rem;
   }
+}
+
+/* ═══════════════════════
+   CHANGE PASSWORD SCREEN
+═══════════════════════ */
+
+.cp-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  padding: 2rem;
+}
+
+.cp-card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 2.5rem 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.45);
+}
+
+.cp-logo {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 0.4rem;
+}
+
+.cp-logo img {
+  width: 52px;
+  height: 52px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 10px rgba(59,130,246,0.5));
+}
+
+.cp-title {
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--text);
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+
+.cp-subtitle {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.6;
+  margin-top: -0.4rem;
+}
+
+.cp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.cp-field label {
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+}
+
+.cp-field input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  padding: 0.65rem 0.9rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.cp-field input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(59,130,246,0.12);
+}
+
+.cp-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.5;
+  opacity: 0.7;
 }

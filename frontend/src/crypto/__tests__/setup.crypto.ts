@@ -54,7 +54,7 @@ vi.mock("argon2-browser", () => {
 
     const keyMaterial = await globalThis.crypto.subtle.importKey(
       "raw",
-      passBytes,
+      passBytes.buffer as ArrayBuffer,
       { name: "PBKDF2" },
       false,
       ["deriveBits"]
@@ -64,7 +64,7 @@ vi.mock("argon2-browser", () => {
       {
         name      : "PBKDF2",
         hash      : "SHA-256",
-        salt      : params.salt,
+        salt      : params.salt.buffer as ArrayBuffer,
         iterations: 1000,
       },
       keyMaterial,

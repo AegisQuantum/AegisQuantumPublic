@@ -71,10 +71,10 @@ export async function hkdfDerive(
   // Importer le secret comme matériau de clé brut (HKDF)
   const ikm = await crypto.subtle.importKey(
     "raw",
-    fromBase64(secretB64),
+    fromBase64(secretB64).buffer as ArrayBuffer,
     { name: "HKDF" },
     false,
-    ["deriveBits"]  // deriveBits plutôt que deriveKey : accepte n'importe quelle longueur
+    ["deriveBits"]
   );
 
   // Dériver `outputLength * 8` bits via HKDF-SHA256.
