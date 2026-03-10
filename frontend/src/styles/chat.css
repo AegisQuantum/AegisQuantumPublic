@@ -1047,6 +1047,22 @@
   letter-spacing: 0.05em;
 }
 
+/* Overlay upload sur avatar dans la modale */
+.avatar-upload-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.18s;
+}
+.avatar-upload-overlay:hover { opacity: 1; }
+
 /* Grand avatar dans la modale */
 .avatar-preview-large {
   width: 68px;
@@ -1093,6 +1109,100 @@
 }
 
 /* ═══════════════════════════════════════
+   CRYPTO STEP — clickable + panneau dépliable
+═══════════════════════════════════════ */
+
+.crypto-step-wrap { display: flex; flex-direction: column; }
+
+.crypto-step.clickable {
+  cursor: pointer;
+  transition: background var(--transition);
+}
+.crypto-step.clickable:hover {
+  background: rgba(123,159,249,0.07);
+  border-radius: var(--r-sm);
+}
+
+/* Chevron ▼/▲ */
+.crypto-step-chevron {
+  margin-left: auto;
+  flex-shrink: 0;
+  align-self: center;
+  padding-left: 4px;
+  color: var(--c-dim);
+  display: flex;
+  align-items: center;
+  transition: color var(--transition);
+}
+.crypto-step.clickable:hover .crypto-step-chevron { color: var(--c-accent); }
+.chevron-svg {
+  transition: transform 0.18s cubic-bezier(0.4,0,0.2,1);
+}
+
+/* Panneau dépliable */
+.crypto-step-panel {
+  display: none;
+  flex-direction: column;
+  background: rgba(123,159,249,0.04);
+  border-left: 2px solid rgba(123,159,249,0.22);
+  margin: 2px 0 4px 18px;
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  overflow: hidden;
+  animation: panelOpen 0.15s ease;
+}
+@keyframes panelOpen {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.crypto-step-wrap.open .crypto-step-panel { display: flex; }
+
+.crypto-panel-algo {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  color: var(--c-green);
+  padding: 5px 10px 4px;
+  border-bottom: 1px solid rgba(123,159,249,0.08);
+  letter-spacing: 0.04em;
+  opacity: 0.9;
+}
+
+.crypto-panel-row {
+  display: flex;
+  flex-direction: column;
+  padding: 5px 10px 4px;
+  border-bottom: 1px solid rgba(123,159,249,0.05);
+  gap: 2px;
+}
+.crypto-panel-row:last-of-type { border-bottom: none; }
+
+.crypto-panel-key {
+  font-family: var(--mono);
+  font-size: 7.5px;
+  font-weight: 500;
+  color: var(--c-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+}
+.crypto-panel-val {
+  font-family: var(--sans);
+  font-size: 10px;
+  color: var(--c-text2);
+  line-height: 1.5;
+}
+
+.crypto-panel-code {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  color: var(--c-accent);
+  background: rgba(123,159,249,0.05);
+  border-top: 1px solid rgba(123,159,249,0.10);
+  padding: 5px 10px;
+  letter-spacing: 0.02em;
+  word-break: break-all;
+  opacity: 0.8;
+}
+
+/* ═══════════════════════════════════════
    UTILITAIRES
 ═══════════════════════════════════════ */
 
@@ -1118,4 +1228,153 @@
     opacity: 0;
   }
   .topnav-brand { display: none; }
+}
+
+/* ═══════════════════════════════════════
+   SAFETY NUMBERS — modale fingerprint
+═══════════════════════════════════════ */
+
+.fp-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  animation: fadeIn 0.18s ease;
+}
+
+.fp-modal-card {
+  background: #13151f;
+  border: 1px solid rgba(123,159,249,0.22);
+  border-radius: 14px;
+  padding: 28px;
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+  animation: fadeUp 0.22s cubic-bezier(0.34,1.2,0.64,1);
+}
+
+.fp-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.fp-modal-title {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--c-accent);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.fp-modal-close {
+  background: none;
+  border: none;
+  color: var(--c-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: color var(--transition), background var(--transition);
+}
+.fp-modal-close:hover { color: var(--c-text); background: rgba(255,255,255,0.06); }
+
+.fp-modal-desc {
+  font-size: 12px;
+  color: var(--c-muted);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.fp-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fp-label {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  color: var(--c-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+}
+
+.fp-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.fp-block {
+  background: rgba(123,159,249,0.06);
+  border: 1px solid rgba(123,159,249,0.15);
+  border-radius: 7px;
+  padding: 10px 6px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: var(--c-text);
+  user-select: text;
+}
+
+.fp-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.fp-status.unverified {
+  background: rgba(245,158,11,0.07);
+  border: 1px solid rgba(245,158,11,0.22);
+  color: #f59e0b;
+}
+.fp-status.error {
+  background: rgba(252,129,129,0.07);
+  border: 1px solid rgba(252,129,129,0.22);
+  color: var(--c-error);
+}
+
+.fp-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.fp-loading {
+  grid-column: 1 / -1;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--c-dim);
+  text-align: center;
+  padding: 12px;
+  opacity: 0.6;
+}
+
+.fp-error {
+  grid-column: 1 / -1;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--c-error);
+  text-align: center;
+  padding: 12px;
 }
