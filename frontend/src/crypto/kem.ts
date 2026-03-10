@@ -37,7 +37,14 @@ export interface KemEncapResult {
 
 /** Encode a Uint8Array to a Base64 string. */
 export function toBase64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
+  // String.fromCodePoint(...bytes) provoque un stack overflow pour les grands tableaux
+  // (spread operator en argument = autant de stack frames que d'éléments).
+  // On itère manuellement pour éviter ce problème avec des messages > ~100 KB.
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
 }
 
 /** Decode a Base64 string to a Uint8Array. */

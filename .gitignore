@@ -14,6 +14,13 @@ build/
 .env.local
 .env.*.local
 
+# Firebase Admin SDK — NE JAMAIS COMMITTER
+admin/serviceAccountKey.json
+
+# Logs de dev
+admin/logs/
+*.serviceAccountKey.json
+
 # IDE
 .vscode/
 .idea/

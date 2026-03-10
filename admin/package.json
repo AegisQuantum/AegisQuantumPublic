@@ -1,0 +1,14 @@
+{
+  "name": "aegisquantum-admin",
+  "version": "1.0.0",
+  "description": "CLI admin tools for AegisQuantum — account provisioning",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "create-user": "node create-user.js",
+    "list-users":  "node list-users.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0"
+  }
+}
