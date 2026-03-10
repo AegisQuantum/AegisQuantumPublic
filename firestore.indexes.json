@@ -1,4 +1,29 @@
 {
-  "indexes": [],
+  "indexes": [
+    {
+      "collectionGroup": "conversations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "participants", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "lastMessageAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "messages",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        { "fieldPath": "recipientId", "order": "ASCENDING" },
+        { "fieldPath": "timestamp",   "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "messages",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        { "fieldPath": "senderId",  "order": "ASCENDING" },
+        { "fieldPath": "timestamp", "order": "ASCENDING" }
+      ]
+    }
+  ],
   "fieldOverrides": []
 }

@@ -25,7 +25,7 @@
   --warning:      #f59e0b;
 
   --font-mono: 'IBM Plex Mono', monospace;
-  --font-sans: 'IBM Plex Sans', sans-serif;
+  --font-sans: 'Inter', 'IBM Plex Sans', sans-serif;
 
   --radius-sm: 4px;
   --radius-md: 8px;
@@ -45,16 +45,19 @@ html, body {
 }
 
 #app {
-  min-height: 100vh;
+  height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 /* ── Screens ── */
 .screen {
-  flex: 1;
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
 }
 
 .screen.hidden {
@@ -106,7 +109,4 @@ html, body {
   50%       { opacity: 0.35; }
 }
 
-/* debug fix */
-#auth-screen {
-  display: flex !important;
-}
+/* screens gérés uniquement via .hidden / .active */

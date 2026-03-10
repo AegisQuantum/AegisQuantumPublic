@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
+    "target": "ES2022",
     "useDefineForClassFields": true,
     "module": "ESNext",
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
@@ -8,6 +8,7 @@
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
+    "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
     "outDir": "./dist",
     "types": ["vite/client", "vitest/globals"]

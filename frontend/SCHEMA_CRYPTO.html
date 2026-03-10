@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<title>AegisQuantum — Schéma protocole crypto</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0e1018;
+    font-family: 'DM Mono', 'Courier New', monospace;
+    color: #c4c8e8;
+    min-height: 100vh;
+    padding: 32px 24px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 13px;
+    letter-spacing: 0.20em;
+    text-transform: uppercase;
+    color: #7b9ff9;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 10px;
+    color: #4a5080;
+    letter-spacing: 0.10em;
+    margin-bottom: 40px;
+  }
+
+  /* ── Layout deux colonnes ── */
+  .diagram {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    max-width: 1100px;
+    margin: 0 auto;
+    border: 1px solid rgba(123,159,249,0.15);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  /* ── Colonnes Alice / Bob ── */
+  .col {
+    padding: 24px 20px;
+    position: relative;
+  }
+  .col-alice { background: rgba(123,159,249,0.04); border-right: 1px solid rgba(123,159,249,0.12); }
+  .col-bob   { background: rgba(94,234,212,0.03); }
+
+  .col-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 22px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid rgba(150,160,220,0.10);
+  }
+  .col-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .col-avatar.alice { background: linear-gradient(135deg, #6b8ff5, #4060cc); }
+  .col-avatar.bob   { background: linear-gradient(135deg, #5eead4, #0d9488); color: #0e1018; }
+
+  .col-name { font-size: 13px; font-weight: 600; color: #eef0fa; }
+  .col-role { font-size: 9px; color: #4a5080; letter-spacing: 0.08em; margin-top: 1px; }
+
+  /* ── Étapes ── */
+  .steps { display: flex; flex-direction: column; gap: 6px; }
+
+  .step {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 9px 11px;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    transition: background 0.15s;
+  }
+
+  .step.send    { background: rgba(123,159,249,0.07); border-color: rgba(123,159,249,0.15); }
+  .step.recv    { background: rgba(94,234,212,0.06);  border-color: rgba(94,234,212,0.14); }
+  .step.sign    { background: rgba(251,146,60,0.06);  border-color: rgba(251,146,60,0.14); }
+  .step.verify  { background: rgba(251,146,60,0.05);  border-color: rgba(251,146,60,0.12); }
+  .step.store   { background: rgba(74,80,128,0.25);   border-color: rgba(74,80,128,0.35); }
+  .step.output  { background: rgba(94,234,212,0.08);  border-color: rgba(94,234,212,0.20); }
+
+  /* Double Ratchet — mise en évidence spéciale */
+  .step.dr-current {
+    background: rgba(252,211,77,0.06);
+    border-color: rgba(252,211,77,0.22);
+    position: relative;
+  }
+  .step.dr-future {
+    background: rgba(167,139,250,0.07);
+    border-color: rgba(167,139,250,0.20);
+    position: relative;
+  }
+
+  .step-num {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .step.send   .step-num { background: rgba(123,159,249,0.25); color: #7b9ff9; }
+  .step.recv   .step-num { background: rgba(94,234,212,0.20);  color: #5eead4; }
+  .step.sign   .step-num { background: rgba(251,146,60,0.20);  color: #fb923c; }
+  .step.verify .step-num { background: rgba(251,146,60,0.20);  color: #fb923c; }
+  .step.store  .step-num { background: rgba(74,80,128,0.40);   color: #8890c0; }
+  .step.output .step-num { background: rgba(94,234,212,0.20);  color: #5eead4; }
+  .step.dr-current .step-num { background: rgba(252,211,77,0.22); color: #fcd34d; }
+  .step.dr-future  .step-num { background: rgba(167,139,250,0.22); color: #a78bfa; }
+
+  .step-body { flex: 1; min-width: 0; }
+  .step-label { font-size: 11px; color: #eef0fa; line-height: 1.35; font-weight: 500; }
+  .step-detail {
+    font-size: 9.5px;
+    color: #8890c0;
+    margin-top: 3px;
+    line-height: 1.5;
+  }
+  .step-detail code {
+    background: rgba(123,159,249,0.10);
+    border-radius: 3px;
+    padding: 0 4px;
+    color: #a0b4f8;
+    font-size: 9px;
+  }
+
+  /* Badge DR */
+  .dr-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 8.5px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    margin-top: 4px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+  .dr-badge.current  { background: rgba(252,211,77,0.15);  color: #fcd34d; border: 1px solid rgba(252,211,77,0.30); }
+  .dr-badge.future   { background: rgba(167,139,250,0.15); color: #a78bfa; border: 1px solid rgba(167,139,250,0.30); }
+  .dr-badge.bypass   { background: rgba(252,129,129,0.12); color: #fc8181; border: 1px solid rgba(252,129,129,0.28); }
+
+  /* ── Section titre dans une colonne ── */
+  .section-title {
+    font-size: 8.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: #4a5080;
+    margin: 14px 0 7px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .section-title::before,
+  .section-title::after { content: ''; flex: 1; height: 1px; background: rgba(150,160,220,0.08); }
+
+  /* ── Flèche message entre colonnes ── */
+  .msg-arrow-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin: 20px 0 20px;
+    max-width: 1100px;
+    margin-left: auto;
+    margin-right: auto;
+    position: relative;
+  }
+
+  /* ── Légende en bas ── */
+  .legend {
+    max-width: 1100px;
+    margin: 28px auto 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 10px;
+  }
+  .legend-card {
+    background: rgba(20,22,35,0.8);
+    border: 1px solid rgba(150,160,220,0.10);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .legend-card-title {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #4a5080;
+    margin-bottom: 8px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    margin-bottom: 5px;
+    font-size: 10px;
+  }
+  .legend-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  /* ── Firestore central ── */
+  .firestore-row {
+    max-width: 1100px;
+    margin: 28px auto 0;
+    background: rgba(30,33,50,0.9);
+    border: 1px solid rgba(123,159,249,0.15);
+    border-radius: 10px;
+    padding: 16px 20px;
+  }
+  .firestore-title {
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #7b9ff9;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .firestore-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .firestore-field {
+    background: rgba(123,159,249,0.08);
+    border: 1px solid rgba(123,159,249,0.15);
+    border-radius: 5px;
+    padding: 5px 10px;
+    font-size: 10px;
+    color: #a0b4f8;
+  }
+  .firestore-field .fname { color: #7b9ff9; font-weight: 600; }
+  .firestore-field .ftype { color: #4a5080; font-size: 9px; margin-left: 4px; }
+  .firestore-field.dr-field { border-color: rgba(252,211,77,0.25); background: rgba(252,211,77,0.06); }
+  .firestore-field.dr-field .fname { color: #fcd34d; }
+
+  /* ── Arrow SVG ── */
+  .arrow-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: visible;
+  }
+</style>
+</head>
+<body>
+
+<h1>AegisQuantum — Protocole de chiffrement</h1>
+<p class="subtitle">Flux complet Alice → Bob et Bob → Alice · Placement du Double Ratchet</p>
+
+<!-- ════════════════════════════════════════════
+     ALICE → BOB
+════════════════════════════════════════════ -->
+<div style="max-width:1100px;margin:0 auto 10px;font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:#7b9ff9;padding:0 4px;">
+  ── ALICE envoie un message à BOB ──
+</div>
+
+<div class="diagram">
+
+  <!-- ══ ALICE (expéditrice) ══ -->
+  <div class="col col-alice">
+    <div class="col-header">
+      <div class="col-avatar alice">AL</div>
+      <div>
+        <div class="col-name">Alice</div>
+        <div class="col-role">Expéditrice · sendMessage()</div>
+      </div>
+    </div>
+
+    <div class="steps">
+
+      <div class="section-title">Clés & Identité</div>
+
+      <div class="step send">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <div class="step-label">Récupérer les clés publiques de Bob</div>
+          <div class="step-detail"><code>getPublicKeys(bobUid)</code> → <code>kemPublicKey_Bob</code>, <code>dsaPublicKey_Bob</code><br/>Source : Firestore <code>/publicKeys/{bobUid}</code></div>
+        </div>
+      </div>
+
+      <div class="step send">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <div class="step-label">Charger nos clés privées (RAM)</div>
+          <div class="step-detail"><code>getKemPrivateKey(myUid)</code> → <code>kemPrivKey_Alice</code><br/><code>getDsaPrivateKey(myUid)</code> → <code>dsaPrivKey_Alice</code></div>
+        </div>
+      </div>
+
+      <div class="section-title">Chiffrement</div>
+
+      <div class="step dr-current">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <div class="step-label">KEM Encapsulate (ML-KEM-768)</div>
+          <div class="step-detail">
+            <code>kemEncapsulate(kemPublicKey_Bob)</code><br/>
+            → <code>sharedSecret</code> (32 B) + <code>kemCiphertext</code> (1088 B)<br/>
+            Seul Bob peut retrouver le sharedSecret via <code>kemDecapsulate</code>
+          </div>
+          <div>
+            <span class="dr-badge current">⚙ Actuel — 1 KEM par message</span>
+            <span class="dr-badge future">✦ DR — KEM Ratchet step : nouvelle paire éphémère à chaque tour de parole</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="step dr-future">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <div class="step-label">Dérivation de clé HKDF-SHA256</div>
+          <div class="step-detail">
+            <code>hkdfDerive(sharedSecret, MESSAGE_KEY)</code> → <code>messageKey</code><br/>
+          </div>
+          <div>
+            <span class="dr-badge bypass">✕ Actuel — dérivation directe sans chaîne</span>
+            <span class="dr-badge future">✦ DR — Symmetric Ratchet : <code>hkdfDerivePair(sendingChainKey)</code> → <code>(newChainKey, messageKey)</code>, sendCount++</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="step send">
+        <div class="step-num">5</div>
+        <div class="step-body">
+          <div class="step-label">Chiffrement AES-256-GCM</div>
+          <div class="step-detail"><code>aesGcmEncrypt(plaintext, messageKey)</code><br/>→ <code>ciphertext</code> + <code>nonce</code> (12 B, frais par message)</div>
+        </div>
+      </div>
+
+      <div class="section-title">Authentification</div>
+
+      <div class="step sign">
+        <div class="step-num">6</div>
+        <div class="step-body">
+          <div class="step-label">Signature ML-DSA-65 (FIPS 204)</div>
+          <div class="step-detail">
+            payload = <code>ciphertext ‖ nonce ‖ kemCiphertext</code><br/>
+            <code>dsaSign(payload, dsaPrivKey_Alice)</code> → <code>signature</code> (3309 B)<br/>
+            Inchangé avec Double Ratchet
+          </div>
+        </div>
+      </div>
+
+      <div class="section-title">Persistance</div>
+
+      <div class="step store">
+        <div class="step-num">7</div>
+        <div class="step-body">
+          <div class="step-label">Stocker la messageKey dans IDB</div>
+          <div class="step-detail">
+            <code>storeMessageKey(convId, msgId, messageKey)</code><br/>
+            Permet à Alice de relire ses propres messages
+          </div>
+          <div><span class="dr-badge bypass">✕ Actuel — cache IDB par messageKey</span><span class="dr-badge future">✦ DR → saveRatchetState(ratchetState)</span></div>
+        </div>
+      </div>
+
+      <div class="step output">
+        <div class="step-num">8</div>
+        <div class="step-body">
+          <div class="step-label">Écriture Firestore</div>
+          <div class="step-detail"><code>addDoc(messagesCol, { ciphertext, nonce, kemCiphertext, signature, messageIndex: 0 })</code></div>
+          <div><span class="dr-badge bypass">✕ messageIndex = 0 actuellement</span><span class="dr-badge future">✦ DR → sendCount du ratchet state</span></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══ BOB (récepteur) ══ -->
+  <div class="col col-bob">
+    <div class="col-header">
+      <div class="col-avatar bob">BO</div>
+      <div>
+        <div class="col-name">Bob</div>
+        <div class="col-role">Récepteur · decryptMessage()</div>
+      </div>
+    </div>
+
+    <div class="steps">
+
+      <div class="section-title">Réception Firestore</div>
+
+      <div class="step recv">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <div class="step-label">Snapshot Firestore en temps réel</div>
+          <div class="step-detail"><code>onSnapshot(messagesCol)</code> → <code>EncryptedMessage</code><br/>{ ciphertext, nonce, kemCiphertext, signature, messageIndex }</div>
+        </div>
+      </div>
+
+      <div class="section-title">Vérification</div>
+
+      <div class="step verify">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <div class="step-label">Vérifier la signature ML-DSA-65</div>
+          <div class="step-detail">
+            <code>getPublicKeys(aliceUid)</code> → <code>dsaPublicKey_Alice</code><br/>
+            payload = <code>ciphertext ‖ nonce ‖ kemCiphertext</code><br/>
+            <code>dsaVerify(payload, signature, dsaPublicKey_Alice)</code> → <code>verified: boolean</code><br/>
+            Inchangé avec Double Ratchet
+          </div>
+        </div>
+      </div>
+
+      <div class="section-title">Déchiffrement</div>
+
+      <div class="step dr-current">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <div class="step-label">KEM Decapsulate (ML-KEM-768)</div>
+          <div class="step-detail">
+            <code>kemDecapsulate(kemCiphertext, kemPrivKey_Bob)</code><br/>
+            → <code>sharedSecret</code> (32 B) — identique à celui d'Alice en étape 3
+          </div>
+          <div>
+            <span class="dr-badge current">⚙ Actuel — 1 decapsulate par message</span>
+            <span class="dr-badge future">✦ DR — KEM Ratchet : détecter changement de <code>kemPublicKey</code>, avancer la rootKey</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="step dr-future">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <div class="step-label">Dérivation HKDF-SHA256</div>
+          <div class="step-detail"><code>hkdfDerive(sharedSecret, MESSAGE_KEY)</code> → <code>messageKey</code></div>
+          <div>
+            <span class="dr-badge bypass">✕ Actuel — dérivation directe</span>
+            <span class="dr-badge future">✦ DR — Symmetric Ratchet : <code>hkdfDerivePair(receivingChainKey)</code> → <code>(newChainKey, messageKey)</code>, vérifier messageIndex (anti-replay + skipped keys)</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="step recv">
+        <div class="step-num">5</div>
+        <div class="step-body">
+          <div class="step-label">Déchiffrement AES-256-GCM</div>
+          <div class="step-detail">
+            <code>aesGcmDecrypt(ciphertext, nonce, messageKey)</code><br/>
+            → <code>plaintext</code><br/>
+            Lève DOMException si tag GCM invalide (tamper détecté)
+          </div>
+        </div>
+      </div>
+
+      <div class="section-title">Persistance</div>
+
+      <div class="step store">
+        <div class="step-num">6</div>
+        <div class="step-body">
+          <div class="step-label">Stocker la messageKey dans IDB</div>
+          <div class="step-detail"><code>storeMessageKey(convId, msgId, messageKey)</code></div>
+          <div><span class="dr-badge bypass">✕ Actuel — cache IDB</span><span class="dr-badge future">✦ DR → saveRatchetState(newStateJson)</span></div>
+        </div>
+      </div>
+
+      <div class="step output">
+        <div class="step-num">7</div>
+        <div class="step-body">
+          <div class="step-label">Retourner à l'UI</div>
+          <div class="step-detail"><code>DecryptedMessage { id, senderUid, plaintext, timestamp, verified }</code><br/>→ callback renderMessages()</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<!-- ════════════════════════════════════════════
+     Document Firestore
+════════════════════════════════════════════ -->
+<div class="firestore-row">
+  <div class="firestore-title">
+    <svg viewBox="0 0 14 14" fill="none" stroke="#7b9ff9" stroke-width="1.4" width="12" height="12">
+      <path d="M2 3h10M2 7h10M2 11h10"/><circle cx="2" cy="3" r="1" fill="#7b9ff9" stroke="none"/>
+      <circle cx="2" cy="7" r="1" fill="#7b9ff9" stroke="none"/><circle cx="2" cy="11" r="1" fill="#7b9ff9" stroke="none"/>
+    </svg>
+    Firestore — <code style="color:#a0b4f8">/conversations/{convId}/messages/{msgId}</code>
+    <span style="color:#4a5080;font-size:9px;margin-left:8px">Tout chiffré côté client — le serveur ne voit jamais le plaintext</span>
+  </div>
+  <div class="firestore-fields">
+    <div class="firestore-field"><span class="fname">senderUid</span><span class="ftype">string</span></div>
+    <div class="firestore-field"><span class="fname">ciphertext</span><span class="ftype">Base64 — AES-256-GCM</span></div>
+    <div class="firestore-field"><span class="fname">nonce</span><span class="ftype">Base64 — 12 B</span></div>
+    <div class="firestore-field"><span class="fname">kemCiphertext</span><span class="ftype">Base64 — ML-KEM-768 · 1088 B</span></div>
+    <div class="firestore-field"><span class="fname">signature</span><span class="ftype">Base64 — ML-DSA-65 · 3309 B</span></div>
+    <div class="firestore-field dr-field"><span class="fname">messageIndex</span><span class="ftype">number — 0 actuel · DR: sendCount</span></div>
+    <div class="firestore-field"><span class="fname">timestamp</span><span class="ftype">number — ms</span></div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════
+     Légende
+════════════════════════════════════════════ -->
+<div class="legend">
+
+  <div class="legend-card">
+    <div class="legend-card-title">Protocole actuel (fonctionnel)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#7b9ff9"></div> ML-KEM-768 — 1 encapsulate/decapsulate par message</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#7b9ff9"></div> HKDF-SHA256 dérivation directe (1 niveau)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#7b9ff9"></div> AES-256-GCM + nonce frais par message</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fb923c"></div> ML-DSA-65 signature + vérification</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#4a5080"></div> Cache messageKey dans IndexedDB</div>
+  </div>
+
+  <div class="legend-card">
+    <div class="legend-card-title">Double Ratchet (à implémenter)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fcd34d"></div> <strong>KEM Ratchet</strong> — nouvelle paire à chaque tour de parole → rootKey avance</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#a78bfa"></div> <strong>Symmetric Ratchet</strong> — chainKey avance à chaque message → messageKey unique</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#a78bfa"></div> <strong>Forward Secrecy</strong> — clés passées inaccessibles si privKey compromise</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#a78bfa"></div> <strong>Break-in Recovery</strong> — le ratchet guérit après compromission temporaire</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fc8181"></div> Remplace storeMessageKey → saveRatchetState(IDB chiffré)</div>
+  </div>
+
+  <div class="legend-card">
+    <div class="legend-card-title">Clés & Stockage</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#5eead4"></div> Clés publiques KEM + DSA → Firestore public</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#5eead4"></div> Clés privées → RAM uniquement (session)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#5eead4"></div> Vault (privées chiffrées) → IndexedDB AES-GCM</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fcd34d"></div> RatchetState (futur) → IDB chiffré AES-GCM</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#7b9ff9"></div> argon2Salt → Firestore /users/{uid}</div>
+  </div>
+
+  <div class="legend-card">
+    <div class="legend-card-title">Fichiers concernés par le TODO DR</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fc8181"></div> <code>crypto/double-ratchet.ts</code> — implémenter la logique</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fb923c"></div> <code>services/messaging.ts</code> — brancher aux TODO marqués</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#7b9ff9"></div> <code>services/key-store.ts</code> — saveRatchetState / loadRatchetState (déjà implémentés)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#a78bfa"></div> <code>types/ratchet.ts</code> — RatchetState (déjà défini)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#5eead4"></div> <code>crypto/ratchet-state.ts</code> — serialize/deserialize (déjà implémentés)</div>
+  </div>
+
+</div>
+
+</body>
+</html>
