@@ -6,13 +6,13 @@
 import '../styles/chat.css';
 
 import { signOut }                          from '../services/auth';
+import { openFingerprintModal, closeFingerprintModal } from './fingerprint';
 import {
   subscribeToConversations,
   subscribeToMessages,
   sendMessage,
   getOrCreateConversation,
 }                                           from '../services/messaging';
-import { showSafetyNumbers }                from './fingerprint';
 import type { Conversation, DecryptedMessage } from '../types/message';
 
 let _unsubConvs:        (() => void) | null = null;
@@ -186,6 +186,20 @@ export async function initChat(uid: string): Promise<void> {
     });
   });
 
+  // ── Safety Numbers ──
+  document.getElementById('btn-fingerprint')?.addEventListener('click', () => {
+    if (_currentContactUid) {
+      openFingerprintModal(_myUid, _currentContactUid);
+    } else {
+      showToast('Ouvrez une conversation pour voir les Safety Numbers.');
+    }
+  });
+  document.getElementById('modal-close-btn')?.addEventListener('click', closeFingerprintModal);
+  document.getElementById('fingerprint-modal')?.addEventListener('click', (e) => {
+    // Fermer si clic sur l'overlay (pas sur la carte)
+    if ((e.target as HTMLElement).id === 'fingerprint-modal') closeFingerprintModal();
+  });
+
   // ── Modal nouvelle conversation ──
   document.getElementById('btn-new-chat')?.addEventListener('click',    () => openNewConvModal());
   document.getElementById('modal-close')?.addEventListener('click',     () => closeNewConvModal());
@@ -223,15 +237,6 @@ export async function initChat(uid: string): Promise<void> {
       const name = el.querySelector('.contact-name')?.textContent?.toLowerCase() ?? '';
       el.style.display = name.includes(q) ? '' : 'none';
     });
-  });
-
-  // ── Safety Numbers ──
-  document.getElementById('btn-fingerprint')?.addEventListener('click', () => {
-    if (_currentConvId && _currentContactUid) {
-      showSafetyNumbers(_myUid, _currentContactUid);
-    } else {
-      showToast('Ouvrez une conversation pour voir les Safety Numbers.');
-    }
   });
 
   // ── S'abonner aux conversations ──

@@ -30,4 +30,13 @@ export default defineWorkspace([
       setupFiles : ["src/services/__tests__/setup.ts"],
     },
   },
+  {
+    test: {
+      name       : "ui",
+      include    : ["src/ui/__tests__/**/*.test.ts"],
+      environment: "jsdom",
+      globals    : true,
+      // Pas de setupFiles spécifique : les tests UI mockent leurs dépendances en interne.
+    },
+  },
 ]);

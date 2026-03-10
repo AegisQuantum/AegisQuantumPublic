@@ -379,3 +379,46 @@
     </div>
   </div>
 </div>
+
+<!-- ══ MODAL — Safety Numbers (fingerprint) ══ -->
+<div class="fp-modal-overlay" id="fingerprint-modal" style="display:none" aria-hidden="true" role="dialog" aria-labelledby="fp-modal-title">
+  <div class="fp-modal-card">
+
+    <div class="fp-modal-header">
+      <span class="fp-modal-title" id="fp-modal-title">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13">
+          <rect x="3" y="7" width="10" height="8" rx="1.5"/>
+          <path d="M5 7V5a3 3 0 0 1 6 0v2"/>
+          <circle cx="8" cy="11" r="1"/>
+        </svg>
+        Safety Numbers
+      </span>
+      <button class="fp-modal-close" id="modal-close-btn" aria-label="Fermer">&times;</button>
+    </div>
+
+    <p class="fp-modal-desc">
+      Comparez ces nombres avec votre contact via un canal sûr (appel vocal, en personne).
+      S’ils correspondent, votre conversation n’a pas été interceptée.
+    </p>
+
+    <div class="fp-section">
+      <div class="fp-label">Empreinte de la conversation &mdash; ML-KEM-768 ‑ ML-DSA-65</div>
+      <div class="fp-grid" id="fp-own">
+        <div class="fp-loading">Chargement…</div>
+      </div>
+    </div>
+
+    <div class="fp-section">
+      <div class="fp-label">Votre contact voit les mêmes nombres</div>
+      <div class="fp-grid" id="fp-contact">
+        <div class="fp-loading">Chargement…</div>
+      </div>
+    </div>
+
+    <div class="fp-status unverified" id="fp-status">
+      <span class="fp-status-dot"></span>
+      Non vérifié &mdash; comparez hors de l’application
+    </div>
+
+  </div>
+</div>
