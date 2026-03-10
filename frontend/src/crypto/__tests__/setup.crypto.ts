@@ -15,7 +15,6 @@
  * n'est actif que dans l'environnement de test.
  */
 
-import { vi } from "vitest";
 import { webcrypto } from "node:crypto";
 
 // Polyfill crypto.subtle pour Node (disponible nativement à partir de Node 19,
@@ -35,54 +34,56 @@ if (typeof globalThis.crypto === "undefined" || typeof globalThis.crypto.subtle 
  *  - default.ArgonType.Argon2id
  *  - default.hash(params) → Promise<{ hash: Uint8Array }>
  */
-vi.mock("argon2-browser", () => {
-  const ArgonType = { Argon2d: 0, Argon2i: 1, Argon2id: 2 };
+// argon2.ts lit window.argon2 via globalThis (chargé par CDN en browser).
+// En test Node, ce global n'existe pas — on l'injecte ici avec PBKDF2-SHA256
+// qui a les mêmes propriétés testables (déterministe, non-trivial, 32 bytes).
 
-  const hash = async (params: {
-    pass       : string | Uint8Array;
-    salt       : Uint8Array;
-    hashLen   ?: number;
-    time      ?: number;
-    mem       ?: number;
-    parallelism?: number;
-    type      ?: number;
-  }): Promise<{ hash: Uint8Array; hashHex: string; encoded: string }> => {
-    const passBytes =
-      typeof params.pass === "string"
-        ? new TextEncoder().encode(params.pass)
-        : params.pass;
+const ArgonType = { Argon2d: 0, Argon2i: 1, Argon2id: 2 };
 
-    const keyMaterial = await globalThis.crypto.subtle.importKey(
-      "raw",
-      passBytes.buffer as ArrayBuffer,
-      { name: "PBKDF2" },
-      false,
-      ["deriveBits"]
-    );
+const mockArgon2Hash = async (params: {
+  pass       : string | Uint8Array;
+  salt       : Uint8Array;
+  hashLen   ?: number;
+  time      ?: number;
+  mem       ?: number;
+  parallelism?: number;
+  type      ?: number;
+}): Promise<{ hash: Uint8Array; hashHex: string; encoded: string }> => {
+  const passBytes =
+    typeof params.pass === "string"
+      ? new TextEncoder().encode(params.pass)
+      : params.pass;
 
-    const bits = await globalThis.crypto.subtle.deriveBits(
-      {
-        name      : "PBKDF2",
-        hash      : "SHA-256",
-        salt      : params.salt.buffer as ArrayBuffer,
-        iterations: 1000,
-      },
-      keyMaterial,
-      (params.hashLen ?? 32) * 8
-    );
+  const keyMaterial = await globalThis.crypto.subtle.importKey(
+    "raw",
+    // PBKDF2 n'accepte pas un buffer vide — on utilise un byte nul si password vide
+    passBytes.length > 0 ? (passBytes.buffer as ArrayBuffer) : new Uint8Array([0]).buffer,
+    { name: "PBKDF2" },
+    false,
+    ["deriveBits"]
+  );
 
-    const hashBytes = new Uint8Array(bits);
-    const hashHex   = Array.from(hashBytes)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+  const bits = await globalThis.crypto.subtle.deriveBits(
+    {
+      name      : "PBKDF2",
+      hash      : "SHA-256",
+      salt      : params.salt.buffer as ArrayBuffer,
+      iterations: 1000,
+    },
+    keyMaterial,
+    (params.hashLen ?? 32) * 8
+  );
 
-    return { hash: hashBytes, hashHex, encoded: hashHex };
-  };
+  const hashBytes = new Uint8Array(bits);
+  const hashHex   = Array.from(hashBytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 
-  // Vitest attend : { default: {...}, ArgonType: {...} }
-  // car argon2.ts fait `import argon2 from "argon2-browser"` (default import)
-  return {
-    default  : { ArgonType, hash },
-    ArgonType,          // aussi en named export au cas où
-  };
-});
+  return { hash: hashBytes, hashHex, encoded: hashHex };
+};
+
+// Injecter le mock sur globalThis.argon2 (lu par argon2.ts via getArgon2())
+(globalThis as unknown as Record<string, unknown>).argon2 = {
+  ArgonType,
+  hash: mockArgon2Hash,
+};
