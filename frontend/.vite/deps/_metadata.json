@@ -1,0 +1,37 @@
+{
+  "hash": "d2878cce",
+  "configHash": "d5c752f6",
+  "lockfileHash": "cfe3291e",
+  "browserHash": "37effa10",
+  "optimized": {
+    "firebase/auth": {
+      "src": "../../node_modules/firebase/auth/dist/esm/index.esm.js",
+      "file": "firebase_auth.js",
+      "fileHash": "36e4307b",
+      "needsInterop": false
+    },
+    "firebase/firestore": {
+      "src": "../../node_modules/firebase/firestore/dist/esm/index.esm.js",
+      "file": "firebase_firestore.js",
+      "fileHash": "c3c7e203",
+      "needsInterop": false
+    },
+    "firebase/app": {
+      "src": "../../node_modules/firebase/app/dist/esm/index.esm.js",
+      "file": "firebase_app.js",
+      "fileHash": "f4552a03",
+      "needsInterop": false
+    },
+    "@openforge-sh/liboqs": {
+      "src": "../../node_modules/@openforge-sh/liboqs/src/index.js",
+      "file": "@openforge-sh_liboqs.js",
+      "fileHash": "15a9cc23",
+      "needsInterop": false
+    }
+  },
+  "chunks": {
+    "chunk-TEJITBNO": {
+      "file": "chunk-TEJITBNO.js"
+    }
+  }
+}

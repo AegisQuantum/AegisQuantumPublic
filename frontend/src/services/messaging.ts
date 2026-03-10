@@ -434,15 +434,26 @@ export function subscribeToMessages(
 ): Unsubscribe {
   const q = query(messagesCol(conversationId), orderBy("timestamp", "asc"));
 
+  // Cache local : msgId → DecryptedMessage
+  // Évite de re-déchiffrer des messages déjà traités à chaque snapshot Firestore.
+  // Critique pour les messages propres (envoyés par nous) : la messageKey est
+  // stockée dans IDB par sendMessage(), mais le snapshot peut arriver avant
+  // que storeMessageKey() soit terminé → race condition → déchiffrement échoue.
+  // En ne re-traitant que les nouveaux docs, on élimine ce problème.
+  const decryptedCache = new Map<string, DecryptedMessage>();
+
   return onSnapshot(q, async (snap) => {
-    const decrypted: DecryptedMessage[] = [];
-    for (const d of snap.docs) {
+    // Identifier les docs vraiment nouveaux (pas encore dans le cache)
+    const newDocs = snap.docs.filter(d => !decryptedCache.has(d.id));
+
+    // Déchiffrer uniquement les nouveaux
+    for (const d of newDocs) {
       const msg = { id: d.id, ...d.data() } as EncryptedMessage;
       try {
-        decrypted.push(await decryptMessage(myUid, msg));
+        decryptedCache.set(msg.id, await decryptMessage(myUid, msg));
       } catch (err) {
         console.error(`[AQ] Échec déchiffrement message ${msg.id}:`, err);
-        decrypted.push({
+        decryptedCache.set(msg.id, {
           id       : msg.id,
           senderUid: msg.senderUid,
           plaintext: "[🔒 Message non déchiffrable — clés expirées ou session expirée]",
@@ -451,6 +462,11 @@ export function subscribeToMessages(
         });
       }
     }
-    callback(decrypted);
+
+    // Ne notifier le callback que si de nouveaux messages ont été déchiffrés
+    if (newDocs.length === 0) return;
+
+    // Retourner tous les messages dans l'ordre Firestore (timestamp asc)
+    callback(snap.docs.map(d => decryptedCache.get(d.id)!));
   });
 }
