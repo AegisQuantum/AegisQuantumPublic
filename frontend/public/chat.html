@@ -1,6 +1,6 @@
 <!-- chat.html — template chargé dynamiquement dans #chat-screen après auth -->
 <!-- SERVI DEPUIS public/ — c'est CE fichier qui est utilisé en dev et en prod -->
-<link rel="stylesheet" href="/src/styles/chat.css" />
+<!-- NOTE: pas de <link> CSS ici — le CSS est injecté par Vite dans le bundle en prod -->
 
 <div id="chat-root">
 
@@ -167,6 +167,12 @@
     <!-- ══ SETTINGS ══ -->
     <section class="settings-panel" id="view-settings" style="display:none">
       <div class="settings-header">
+        <button class="btn-settings-back" id="btn-settings-back" title="Retour au chat">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="14" height="14">
+            <path d="M10 3L5 8l5 5"/>
+          </svg>
+          Retour
+        </button>
         <h2>Paramètres</h2>
         <p>Configuration de votre compte AegisQuantum</p>
       </div>
@@ -323,18 +329,38 @@
       <span class="modal-title">Photo de profil</span>
       <button class="modal-close" id="avatar-modal-close">×</button>
     </div>
-    <div style="display:flex;flex-direction:column;gap:14px">
+    <div style="display:flex;flex-direction:column;gap:16px">
+
+      <!-- Préview + upload -->
       <div style="display:flex;align-items:center;gap:16px">
-        <div class="avatar-preview-large" id="avatar-modal-preview">AQ</div>
-        <div style="flex:1">
-          <div class="modal-label" style="margin-bottom:6px">Initiales (max 2 caractères)</div>
-          <input type="text" class="modal-input" id="avatar-initials-input"
-            maxlength="2" placeholder="AQ" autocomplete="off"
-            style="text-transform:uppercase;font-size:16px;text-align:center;letter-spacing:0.1em"/>
+        <div style="position:relative;flex-shrink:0">
+          <div class="avatar-preview-large" id="avatar-modal-preview">AQ</div>
+          <!-- Overlay upload -->
+          <label class="avatar-upload-overlay" for="avatar-photo-input" title="Choisir une photo">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14">
+              <path d="M8 3v8M4 7l4-4 4 4"/>
+              <path d="M2 14h12"/>
+            </svg>
+          </label>
+          <input type="file" id="avatar-photo-input" accept="image/*" style="display:none" />
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:10px">
+          <div>
+            <div class="modal-label" style="margin-bottom:5px">Initiales (max 2 caractères)</div>
+            <input type="text" class="modal-input" id="avatar-initials-input"
+              maxlength="2" placeholder="AQ" autocomplete="off"
+              style="text-transform:uppercase;font-size:15px;text-align:center;letter-spacing:0.1em"/>
+          </div>
+          <button id="btn-remove-photo" style="display:none;background:none;border:1px solid rgba(252,129,129,0.3);border-radius:6px;color:#fc8181;font-family:'DM Mono',monospace;font-size:10px;padding:5px 12px;cursor:pointer;text-align:center;transition:background 0.15s"
+            onmouseover="this.style.background='rgba(252,129,129,0.08)'" onmouseout="this.style.background='none'">
+            Supprimer la photo
+          </button>
         </div>
       </div>
+
+      <!-- Couleurs -->
       <div>
-        <div class="modal-label" style="margin-bottom:8px">Couleur</div>
+        <div class="modal-label" style="margin-bottom:8px">Couleur de fond</div>
         <div class="avatar-color-grid">
           <div class="avatar-color-swatch" data-color="#6b8ff5" style="background:#6b8ff5"></div>
           <div class="avatar-color-swatch" data-color="#5eead4" style="background:#5eead4"></div>

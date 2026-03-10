@@ -2,6 +2,9 @@
  * chat.ts — UI du chat branchée sur messaging.ts et auth.ts
  */
 
+// Import du CSS chat — Vite le bundle en prod, l'injecte via <style> en dev
+import '../styles/chat.css';
+
 import { signOut }                          from '../services/auth';
 import {
   subscribeToConversations,
@@ -35,25 +38,30 @@ function setLocalConvName(convId: string, name: string): void {
   }
 }
 
-/** Retourne la couleur de fond de l'avatar de l'utilisateur (stockée localement). */
+/** Retourne la couleur de fond de l'avatar. */
 function getAvatarColor(): string {
   return localStorage.getItem(`aq:avatar:color:${_myUid}`) ?? '#6b8ff5';
 }
-
-/** Sauvegarde la couleur d'avatar. */
 function setAvatarColor(color: string): void {
   localStorage.setItem(`aq:avatar:color:${_myUid}`, color);
 }
 
-/** Retourne les initiales personnalisées de l'avatar (max 2 chars). */
+/** Initiales (max 2 chars). */
 function getAvatarInitials(): string {
   return localStorage.getItem(`aq:avatar:initials:${_myUid}`) ?? _myUid.slice(0, 2).toUpperCase();
 }
-
-/** Sauvegarde des initiales personnalisées. */
 function setAvatarInitials(initials: string): void {
   const clean = initials.trim().slice(0, 2).toUpperCase();
   if (clean) localStorage.setItem(`aq:avatar:initials:${_myUid}`, clean);
+}
+
+/** Photo de profil — base64 DataURL ou null. */
+function getAvatarPhoto(): string | null {
+  return localStorage.getItem(`aq:avatar:photo:${_myUid}`);
+}
+function setAvatarPhoto(dataUrl: string | null): void {
+  if (dataUrl) localStorage.setItem(`aq:avatar:photo:${_myUid}`, dataUrl);
+  else         localStorage.removeItem(`aq:avatar:photo:${_myUid}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,11 +108,17 @@ export async function initChat(uid: string): Promise<void> {
   });
 
   // ── Navigation settings ──
-  document.getElementById('rail-btn-settings')?.addEventListener('click', () => switchView('settings'));
+  document.getElementById('rail-btn-settings')?.addEventListener('click', () => {
+    const isSettings = document.getElementById('view-settings')?.style.display !== 'none';
+    switchView(isSettings ? 'chat' : 'settings');
+  });
   document.getElementById('btn-profile-settings')?.addEventListener('click', () => {
     closeProfileDropdown();
-    switchView('settings');
+    // toggle aussi depuis le dropdown
+    const isSettings = document.getElementById('view-settings')?.style.display !== 'none';
+    switchView(isSettings ? 'chat' : 'settings');
   });
+  document.getElementById('btn-settings-back')?.addEventListener('click', () => switchView('chat'));
 
   // ── Sidebar toggle ──
   document.getElementById('btn-toggle-sidebar')?.addEventListener('click', toggleSidebar);
@@ -116,18 +130,58 @@ export async function initChat(uid: string): Promise<void> {
   });
   document.addEventListener('click', () => closeProfileDropdown());
 
-  // ── Changer avatar (click sur avatar dans settings) ──
+  // ── Changer avatar ──
   document.getElementById('btn-change-avatar')?.addEventListener('click', openAvatarModal);
+  document.getElementById('topnav-avatar')?.addEventListener('dblclick', (e) => { e.stopPropagation(); openAvatarModal(); });
   document.getElementById('avatar-modal-close')?.addEventListener('click', closeAvatarModal);
-  document.getElementById('avatar-modal-cancel')?.addEventListener('click', closeAvatarModal);
+  document.getElementById('avatar-modal-cancel')?.addEventListener('click', () => { _pendingPhoto = undefined; closeAvatarModal(); });
   document.getElementById('avatar-modal-confirm')?.addEventListener('click', confirmAvatarChange);
+
+  // Input file — photo
+  document.getElementById('avatar-photo-input')?.addEventListener('change', (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const dataUrl = ev.target?.result as string;
+      _pendingPhoto = dataUrl;
+      const preview = document.getElementById('avatar-modal-preview') as HTMLElement | null;
+      if (preview) {
+        preview.textContent = '';
+        preview.style.backgroundImage = `url('${dataUrl}')`;
+        preview.style.backgroundSize = 'cover';
+        preview.style.backgroundPosition = 'center';
+      }
+      const btnRemove = document.getElementById('btn-remove-photo');
+      if (btnRemove) btnRemove.style.display = '';
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // Supprimer photo
+  document.getElementById('btn-remove-photo')?.addEventListener('click', () => {
+    _pendingPhoto = null;
+    const preview = document.getElementById('avatar-modal-preview') as HTMLElement | null;
+    const input   = document.getElementById('avatar-initials-input') as HTMLInputElement | null;
+    if (preview) {
+      preview.style.backgroundImage = '';
+      preview.style.background = getAvatarColor();
+      preview.textContent = input?.value.trim().slice(0,2).toUpperCase() || getAvatarInitials();
+    }
+    const btnRemove = document.getElementById('btn-remove-photo');
+    if (btnRemove) btnRemove.style.display = 'none';
+  });
+
   // Sélecteur de couleurs
   document.querySelectorAll<HTMLElement>('.avatar-color-swatch').forEach((swatch) => {
     swatch.addEventListener('click', () => {
       document.querySelectorAll('.avatar-color-swatch').forEach(s => s.classList.remove('selected'));
       swatch.classList.add('selected');
-      const preview = document.getElementById('avatar-modal-preview');
-      if (preview) preview.style.background = swatch.dataset.color ?? '#6b8ff5';
+      const preview = document.getElementById('avatar-modal-preview') as HTMLElement | null;
+      // Ne changer la couleur du preview que s'il n'y a pas de photo en attente
+      if (preview && !_pendingPhoto && !getAvatarPhoto()) {
+        preview.style.background = swatch.dataset.color ?? '#6b8ff5';
+      }
     });
   });
 
@@ -181,32 +235,63 @@ export async function initChat(uid: string): Promise<void> {
 function refreshAvatar(): void {
   const initials = getAvatarInitials();
   const color    = getAvatarColor();
+  const photo    = getAvatarPhoto();
 
-  // Topnav avatar (texte seul — pas le dropdown)
+  // Topnav avatar
   const topnavAvatar = document.getElementById('topnav-avatar');
   if (topnavAvatar) {
     const textNode = Array.from(topnavAvatar.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
-    if (textNode) textNode.textContent = initials;
-    (topnavAvatar as HTMLElement).style.background = color;
+    if (photo) {
+      // Photo : cacher le texte, appliquer l'image en background
+      if (textNode) (textNode as Text).textContent = '';
+      (topnavAvatar as HTMLElement).style.cssText +=
+        `;background-image:url('${photo}');background-size:cover;background-position:center;background-color:transparent`;
+    } else {
+      if (textNode) (textNode as Text).textContent = initials;
+      (topnavAvatar as HTMLElement).style.backgroundImage = '';
+      (topnavAvatar as HTMLElement).style.background = color;
+    }
   }
 
   // Avatar dans les settings
   const settingsAvatar = document.getElementById('settings-avatar-preview');
   if (settingsAvatar) {
-    settingsAvatar.textContent  = initials;
-    settingsAvatar.style.background = color;
+    if (photo) {
+      settingsAvatar.textContent = '';
+      (settingsAvatar as HTMLElement).style.cssText +=
+        `;background-image:url('${photo}');background-size:cover;background-position:center`;
+    } else {
+      settingsAvatar.textContent = initials;
+      (settingsAvatar as HTMLElement).style.backgroundImage = '';
+      (settingsAvatar as HTMLElement).style.background = color;
+    }
   }
 }
 
 function openAvatarModal(): void {
   const modal    = document.getElementById('avatar-modal');
-  const preview  = document.getElementById('avatar-modal-preview');
+  const preview  = document.getElementById('avatar-modal-preview') as HTMLElement | null;
   const input    = document.getElementById('avatar-initials-input') as HTMLInputElement | null;
   const curColor = getAvatarColor();
+  const curPhoto = getAvatarPhoto();
 
-  if (modal)   modal.style.display = 'flex';
-  if (preview) { preview.textContent = getAvatarInitials(); preview.style.background = curColor; }
-  if (input)   input.value = getAvatarInitials();
+  if (modal) modal.style.display = 'flex';
+
+  // Preview : photo ou initiales
+  if (preview) {
+    if (curPhoto) {
+      preview.textContent = '';
+      preview.style.backgroundImage  = `url('${curPhoto}')`;
+      preview.style.backgroundSize   = 'cover';
+      preview.style.backgroundPosition = 'center';
+      preview.style.backgroundColor = 'transparent';
+    } else {
+      preview.textContent = getAvatarInitials();
+      preview.style.backgroundImage = '';
+      preview.style.background = curColor;
+    }
+  }
+  if (input) input.value = getAvatarInitials();
 
   // Marquer la couleur active
   document.querySelectorAll<HTMLElement>('.avatar-color-swatch').forEach((s) => {
@@ -216,6 +301,10 @@ function openAvatarModal(): void {
   // Mise à jour live du preview via l'input initiales
   input?.removeEventListener('input', _onInitialsInput);
   input?.addEventListener('input', _onInitialsInput);
+
+  // Bouton supprimer photo (si photo existe)
+  const btnRemovePhoto = document.getElementById('btn-remove-photo');
+  if (btnRemovePhoto) btnRemovePhoto.style.display = curPhoto ? '' : 'none';
 
   setTimeout(() => input?.focus(), 50);
 }
@@ -231,6 +320,9 @@ function closeAvatarModal(): void {
   if (modal) modal.style.display = 'none';
 }
 
+// Photo en attente de sauvegarde (chargée dans la modale)
+let _pendingPhoto: string | null | undefined = undefined; // undefined = pas changé
+
 function confirmAvatarChange(): void {
   const input    = document.getElementById('avatar-initials-input') as HTMLInputElement | null;
   const selected = document.querySelector<HTMLElement>('.avatar-color-swatch.selected');
@@ -238,6 +330,8 @@ function confirmAvatarChange(): void {
 
   if (input?.value.trim()) setAvatarInitials(input.value);
   setAvatarColor(color);
+  if (_pendingPhoto !== undefined) setAvatarPhoto(_pendingPhoto); // null = supprimer
+  _pendingPhoto = undefined;
   refreshAvatar();
   closeAvatarModal();
   showToast('Avatar mis à jour !');
@@ -421,9 +515,7 @@ function renderConversationList(convs: Conversation[]): void {
   for (const conv of convs) {
     const contactUid  = conv.participants.find((p) => p !== _myUid) ?? conv.participants[0];
     const isActive    = conv.id === _currentConvId;
-    // Nom local (renommé) ou fallback UID
     const displayName = getLocalConvName(conv.id) ?? contactUid.slice(0, 20);
-    // Aperçu du dernier message
     const preview     = conv.lastMessagePreview ?? '🔒 Chiffré';
     const timeStr     = conv.lastMessageAt
       ? new Date(conv.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -445,6 +537,19 @@ function renderConversationList(convs: Conversation[]): void {
     item.addEventListener('click', () => openConversation(conv.id, contactUid));
     list.appendChild(item);
   }
+
+  // Après chaque re-render de la liste (ex: suite à un envoi Firestore),
+  // réappliquer l'état actif si une conv est ouverte — sans toucher aux messages.
+  if (_currentConvId) {
+    const emptyState = document.getElementById('chat-empty');
+    const convView   = document.getElementById('conversation-view');
+    if (emptyState) { emptyState.style.display = 'none'; emptyState.classList.add('hidden'); }
+    if (convView)   { convView.classList.remove('hidden'); convView.style.display = 'contents'; }
+    // Re-marquer l'item actif dans la nouvelle liste
+    document.querySelectorAll<HTMLElement>('.contact-item').forEach((el) => {
+      el.classList.toggle('active', el.dataset.convId === _currentConvId);
+    });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -457,6 +562,9 @@ function openConversation(convId: string, contactUid: string): void {
   _currentConvId     = convId;
   _currentContactUid = contactUid;
 
+  // Toujours revenir à la vue chat si on était dans les settings
+  switchView('chat');
+
   const emptyState    = document.getElementById('chat-empty');
   const convView      = document.getElementById('conversation-view');
   const contactNameEl = document.getElementById('chat-contact-name');
@@ -464,6 +572,7 @@ function openConversation(convId: string, contactUid: string): void {
 
   emptyState?.classList.add('hidden');
   convView?.classList.remove('hidden');
+  if (convView) convView.style.display = 'contents';
 
   const displayName = getLocalConvName(convId) ?? contactUid.slice(0, 24);
   if (contactNameEl) contactNameEl.textContent = displayName;
