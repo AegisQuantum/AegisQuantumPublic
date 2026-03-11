@@ -4,6 +4,7 @@
     "indexes": "firestore.indexes.json"
   },
   "hosting": {
+    "site": "aegis-live",
     "public": "frontend/dist",
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "headers": [
@@ -16,6 +17,7 @@
       }
     ],
     "rewrites": [
+      { "source": "/chat.html", "destination": "/chat.html" },
       { "source": "**", "destination": "/index.html" }
     ]
   }

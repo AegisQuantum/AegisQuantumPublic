@@ -44,6 +44,13 @@ export interface EncryptedMessage {
   messageIndex: number;
 
   timestamp: number;
+
+  /**
+   * UIDs des utilisateurs qui ont lu ce message.
+   * Mis à jour via arrayUnion dans presence.ts → markMessageRead().
+   * N'expose aucune donnée chiffrée — uniquement des UIDs.
+   */
+  readBy?: string[];
 }
 
 /** Metadata d'une conversation (sans messages). */
@@ -65,4 +72,12 @@ export interface DecryptedMessage {
   timestamp: number;
   /** true si la signature ML-DSA-65 a été vérifiée avec succès */
   verified: boolean;
+  /** UIDs des utilisateurs qui ont lu ce message (depuis Firestore readBy). */
+  readBy?: string[];
+}
+
+/** Document Firestore dans /conversations/{convId}/typing/{uid}. */
+export interface TypingStatus {
+  uid      : string;
+  updatedAt: number;
 }

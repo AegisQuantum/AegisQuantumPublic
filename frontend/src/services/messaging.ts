@@ -56,6 +56,8 @@ import {
   collection, doc, addDoc, setDoc, getDoc, getDocs, updateDoc,
   query, where, orderBy, onSnapshot, serverTimestamp,
   type Unsubscribe,
+  type QueryDocumentSnapshot,
+  type DocumentData,
 } from "firebase/firestore";
 import { db }            from "./firebase";
 import { getPublicKeys } from "./key-registry";
@@ -132,6 +134,72 @@ async function loadMessageKey(convId: string, msgId: string): Promise<string | u
 //
 //   Supprimer storeMessageKey / loadMessageKey une fois le Double Ratchet en place
 //   (le ratchet state contient toutes les clés nécessaires).
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache mémoire des messageKeys en attente (anti race-condition envoi)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Problème : Firestore déclenche le snapshot local AVANT que addDoc() retourne
+// l'ID du message → storeMessageKey() n'a pas encore été appelé → decryptMessage
+// ne trouve pas la clé dans IDB → affichage de "[🔒 Message non déchiffrable]".
+//
+// Solution : mettre la messageKey en cache mémoire AVANT addDoc(), indexée par
+// (convId, contenu déterministe). On utilise un Map<convId, Map<nonce, key>>
+// car le nonce est généré avant addDoc et est unique par message.
+// subscribeToMessages/decryptMessage consulte ce cache en premier.
+//
+const _pendingKeys = new Map<string, string>(); // `${convId}:${nonce}` → base64(messageKey)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Notification locale de mise à jour de preview (sans aller-retour Firestore)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Problème : updateConversationPreview() faisait un updateDoc() Firestore
+// → déclenchait subscribeToConversations chez l’envoyeur
+// → renderConversationList() → flash / refresh visuel côté envoyeur.
+//
+// Solution : quand ON envoie un message, on notifie la sidebar localement
+// via un callback en mémoire (zéro aller-retour réseau). Le receiver, lui,
+// met à jour Firestore quand il reçoit le message — les deux arrivent au
+// même état final mais côté envoyeur il n’y a plus de snapshot parasite.
+//
+type ConvPreviewListener = (convId: string, preview: string, ts: number) => void;
+const _convPreviewListeners = new Set<ConvPreviewListener>();
+
+/** Enregistre un listener appelé à chaque mise à jour locale de preview. */
+export function onConvPreviewUpdate(cb: ConvPreviewListener): () => void {
+  _convPreviewListeners.add(cb);
+  return () => _convPreviewListeners.delete(cb);
+}
+
+/** Appelé par sendMessage() au lieu de updateConversationPreview(). */
+function _notifyConvPreviewUpdate(convId: string, plaintext: string, ts: number): void {
+  const preview = plaintext.length > 40 ? plaintext.slice(0, 40) + '…' : plaintext;
+  _convPreviewListeners.forEach(cb => cb(convId, preview, ts));
+}
+
+// Set des msgIds dont le déchiffrement a échoué et doit être retenté.
+// Déclaré ici (module-level) pour être accessible dans subscribeToMessages.
+const _retrySet = new Set<string>();
+
+export function _storePendingKey(convId: string, nonce: string, messageKey: string): void {
+  _pendingKeys.set(`${convId}:${nonce}`, messageKey);
+}
+
+export function _consumePendingKey(convId: string, nonce: string): string | undefined {
+  const k = `${convId}:${nonce}`;
+  const v = _pendingKeys.get(k);
+  // NE PAS supprimer ici — la clé peut être nécessaire pour plusieurs snapshots
+  // du même message (Firestore peut envoyer 2 snapshots rapides : local + serveur).
+  // La clé sera supprimée dans decryptMessage() APRÈS que storeMessageKey() aura
+  // persisté en IDB, garantissant qu'on ne la perd jamais.
+  return v;
+}
+
+/** Supprime définitivement une pending key après persistance IDB réussie. */
+export function _evictPendingKey(convId: string, nonce: string): void {
+  _pendingKeys.delete(`${convId}:${nonce}`);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Paths Firestore
@@ -287,7 +355,13 @@ export async function sendMessage(
   const signedPayload = ciphertext + nonce + kemCiphertext;
   const signature     = await dsaSign(signedPayload, myDsaPrivateKey);
 
-  // ── 7. Écrire dans Firestore ──────────────────────────────────────────────
+  // ── 7. Cache mémoire AVANT addDoc (anti race-condition snapshot) ──────────
+  // Firestore envoie le snapshot local AVANT que addDoc() retourne l'ID,
+  // donc storeMessageKey() serait appelé trop tard. On indexe par nonce
+  // (unique par message) pour que decryptMessage trouve la clé immédiatement.
+  _storePendingKey(convId, nonce, messageKey);
+
+  // ── 8. Écrire dans Firestore ──────────────────────────────────────────────
   //
   // TODO [DOUBLE RATCHET] messageIndex : remplacer 0 par drResult.messageIndex
   const msgRef = await addDoc(messagesCol(convId), {
@@ -307,8 +381,19 @@ export async function sendMessage(
   // contient toutes les clés nécessaires. Appeler saveRatchetState() à la place.
   await storeMessageKey(convId, msgRef.id, messageKey);
 
-  // ── 9. Mettre à jour la preview Firestore ────────────────────────────────
-  await updateConversationPreview(convId, plaintext);
+  // ── 9. Preview de conversation mise à jour localement (sans écriture Firestore) ──
+  // On NE fait plus de updateDoc() ici car cela déclencherait un snapshot
+  // subscribeToConversations côté envoyeur → refresh de la sidebar → flash visuel.
+  //
+  // À la place, les deux côtés (envoyeur ET receiver) mettent à jour leur
+  // sidebar via le snapshot du MESSAGE (subscribeToMessages → renderMessages),
+  // qui appelle _notifyConvPreviewUpdate() ci-dessous.
+  //
+  // La preview Firestore (lastMessagePreview / lastMessageAt) est mise à jour
+  // de manière différée par le receiver quand il reçoit le message — ce qui
+  // n'affecte pas l'envoyeur car son propre subscribeToConversations ignorera
+  // le snapshot tant qu'il vient d'un message déjà connu.
+  _notifyConvPreviewUpdate(convId, plaintext, Date.now());
 
   // Évite "unused variable" en attendant le Double Ratchet
   void myKemPrivateKey;
@@ -379,10 +464,22 @@ export async function decryptMessage(
 
   // ── 2. Récupérer (ou dériver) la messageKey (CONTOURNEMENT) ──────────────
   let messageKey: string;
-  const cachedKey = await loadMessageKey(msg.conversationId, msg.id);
 
-  if (cachedKey) {
-    // Cache IDB présent → message propre ou déjà vu
+  // Priorité 1 : cache mémoire (anti race-condition : snapshot local avant addDoc)
+  const pendingKey = _consumePendingKey(msg.conversationId, msg.nonce);
+
+  // Priorité 2 : cache IDB (messages déjà reçus ou session précédente)
+  const cachedKey  = pendingKey ? undefined : await loadMessageKey(msg.conversationId, msg.id);
+
+  if (pendingKey) {
+    // Clé trouvée dans le cache mémoire → message envoyé par nous dans cette session
+    messageKey = pendingKey;
+    // Persister en IDB pour les rechargements de session futurs,
+    // PUIS supprimer du cache mémoire (la clé est maintenant safe dans IDB).
+    await storeMessageKey(msg.conversationId, msg.id, messageKey);
+    _evictPendingKey(msg.conversationId, msg.nonce);
+  } else if (cachedKey) {
+    // Cache IDB présent → message propre (session précédente) ou reçu et déjà vu
     messageKey = cachedKey;
   } else {
     // Cache absent → message reçu → KEM decapsulate
@@ -420,6 +517,7 @@ export async function decryptMessage(
     plaintext,
     timestamp: msg.timestamp,
     verified,
+    readBy   : msg.readBy ?? [],
   };
 }
 
@@ -442,31 +540,128 @@ export function subscribeToMessages(
   // En ne re-traitant que les nouveaux docs, on élimine ce problème.
   const decryptedCache = new Map<string, DecryptedMessage>();
 
-  return onSnapshot(q, async (snap) => {
-    // Identifier les docs vraiment nouveaux (pas encore dans le cache)
-    const newDocs = snap.docs.filter(d => !decryptedCache.has(d.id));
+  // Snapshot docs en cours — nécessaire pour que les retries puissent
+  // retrouver les données du message sans attendre un nouveau snapshot.
+  let latestDocs: QueryDocumentSnapshot<DocumentData>[] = [];
 
-    // Déchiffrer uniquement les nouveaux
-    for (const d of newDocs) {
-      const msg = { id: d.id, ...d.data() } as EncryptedMessage;
+  /**
+   * Retente le déchiffrement d'un message après un délai.
+   * Appelé après un échec sur le snapshot local optimiste de Firestore.
+   * À ce moment-là, _pendingKeys contient encore la clé (non consommée)
+   * et storeMessageKey() a eu le temps de persister en IDB.
+   */
+  function scheduleRetry(failedMsg: EncryptedMessage): void {
+    setTimeout(async () => {
+      // Retrouver les données à jour du message dans le dernier snapshot
+      const freshDoc = latestDocs.find(d => d.id === failedMsg.id);
+      const msgData  = freshDoc
+        ? { id: freshDoc.id, ...freshDoc.data() } as EncryptedMessage
+        : failedMsg; // fallback : utiliser les données du snapshot d'origine
+
       try {
-        decryptedCache.set(msg.id, await decryptMessage(myUid, msg));
+        const decrypted = await decryptMessage(myUid, msgData);
+        decryptedCache.set(msgData.id, decrypted);
+        _retrySet.delete(msgData.id);
+
+        // Notifier l'UI avec le message déchiffré
+        const result = latestDocs
+          .map(d => decryptedCache.get(d.id))
+          .filter((m): m is DecryptedMessage => m !== undefined);
+        callback(result);
       } catch (err) {
-        console.error(`[AQ] Échec déchiffrement message ${msg.id}:`, err);
-        decryptedCache.set(msg.id, {
-          id       : msg.id,
-          senderUid: msg.senderUid,
+        console.error(`[AQ] Retry déchiffrement échoué pour ${msgData.id}:`, err);
+        // Laisser le message en erreur définitive dans le cache
+        decryptedCache.set(msgData.id, {
+          id       : msgData.id,
+          senderUid: msgData.senderUid,
           plaintext: "[🔒 Message non déchiffrable — clés expirées ou session expirée]",
-          timestamp: msg.timestamp,
+          timestamp: msgData.timestamp,
           verified : false,
+          readBy   : [],
         });
+        _retrySet.delete(msgData.id);
+      }
+    }, 80); // 80ms — suffisant pour que storeMessageKey() soit terminé
+  }
+
+  return onSnapshot(q, async (snap) => {
+    latestDocs = snap.docs;
+
+    // Identifier les docs vraiment nouveaux (pas encore dans le cache,
+    // ou dans le cache mais marqués pour retry)
+    const newDocs = snap.docs.filter(d =>
+      !decryptedCache.has(d.id) || _retrySet.has(d.id)
+    );
+
+    // Mettre à jour readBy pour les messages déjà en cache (read receipts)
+    // Un snapshot peut arriver sans nouveau message mais avec un readBy mis à jour.
+    let readByUpdated = false;
+    for (const d of snap.docs) {
+      if (_retrySet.has(d.id)) continue; // sera traité ci-dessous
+      const cached = decryptedCache.get(d.id);
+      if (cached) {
+        const freshReadBy = (d.data().readBy ?? []) as string[];
+        const current     = cached.readBy ?? [];
+        if (freshReadBy.length !== current.length ||
+            freshReadBy.some(uid => !current.includes(uid))) {
+          decryptedCache.set(d.id, { ...cached, readBy: freshReadBy });
+          readByUpdated = true;
+        }
       }
     }
 
-    // Ne notifier le callback que si de nouveaux messages ont été déchiffrés
-    if (newDocs.length === 0) return;
+    // Déchiffrer les nouveaux messages (et ceux marqués pour retry)
+    for (const d of newDocs) {
+      const msg = { id: d.id, ...d.data() } as EncryptedMessage;
+      const isRetry = _retrySet.has(msg.id);
+      try {
+        const decrypted = await decryptMessage(myUid, msg);
+        decryptedCache.set(msg.id, decrypted);
+        _retrySet.delete(msg.id); // succès → plus besoin de retry
 
-    // Retourner tous les messages dans l'ordre Firestore (timestamp asc)
-    callback(snap.docs.map(d => decryptedCache.get(d.id)!));
+        // Mettre à jour la preview Firestore uniquement côté RECEIVER (pas l’envoyeur).
+        // L’envoyeur notifie localement via _notifyConvPreviewUpdate() sans écriture réseau.
+        // On ne met à jour que pour les vrais nouveaux messages (pas les retries).
+        if (!isRetry && msg.senderUid !== myUid) {
+          updateConversationPreview(msg.conversationId, decrypted.plaintext).catch(() => {});
+        }
+      } catch (err) {
+        if (!isRetry) {
+          // Premier échec : c'est probablement la race condition snapshot local.
+          // Afficher un placeholder et programmer un retry dans 80ms.
+          console.warn(`[AQ] Déchiffrement différé pour ${msg.id} (race condition probable)`);
+          _retrySet.add(msg.id);
+          decryptedCache.set(msg.id, {
+            id       : msg.id,
+            senderUid: msg.senderUid,
+            plaintext: "[🔒 Déchiffrement en cours…]",
+            timestamp: msg.timestamp,
+            verified : false,
+            readBy   : [],
+          });
+          scheduleRetry(msg);
+        } else {
+          // Deuxième échec (retry explicite) → erreur définitive
+          console.error(`[AQ] Échec définitif déchiffrement ${msg.id}:`, err);
+          decryptedCache.set(msg.id, {
+            id       : msg.id,
+            senderUid: msg.senderUid,
+            plaintext: "[🔒 Message non déchiffrable — clés expirées ou session expirée]",
+            timestamp: msg.timestamp,
+            verified : false,
+            readBy   : [],
+          });
+          _retrySet.delete(msg.id);
+        }
+      }
+    }
+
+    // Ne notifier que s'il y a du changement réel
+    if (newDocs.length === 0 && !readByUpdated) return;
+
+    const result = snap.docs
+      .map(d => decryptedCache.get(d.id))
+      .filter((m): m is DecryptedMessage => m !== undefined);
+    callback(result);
   });
 }

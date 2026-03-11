@@ -12,14 +12,29 @@ import {
   subscribeToMessages,
   sendMessage,
   getOrCreateConversation,
+  onConvPreviewUpdate,
 }                                           from '../services/messaging';
+import {
+  subscribeToTyping,
+  markAllRead,
+  createTypingDebouncer,
+}                                           from '../services/presence';
 import type { Conversation, DecryptedMessage } from '../types/message';
 
 let _unsubConvs:        (() => void) | null = null;
 let _unsubMessages:     (() => void) | null = null;
+let _unsubTyping:       (() => void) | null = null;
+let _unsubPreview:      (() => void) | null = null; // listener preview local
 let _currentConvId:     string | null       = null;
 let _currentContactUid: string | null       = null;
 let _myUid:             string              = '';
+
+// Cache local des conversations — mis à jour par subscribeToConversations ET
+// par onConvPreviewUpdate (preview locale sans snapshot Firestore).
+let _localConvs: import('../types/message').Conversation[] = [];
+
+// Debouncer typing — créé à chaque ouverture de conversation, détruit à la fermeture
+let _typingDebouncer: ReturnType<typeof createTypingDebouncer> | null = null;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LocalStorage — noms locaux des conversations + avatar
@@ -101,12 +116,16 @@ export async function initChat(uid: string): Promise<void> {
   document.getElementById('btn-signout')?.addEventListener('click', handleSignOut);
   document.getElementById('btn-signout-settings')?.addEventListener('click', handleSignOut);
 
-  // ── Envoi ──
+  // ── Envoi + typing ──
   document.getElementById('btn-send')?.addEventListener('click', handleSendMessage);
   const msgInput = document.getElementById('message-input') as HTMLTextAreaElement | null;
   msgInput?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); }
   });
+  // Typing debounce — délégué sur input (ne recracher pas le debouncer ici,
+  // il est créé dans openConversation avec le bon convId)
+  msgInput?.addEventListener('input',  () => _typingDebouncer?.onInput());
+  msgInput?.addEventListener('blur',   () => _typingDebouncer?.onBlur());
 
   // ── Navigation settings ──
   document.getElementById('rail-btn-settings')?.addEventListener('click', () => {
@@ -240,7 +259,24 @@ export async function initChat(uid: string): Promise<void> {
   });
 
   // ── S'abonner aux conversations ──
-  _unsubConvs = subscribeToConversations(uid, renderConversationList);
+  _unsubConvs = subscribeToConversations(uid, (convs) => {
+    _localConvs = convs;
+    renderConversationList(convs);
+  });
+
+  // ── Mise à jour locale de la preview quand ON envoie un message ──
+  // Zéro snapshot Firestore côté envoyeur — la sidebar se met à jour
+  // immédiatement depuis la mémoire, sans aller-retour réseau.
+  _unsubPreview?.();
+  _unsubPreview = onConvPreviewUpdate((convId, preview, ts) => {
+    // Mettre à jour le cache local
+    _localConvs = _localConvs.map(c =>
+      c.id === convId ? { ...c, lastMessagePreview: preview, lastMessageAt: ts } : c
+    );
+    // Retrier par lastMessageAt desc (la conv qu'on vient d'écrire remonte en tête)
+    _localConvs = [..._localConvs].sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
+    renderConversationList(_localConvs);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -712,50 +748,115 @@ function renderConversationList(convs: Conversation[]): void {
   const list = document.getElementById('contacts-list');
   if (!list) return;
 
-  list.innerHTML = '<div class="contacts-section-label">Conversations</div>';
-
   if (convs.length === 0) {
-    list.innerHTML += '<div class="contacts-empty">Aucune conversation.<br/>Appuyez sur <strong>+</strong> pour commencer.</div>';
+    list.innerHTML =
+      '<div class="contacts-section-label">Conversations</div>' +
+      '<div class="contacts-empty">Aucune conversation.<br/>Appuyez sur <strong>+</strong> pour commencer.</div>';
     return;
   }
 
+  // S’assurer que le label section existe (création initiale uniquement)
+  if (!list.querySelector('.contacts-section-label')) {
+    const lbl = document.createElement('div');
+    lbl.className   = 'contacts-section-label';
+    lbl.textContent = 'Conversations';
+    list.prepend(lbl);
+  }
+
+  // Index des items existants par convId
+  const existingItems = new Map<string, HTMLElement>();
+  list.querySelectorAll<HTMLElement>('.contact-item').forEach(el => {
+    if (el.dataset.convId) existingItems.set(el.dataset.convId, el);
+  });
+
+  // Supprimer les convs qui n'existent plus
+  const newConvIds = new Set(convs.map(c => c.id));
+  existingItems.forEach((el, convId) => {
+    if (!newConvIds.has(convId)) el.remove();
+  });
+
+  // Insérer / mettre à jour dans le bon ordre
+  const label = list.querySelector('.contacts-section-label')!;
+  let insertAfter: Element = label;
+
   for (const conv of convs) {
-    const contactUid  = conv.participants.find((p) => p !== _myUid) ?? conv.participants[0];
-    const isActive    = conv.id === _currentConvId;
+    const contactUid  = conv.participants.find(p => p !== _myUid) ?? conv.participants[0];
     const displayName = getLocalConvName(conv.id) ?? contactUid.slice(0, 20);
     const preview     = conv.lastMessagePreview ?? '🔒 Chiffré';
     const timeStr     = conv.lastMessageAt
       ? new Date(conv.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : '';
 
-    const item = document.createElement('div');
-    item.className          = `contact-item${isActive ? ' active' : ''}`;
-    item.dataset.convId     = conv.id;
-    item.dataset.contactUid = contactUid;
-    item.innerHTML = `
-      <div class="contact-avatar">${displayName.slice(0, 2).toUpperCase()}</div>
-      <div class="contact-body">
-        <div class="contact-row">
-          <span class="contact-name">${escapeHtml(displayName)}</span>
-          <span class="contact-time">${timeStr}</span>
-        </div>
-        <div class="contact-preview">${escapeHtml(preview)}</div>
-      </div>`;
-    item.addEventListener('click', () => openConversation(conv.id, contactUid));
-    list.appendChild(item);
+    let item = existingItems.get(conv.id);
+
+    if (!item) {
+      // ── Nouvel item : création complète avec sous-éléments séparés ——————————
+      // On NE réécrit JAMAIS item.innerHTML après création pour éviter deux problèmes :
+      //   1. Ré-abonnement à subscribeToTyping/subscribeToMessages (cause du bug typing)
+      //   2. Flash de reflow qui fait "clignoter" la conversation ouverte
+      item = document.createElement('div');
+      item.className           = 'contact-item';
+      item.dataset.convId      = conv.id;
+      item.dataset.contactUid  = contactUid;
+
+      const avatarEl  = document.createElement('div');
+      avatarEl.className   = 'contact-avatar';
+      avatarEl.textContent = displayName.slice(0, 2).toUpperCase();
+
+      const bodyEl    = document.createElement('div');
+      bodyEl.className = 'contact-body';
+
+      const rowEl     = document.createElement('div');
+      rowEl.className = 'contact-row';
+
+      const nameEl    = document.createElement('span');
+      nameEl.className   = 'contact-name';
+      nameEl.textContent = displayName;
+
+      const timeEl    = document.createElement('span');
+      timeEl.className   = 'contact-time';
+      timeEl.textContent = timeStr;
+
+      const previewEl = document.createElement('div');
+      previewEl.className   = 'contact-preview';
+      previewEl.textContent = preview;
+
+      rowEl.append(nameEl, timeEl);
+      bodyEl.append(rowEl, previewEl);
+      item.append(avatarEl, bodyEl);
+
+      // Listener enregistré une seule fois sur l’élément natif (évite les doublons)
+      item.addEventListener('click', () => openConversation(conv.id, contactUid));
+      existingItems.set(conv.id, item); // référencer pour les mises à jour suivantes
+    } else {
+      // ── Item existant : mise à jour chirurgicale des sous-éléments uniquement ——
+      // Aucun innerHTML, aucun remplacement de l’élément → zéro reflow sur la conv ouverte
+      const nameEl    = item.querySelector<HTMLElement>('.contact-name');
+      const timeEl    = item.querySelector<HTMLElement>('.contact-time');
+      const previewEl = item.querySelector<HTMLElement>('.contact-preview');
+      const avatarEl  = item.querySelector<HTMLElement>('.contact-avatar');
+
+      if (nameEl    && nameEl.textContent    !== displayName)  nameEl.textContent    = displayName;
+      if (timeEl    && timeEl.textContent    !== timeStr)      timeEl.textContent    = timeStr;
+      if (previewEl && previewEl.textContent !== preview)      previewEl.textContent = preview;
+      if (avatarEl) avatarEl.textContent = displayName.slice(0, 2).toUpperCase();
+    }
+
+    // Classe active (sans toucher au reste)
+    item.classList.toggle('active', conv.id === _currentConvId);
+
+    // Maintenir l’ordre de tri (conversations triées par lastMessageAt desc)
+    if (insertAfter.nextSibling !== item) {
+      insertAfter.insertAdjacentElement('afterend', item);
+    }
+    insertAfter = item;
   }
 
-  // Après chaque re-render de la liste (ex: suite à un envoi Firestore),
-  // réappliquer l'état actif si une conv est ouverte — sans toucher aux messages.
+  // Maintenir la vue conversation visible si une conv est ouverte
+  // (sans toucher à display pour éviter le reflow)
   if (_currentConvId) {
-    const emptyState = document.getElementById('chat-empty');
-    const convView   = document.getElementById('conversation-view');
-    if (emptyState) { emptyState.style.display = 'none'; emptyState.classList.add('hidden'); }
-    if (convView)   { convView.classList.remove('hidden'); convView.style.display = 'contents'; }
-    // Re-marquer l'item actif dans la nouvelle liste
-    document.querySelectorAll<HTMLElement>('.contact-item').forEach((el) => {
-      el.classList.toggle('active', el.dataset.convId === _currentConvId);
-    });
+    document.getElementById('chat-empty')?.classList.add('hidden');
+    document.getElementById('conversation-view')?.classList.remove('hidden');
   }
 }
 
@@ -765,6 +866,10 @@ function renderConversationList(convs: Conversation[]): void {
 
 function openConversation(convId: string, contactUid: string): void {
   if (_unsubMessages) { _unsubMessages(); _unsubMessages = null; }
+  if (_unsubTyping)   { _unsubTyping();   _unsubTyping   = null; }
+  // Détruire le debouncer de la conv précédente (envoie setTyping(false) si actif)
+  _typingDebouncer?.destroy();
+  _typingDebouncer = null;
 
   _currentConvId     = convId;
   _currentContactUid = contactUid;
@@ -794,31 +899,78 @@ function openConversation(convId: string, contactUid: string): void {
     el.classList.toggle('active', (el as HTMLElement).dataset.convId === convId);
   });
 
-  _unsubMessages = subscribeToMessages(_myUid, convId, renderMessages);
+  // ── Typing + messages ──
+  _typingDebouncer = createTypingDebouncer(convId, _myUid);
+  _unsubTyping     = subscribeToTyping(convId, _myUid, renderTypingIndicator);
+  _unsubMessages   = subscribeToMessages(_myUid, convId, renderMessages);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Typing indicator
+// ─────────────────────────────────────────────────────────────────────────────
+
+function renderTypingIndicator(typingUids: string[]): void {
+  const el    = document.getElementById('typing-indicator');
+  const label = document.getElementById('typing-label');
+  if (!el || !label) return;
+  if (typingUids.length === 0) {
+    el.classList.remove('visible');
+    label.textContent = '';
+    return;
+  }
+  const name = typingUids[0].slice(0, 16);
+  label.textContent = typingUids.length === 1
+    ? `${name} écrit…`
+    : `${typingUids.length} personnes écrivent…`;
+  el.classList.add('visible');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rendu des messages
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Set des IDs de messages déjà rendus pour la conversation courante.
-// Utiliser un Set d'IDs (plutôt qu'un compteur) rend le rendu idempotent :
-// peu importe combien de fois Firestore re-déclenche le snapshot (envoi propre,
-// mise à jour lastMessage, etc.), on n'affiche jamais deux fois le même message.
 let _renderedMsgIds = new Set<string>();
 
 function renderMessages(messages: DecryptedMessage[]): void {
   const container = document.getElementById('messages-container');
   if (!container) return;
 
-  // Filtrer uniquement les messages pas encore dans le DOM
   const newMessages     = messages.filter(m => !_renderedMsgIds.has(m.id));
   const hasNewFromOther = newMessages.some(m => m.senderUid !== _myUid);
+
+  // Mettre à jour les messages déjà dans le DOM :
+  //  - Coches de lecture (readBy)
+  //  - Texte si un message était en état d'erreur et vient d'être déchiffré (retry)
+  for (const msg of messages) {
+    if (!_renderedMsgIds.has(msg.id)) continue;
+    // Mise à jour read receipts
+    if (msg.senderUid === _myUid) _updateReadReceipt(msg.id, msg.readBy ?? []);
+    // Mise à jour du texte si le retry a réussi (texte était un placeholder)
+    const bubble = container.querySelector<HTMLElement>(`.message-bubble[data-msg-id="${msg.id}"]`);
+    if (bubble) {
+      const textEl = bubble.querySelector<HTMLElement>('.message-text');
+      if (textEl) {
+        const current = textEl.textContent ?? '';
+        const isPlaceholder = current.startsWith('[\uD83D\uDD12'); // commence par 🔒
+        if (isPlaceholder && !msg.plaintext.startsWith('[\uD83D\uDD12')) {
+          // Le retry a réussi — remplacer le placeholder par le vrai texte
+          textEl.textContent = msg.plaintext;
+          bubble.classList.remove('decryption-pending');
+        }
+      }
+    }
+  }
+
+  // Marquer tous les messages reçus comme lus (fire-and-forget)
+  if (_currentConvId) {
+    markAllRead(_currentConvId, messages, _myUid).catch(() => {});
+  }
 
   if (newMessages.length === 0) return;
 
   for (const msg of newMessages) {
     const isMine = msg.senderUid === _myUid;
+    const isRead = isMine && (msg.readBy ?? []).includes(_currentContactUid ?? '');
     const bubble = document.createElement('div');
     bubble.className     = `message-bubble ${isMine ? 'mine' : 'theirs'}`;
     bubble.dataset.msgId = msg.id;
@@ -830,7 +982,15 @@ function renderMessages(messages: DecryptedMessage[]): void {
       </div>
       <div class="message-meta">
         <span class="message-time">${time}</span>
-        ${msg.verified ? '<span class="sig-ok">✓</span>' : '<span class="sig-pending">⦿</span>'}
+        ${isMine
+          ? `<span class="msg-status" data-msg-id="${msg.id}">
+               <span class="msg-check${isRead ? ' read' : ''}">✓</span>
+               <span class="msg-check${isRead ? ' read' : ''}">✓</span>
+             </span>`
+          : (msg.verified
+              ? '<span class="sig-ok" title="Signature vérifiée">✓</span>'
+              : '<span class="sig-pending" title="Non vérifiée">⦿</span>')
+        }
       </div>`;
     container.appendChild(bubble);
     _renderedMsgIds.add(msg.id);
@@ -842,6 +1002,14 @@ function renderMessages(messages: DecryptedMessage[]): void {
     setCryptoStatus('active');
     showCryptoSteps(RECV_STEPS, 'RÉCEPTION');
   }
+}
+
+/** Met à jour les coches ✓✓ d'un message déjà dans le DOM. */
+function _updateReadReceipt(msgId: string, readBy: string[]): void {
+  const isRead = readBy.includes(_currentContactUid ?? '');
+  document
+    .querySelectorAll<HTMLElement>(`[data-msg-id="${msgId}"] .msg-check`)
+    .forEach(el => el.classList.toggle('read', isRead));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -863,6 +1031,9 @@ async function handleSendMessage(): Promise<void> {
 
   input.value    = '';
   input.disabled = true;
+
+  // Arrêter le typing indicator dès l'envoi
+  _typingDebouncer?.onBlur();
 
   setCryptoStatus('sending');
   showCryptoSteps(SEND_STEPS, 'ENVOI');
@@ -920,9 +1091,16 @@ async function confirmNewConv(): Promise<void> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSignOut(): Promise<void> {
+  _typingDebouncer?.destroy();  // envoie setTyping(false) si actif
+  _typingDebouncer = null;
   _unsubConvs?.();
   _unsubMessages?.();
+  _unsubTyping?.();
+  _unsubPreview?.();
+  _unsubTyping    = null;
+  _unsubPreview   = null;
   _currentConvId  = null;
+  _localConvs     = [];
   _renderedMsgIds  = new Set();
   await signOut();
 }

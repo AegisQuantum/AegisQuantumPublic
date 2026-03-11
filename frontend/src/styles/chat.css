@@ -1231,6 +1231,71 @@
 }
 
 /* ═══════════════════════════════════════
+   TYPING INDICATOR
+═══════════════════════════════════════ */
+
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 6px 6%;
+  min-height: 24px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--c-muted);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  pointer-events: none;
+  flex-shrink: 0;
+}
+.typing-indicator.visible { opacity: 1; }
+
+.typing-dots {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.typing-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--c-muted);
+  animation: typingBounce 1.2s ease infinite;
+  flex-shrink: 0;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.18s; }
+.typing-dot:nth-child(3) { animation-delay: 0.36s; }
+
+@keyframes typingBounce {
+  0%, 60%, 100% { transform: translateY(0);    opacity: 0.45; }
+  30%           { transform: translateY(-4px); opacity: 1;    }
+}
+
+/* ═══════════════════════════════════════
+   READ RECEIPTS — coches de lecture
+═══════════════════════════════════════ */
+
+/* Remplacement du sig-ok / sig-pending par un système à deux indicateurs */
+.msg-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 3px;
+}
+
+/* ✓ simple = envoyé (signature ok) */
+.msg-check {
+  font-size: 10px;
+  line-height: 1;
+  color: rgba(123,159,249,0.55);
+  transition: color 0.25s;
+}
+/* ✓✓ double = lu par le contact */
+.msg-check.read {
+  color: var(--c-green);
+}
+
+/* ═══════════════════════════════════════
    SAFETY NUMBERS — modale fingerprint
 ═══════════════════════════════════════ */
 

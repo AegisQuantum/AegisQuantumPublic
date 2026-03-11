@@ -152,6 +152,17 @@
           </div>
         </div>
         <div class="messages-container" id="messages-container"></div>
+
+        <!-- Typing indicator — visible quand le contact écrit -->
+        <div class="typing-indicator" id="typing-indicator" aria-live="polite">
+          <div class="typing-dots">
+            <span class="typing-dot"></span>
+            <span class="typing-dot"></span>
+            <span class="typing-dot"></span>
+          </div>
+          <span id="typing-label"></span>
+        </div>
+
         <div class="input-bar">
           <textarea class="message-input" id="message-input" placeholder="Écrire un message chiffré…" rows="1"></textarea>
           <button class="btn-send" id="btn-send" title="Envoyer">
