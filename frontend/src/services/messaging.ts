@@ -66,6 +66,11 @@ function _notifyConvPreviewUpdate(convId: string, plaintext: string, ts: number)
 // Set des msgIds dont le déchiffrement a échoué et doit être retenté.
 const _retrySet = new Set<string>();
 
+// Cache volatile des plaintexts envoyés par l'utilisateur courant.
+// Permet d'afficher ses propres messages sans tenter de les déchiffrer.
+// Perdu après refresh — acceptable (forward secrecy, pas de stockage en clair).
+const _sentPlaintextCache = new Map<string, string>();
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Paths Firestore
 // ─────────────────────────────────────────────────────────────────────────────
@@ -176,7 +181,7 @@ export async function sendMessage(
   // initKemCiphertext est présent uniquement sur le premier message.
   // Il est stocké dans Firestore pour que le receiver puisse bootstrapper
   // son état ratchet avec le même initSecret que l'envoyeur.
-  await addDoc(messagesCol(convId), {
+  const msgRef = await addDoc(messagesCol(convId), {
     conversationId    : convId,
     senderUid         : myUid,
     ciphertext        : drResult.ciphertext,
@@ -190,7 +195,10 @@ export async function sendMessage(
       : {}),
   } as Omit<EncryptedMessage, "id">);
 
-  // ── 8. Preview locale ────────────────────────────────────────────────────
+  // ── 8. Stocker le plaintext en cache local (pour affichage côté envoyeur) ─
+  // Après refresh, le plaintext n'est plus disponible — c'est le prix
+  // de la sécurité forward secrecy (pas de stockage en clair).
+  _sentPlaintextCache.set(msgRef.id, plaintext);
   _notifyConvPreviewUpdate(convId, plaintext, Date.now());
 }
 
@@ -336,6 +344,22 @@ export function subscribeToMessages(
       }
 
       if (decryptedCache.has(d.id) && !_retrySet.has(d.id)) continue;
+
+      // L'expéditeur ne déchiffre jamais ses propres messages :
+      // il ne possède pas l'état ratchet de réception pour eux,
+      // et le KEM ciphertext a été encapsulé avec la clé du destinataire.
+      if (msg.senderUid === myUid) {
+        decryptedCache.set(msg.id, {
+          id       : msg.id,
+          senderUid: msg.senderUid,
+          plaintext: _sentPlaintextCache.get(msg.id) ?? "[🔒 Message envoyé — rechargez pour voir]",
+          timestamp: msg.timestamp,
+          verified : true,  // on fait confiance à son propre message
+          readBy   : msg.readBy ?? [],
+        });
+        hasChanges = true;
+        continue;
+      }
 
       const isRetry = _retrySet.has(msg.id);
       try {
