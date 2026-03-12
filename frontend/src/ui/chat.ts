@@ -136,8 +136,6 @@ export async function initChat(uid: string): Promise<void> {
   msgInput?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); }
   });
-  // Typing debounce — délégué sur input (ne recracher pas le debouncer ici,
-  // il est créé dans openConversation avec le bon convId)
   msgInput?.addEventListener('input',  () => _typingDebouncer?.onInput());
   msgInput?.addEventListener('blur',   () => _typingDebouncer?.onBlur());
 
@@ -148,7 +146,6 @@ export async function initChat(uid: string): Promise<void> {
   });
   document.getElementById('btn-profile-settings')?.addEventListener('click', () => {
     closeProfileDropdown();
-    // toggle aussi depuis le dropdown
     const isSettings = document.getElementById('view-settings')?.style.display !== 'none';
     switchView(isSettings ? 'chat' : 'settings');
   });
@@ -171,7 +168,6 @@ export async function initChat(uid: string): Promise<void> {
   document.getElementById('avatar-modal-cancel')?.addEventListener('click', () => { _pendingPhoto = undefined; closeAvatarModal(); });
   document.getElementById('avatar-modal-confirm')?.addEventListener('click', confirmAvatarChange);
 
-  // Input file — photo
   document.getElementById('avatar-photo-input')?.addEventListener('change', (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
@@ -192,7 +188,6 @@ export async function initChat(uid: string): Promise<void> {
     reader.readAsDataURL(file);
   });
 
-  // Supprimer photo
   document.getElementById('btn-remove-photo')?.addEventListener('click', () => {
     _pendingPhoto = null;
     const preview = document.getElementById('avatar-modal-preview') as HTMLElement | null;
@@ -206,13 +201,11 @@ export async function initChat(uid: string): Promise<void> {
     if (btnRemove) btnRemove.style.display = 'none';
   });
 
-  // Sélecteur de couleurs
   document.querySelectorAll<HTMLElement>('.avatar-color-swatch').forEach((swatch) => {
     swatch.addEventListener('click', () => {
       document.querySelectorAll('.avatar-color-swatch').forEach(s => s.classList.remove('selected'));
       swatch.classList.add('selected');
       const preview = document.getElementById('avatar-modal-preview') as HTMLElement | null;
-      // Ne changer la couleur du preview que s'il n'y a pas de photo en attente
       if (preview && !_pendingPhoto && !getAvatarPhoto()) {
         preview.style.background = swatch.dataset.color ?? '#6b8ff5';
       }
@@ -235,11 +228,8 @@ export async function initChat(uid: string): Promise<void> {
     applyMsgSearch('');
     input?.focus();
   });
-  // Fermer la recherche avec Escape
   document.getElementById('msg-search-input')?.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      closeMsgSearch();
-    }
+    if (e.key === 'Escape') closeMsgSearch();
   });
 
   // ── Export Backup ──
@@ -265,7 +255,6 @@ export async function initChat(uid: string): Promise<void> {
   });
   document.getElementById('modal-close-btn')?.addEventListener('click', closeFingerprintModal);
   document.getElementById('fingerprint-modal')?.addEventListener('click', (e) => {
-    // Fermer si clic sur l'overlay (pas sur la carte)
     if ((e.target as HTMLElement).id === 'fingerprint-modal') closeFingerprintModal();
   });
 
@@ -279,7 +268,7 @@ export async function initChat(uid: string): Promise<void> {
     if (e.key === 'Escape') closeNewConvModal();
   });
 
-  // ── Renommer conversation (double-clic sur nom dans topbar) ──
+  // ── Renommer conversation ──
   document.getElementById('chat-contact-name')?.addEventListener('dblclick', () => {
     if (_currentConvId) openRenameModal(_currentConvId);
   });
@@ -299,7 +288,7 @@ export async function initChat(uid: string): Promise<void> {
   document.getElementById('btn-copy-uid')?.addEventListener('click', copyUid);
   document.getElementById('btn-copy-uid-settings')?.addEventListener('click', copyUid);
 
-  // ── Recherche ──
+  // ── Recherche sidebar (conversations) ──
   document.getElementById('search-input')?.addEventListener('input', (e) => {
     const q = (e.target as HTMLInputElement).value.toLowerCase();
     document.querySelectorAll<HTMLElement>('.contact-item').forEach((el) => {
@@ -315,15 +304,11 @@ export async function initChat(uid: string): Promise<void> {
   });
 
   // ── Mise à jour locale de la preview quand ON envoie un message ──
-  // Zéro snapshot Firestore côté envoyeur — la sidebar se met à jour
-  // immédiatement depuis la mémoire, sans aller-retour réseau.
   _unsubPreview?.();
   _unsubPreview = onConvPreviewUpdate((convId, preview, ts) => {
-    // Mettre à jour le cache local
     _localConvs = _localConvs.map(c =>
       c.id === convId ? { ...c, lastMessagePreview: preview, lastMessageAt: ts } : c
     );
-    // Retrier par lastMessageAt desc (la conv qu'on vient d'écrire remonte en tête)
     _localConvs = [..._localConvs].sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
     renderConversationList(_localConvs);
   });
@@ -338,12 +323,10 @@ function refreshAvatar(): void {
   const color    = getAvatarColor();
   const photo    = getAvatarPhoto();
 
-  // Topnav avatar
   const topnavAvatar = document.getElementById('topnav-avatar');
   if (topnavAvatar) {
     const textNode = Array.from(topnavAvatar.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
     if (photo) {
-      // Photo : cacher le texte, appliquer l'image en background
       if (textNode) (textNode as Text).textContent = '';
       (topnavAvatar as HTMLElement).style.cssText +=
         `;background-image:url('${photo}');background-size:cover;background-position:center;background-color:transparent`;
@@ -354,7 +337,6 @@ function refreshAvatar(): void {
     }
   }
 
-  // Avatar dans les settings
   const settingsAvatar = document.getElementById('settings-avatar-preview');
   if (settingsAvatar) {
     if (photo) {
@@ -378,7 +360,6 @@ function openAvatarModal(): void {
 
   if (modal) modal.style.display = 'flex';
 
-  // Preview : photo ou initiales
   if (preview) {
     if (curPhoto) {
       preview.textContent = '';
@@ -394,16 +375,13 @@ function openAvatarModal(): void {
   }
   if (input) input.value = getAvatarInitials();
 
-  // Marquer la couleur active
   document.querySelectorAll<HTMLElement>('.avatar-color-swatch').forEach((s) => {
     s.classList.toggle('selected', s.dataset.color === curColor);
   });
 
-  // Mise à jour live du preview via l'input initiales
   input?.removeEventListener('input', _onInitialsInput);
   input?.addEventListener('input', _onInitialsInput);
 
-  // Bouton supprimer photo (si photo existe)
   const btnRemovePhoto = document.getElementById('btn-remove-photo');
   if (btnRemovePhoto) btnRemovePhoto.style.display = curPhoto ? '' : 'none';
 
@@ -421,8 +399,7 @@ function closeAvatarModal(): void {
   if (modal) modal.style.display = 'none';
 }
 
-// Photo en attente de sauvegarde (chargée dans la modale)
-let _pendingPhoto: string | null | undefined = undefined; // undefined = pas changé
+let _pendingPhoto: string | null | undefined = undefined;
 
 function confirmAvatarChange(): void {
   const input    = document.getElementById('avatar-initials-input') as HTMLInputElement | null;
@@ -431,7 +408,7 @@ function confirmAvatarChange(): void {
 
   if (input?.value.trim()) setAvatarInitials(input.value);
   setAvatarColor(color);
-  if (_pendingPhoto !== undefined) setAvatarPhoto(_pendingPhoto); // null = supprimer
+  if (_pendingPhoto !== undefined) setAvatarPhoto(_pendingPhoto);
   _pendingPhoto = undefined;
   refreshAvatar();
   closeAvatarModal();
@@ -464,11 +441,9 @@ function confirmRename(): void {
   const name  = input?.value.trim() ?? '';
   setLocalConvName(_currentConvId, name);
 
-  // Mettre à jour le nom dans la topbar
   const nameEl = document.getElementById('chat-contact-name');
   if (nameEl) nameEl.textContent = name || (_currentContactUid?.slice(0, 24) ?? '—');
 
-  // Mettre à jour dans la sidebar sans reload complet
   const item = document.querySelector<HTMLElement>(`.contact-item[data-conv-id="${_currentConvId}"] .contact-name`);
   if (item) item.textContent = name || (_currentContactUid?.slice(0, 20) ?? '—');
 
@@ -515,7 +490,7 @@ function switchView(view: 'chat' | 'settings'): void {
     if (viewChat)     viewChat.style.display     = 'none';
     if (viewSettings) viewSettings.style.display = '';
     btnSettings?.classList.add('active');
-    refreshAvatar(); // synchroniser l'aperçu avatar dans settings
+    refreshAvatar();
   }
 }
 
@@ -696,7 +671,6 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
   const container = document.getElementById('crypto-steps');
   if (!container) return;
 
-  // Annuler tous les setTimeout pendants du run précédent
   _cryptoStepTimers.forEach(t => clearTimeout(t));
   _cryptoStepTimers = [];
   if (_cryptoClearTimer) { clearTimeout(_cryptoClearTimer); _cryptoClearTimer = null; }
@@ -722,7 +696,6 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
       const el = document.createElement('div');
       el.className = `crypto-step-wrap`;
 
-      // Ligne principale (toujours visible)
       const row = document.createElement('div');
       row.className = `crypto-step${step.type === 'done' ? ' done-step' : ''}${ex ? ' clickable' : ''}`;
       row.innerHTML = `
@@ -739,7 +712,6 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
 
       el.appendChild(row);
 
-      // Panneau dépliable
       if (ex) {
         const panel = document.createElement('div');
         panel.className = 'crypto-step-panel';
@@ -765,7 +737,6 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
           const isOpen = el.classList.toggle('open');
           const chevron = row.querySelector('.chevron-svg') as SVGElement | null;
           if (chevron) chevron.style.transform = isOpen ? 'rotate(180deg)' : '';
-          // Annuler le timer de nettoyage pendant qu'un panneau est ouvert
           if (isOpen && _cryptoClearTimer) {
             clearTimeout(_cryptoClearTimer);
             _cryptoClearTimer = null;
@@ -775,7 +746,7 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
       }
 
       container.appendChild(el);
-      stepEls[i] = row; // garder ref sur la row pour l'icône active
+      stepEls[i] = row;
       container.scrollTop = container.scrollHeight;
     }, step.delay);
     _cryptoStepTimers.push(t);
@@ -785,7 +756,7 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
   setTimeout(() => setCryptoStatus('idle'), lastDelay + 600);
 
   _cryptoClearTimer = setTimeout(() => {
-    if (container.querySelector('.crypto-step-wrap.open')) return; // panneau ouvert
+    if (container.querySelector('.crypto-step-wrap.open')) return;
     clearCryptoBox();
   }, lastDelay + 10_000);
 }
@@ -805,7 +776,6 @@ function renderConversationList(convs: Conversation[]): void {
     return;
   }
 
-  // S’assurer que le label section existe (création initiale uniquement)
   if (!list.querySelector('.contacts-section-label')) {
     const lbl = document.createElement('div');
     lbl.className   = 'contacts-section-label';
@@ -813,19 +783,16 @@ function renderConversationList(convs: Conversation[]): void {
     list.prepend(lbl);
   }
 
-  // Index des items existants par convId
   const existingItems = new Map<string, HTMLElement>();
   list.querySelectorAll<HTMLElement>('.contact-item').forEach(el => {
     if (el.dataset.convId) existingItems.set(el.dataset.convId, el);
   });
 
-  // Supprimer les convs qui n'existent plus
   const newConvIds = new Set(convs.map(c => c.id));
   existingItems.forEach((el, convId) => {
     if (!newConvIds.has(convId)) el.remove();
   });
 
-  // Insérer / mettre à jour dans le bon ordre
   const label = list.querySelector('.contacts-section-label')!;
   let insertAfter: Element = label;
 
@@ -840,10 +807,6 @@ function renderConversationList(convs: Conversation[]): void {
     let item = existingItems.get(conv.id);
 
     if (!item) {
-      // ── Nouvel item : création complète avec sous-éléments séparés ——————————
-      // On NE réécrit JAMAIS item.innerHTML après création pour éviter deux problèmes :
-      //   1. Ré-abonnement à subscribeToTyping/subscribeToMessages (cause du bug typing)
-      //   2. Flash de reflow qui fait "clignoter" la conversation ouverte
       item = document.createElement('div');
       item.className           = 'contact-item';
       item.dataset.convId      = conv.id;
@@ -875,12 +838,9 @@ function renderConversationList(convs: Conversation[]): void {
       bodyEl.append(rowEl, previewEl);
       item.append(avatarEl, bodyEl);
 
-      // Listener enregistré une seule fois sur l’élément natif (évite les doublons)
       item.addEventListener('click', () => openConversation(conv.id, contactUid));
-      existingItems.set(conv.id, item); // référencer pour les mises à jour suivantes
+      existingItems.set(conv.id, item);
     } else {
-      // ── Item existant : mise à jour chirurgicale des sous-éléments uniquement ——
-      // Aucun innerHTML, aucun remplacement de l’élément → zéro reflow sur la conv ouverte
       const nameEl    = item.querySelector<HTMLElement>('.contact-name');
       const timeEl    = item.querySelector<HTMLElement>('.contact-time');
       const previewEl = item.querySelector<HTMLElement>('.contact-preview');
@@ -892,18 +852,14 @@ function renderConversationList(convs: Conversation[]): void {
       if (avatarEl) avatarEl.textContent = displayName.slice(0, 2).toUpperCase();
     }
 
-    // Classe active (sans toucher au reste)
     item.classList.toggle('active', conv.id === _currentConvId);
 
-    // Maintenir l’ordre de tri (conversations triées par lastMessageAt desc)
     if (insertAfter.nextSibling !== item) {
       insertAfter.insertAdjacentElement('afterend', item);
     }
     insertAfter = item;
   }
 
-  // Maintenir la vue conversation visible si une conv est ouverte
-  // (sans toucher à display pour éviter le reflow)
   if (_currentConvId) {
     document.getElementById('chat-empty')?.classList.add('hidden');
     document.getElementById('conversation-view')?.classList.remove('hidden');
@@ -917,15 +873,16 @@ function renderConversationList(convs: Conversation[]): void {
 function openConversation(convId: string, contactUid: string): void {
   if (_unsubMessages) { _unsubMessages(); _unsubMessages = null; }
   if (_unsubTyping)   { _unsubTyping();   _unsubTyping   = null; }
-  // Détruire le debouncer de la conv précédente (envoie setTyping(false) si actif)
   _typingDebouncer?.destroy();
   _typingDebouncer = null;
 
   _currentConvId     = convId;
   _currentContactUid = contactUid;
 
-  // Toujours revenir à la vue chat si on était dans les settings
   switchView('chat');
+
+  // Fermer la recherche si on change de conversation
+  closeMsgSearch();
 
   const emptyState    = document.getElementById('chat-empty');
   const convView      = document.getElementById('conversation-view');
@@ -940,7 +897,6 @@ function openConversation(convId: string, contactUid: string): void {
   if (contactNameEl) contactNameEl.textContent = displayName;
   if (topbarAvatar)  topbarAvatar.textContent  = displayName.slice(0, 2).toUpperCase();
 
-  // Vider le DOM et l'état de rendu pour la nouvelle conversation
   const msgContainer = document.getElementById('messages-container');
   if (msgContainer) msgContainer.innerHTML = '';
   _renderedMsgIds = new Set();
@@ -949,7 +905,6 @@ function openConversation(convId: string, contactUid: string): void {
     el.classList.toggle('active', (el as HTMLElement).dataset.convId === convId);
   });
 
-  // ── Typing + messages ──
   _typingDebouncer = createTypingDebouncer(convId, _myUid);
   _unsubTyping     = subscribeToTyping(convId, _myUid, renderTypingIndicator);
   _unsubMessages   = subscribeToMessages(_myUid, convId, renderMessages);
@@ -991,30 +946,28 @@ function renderMessages(messages: DecryptedMessage[]): void {
   const newMessages     = messages.filter(m => !_renderedMsgIds.has(m.id));
   const hasNewFromOther = newMessages.some(m => m.senderUid !== _myUid);
 
-  // Mettre à jour les messages déjà dans le DOM :
-  //  - Coches de lecture (readBy)
-  //  - Texte si un message était en état d'erreur et vient d'être déchiffré (retry)
   for (const msg of messages) {
     if (!_renderedMsgIds.has(msg.id)) continue;
-    // Mise à jour read receipts
     if (msg.senderUid === _myUid) _updateReadReceipt(msg.id, msg.readBy ?? []);
-    // Mise à jour du texte si le retry a réussi (texte était un placeholder)
     const bubble = container.querySelector<HTMLElement>(`.message-bubble[data-msg-id="${msg.id}"]`);
     if (bubble) {
       const textEl = bubble.querySelector<HTMLElement>('.message-text');
       if (textEl) {
         const current = textEl.textContent ?? '';
-        const isPlaceholder = current.startsWith('[\uD83D\uDD12'); // commence par 🔒
+        const isPlaceholder = current.startsWith('[\uD83D\uDD12');
         if (isPlaceholder && !msg.plaintext.startsWith('[\uD83D\uDD12')) {
-          // Le retry a réussi — remplacer le placeholder par le vrai texte
           textEl.textContent = msg.plaintext;
+          // Réappliquer la recherche si active
+          if (_msgSearchQuery) {
+            textEl.dataset.plaintext = msg.plaintext;
+            applyMsgSearch(_msgSearchQuery);
+          }
           bubble.classList.remove('decryption-pending');
         }
       }
     }
   }
 
-  // Marquer tous les messages reçus comme lus (fire-and-forget)
   if (_currentConvId) {
     markAllRead(_currentConvId, messages, _myUid).catch(() => {});
   }
@@ -1051,13 +1004,15 @@ function renderMessages(messages: DecryptedMessage[]): void {
 
   container.scrollTop = container.scrollHeight;
 
+  // Réappliquer la recherche sur les nouveaux messages
+  if (_msgSearchQuery) applyMsgSearch(_msgSearchQuery);
+
   if (hasNewFromOther) {
     setCryptoStatus('active');
     showCryptoSteps(RECV_STEPS, 'RÉCEPTION');
   }
 }
 
-/** Met à jour les coches ✓✓ d'un message déjà dans le DOM. */
 function _updateReadReceipt(msgId: string, readBy: string[]): void {
   const isRead = readBy.includes(_currentContactUid ?? '');
   document
@@ -1066,7 +1021,7 @@ function _updateReadReceipt(msgId: string, readBy: string[]): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Envoi d'un message — FIX : ne pas réinitialiser _currentConvId
+// Envoi d'un message
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSendMessage(): Promise<void> {
@@ -1078,14 +1033,12 @@ async function handleSendMessage(): Promise<void> {
   const text = input.value.trim();
   if (!text) return;
 
-  // Sauvegarder la conv courante AVANT l'await pour éviter tout reset
   const convId     = _currentConvId;
   const contactUid = _currentContactUid;
 
   input.value    = '';
   input.disabled = true;
 
-  // Arrêter le typing indicator dès l'envoi
   _typingDebouncer?.onBlur();
 
   setCryptoStatus('sending');
@@ -1102,7 +1055,6 @@ async function handleSendMessage(): Promise<void> {
   } finally {
     input.disabled = false;
     input.focus();
-    // Restaurer la conv courante si elle a changé pendant l'await (ne devrait pas arriver)
     if (_currentConvId !== convId) {
       _currentConvId     = convId;
       _currentContactUid = contactUid;
@@ -1140,11 +1092,11 @@ async function confirmNewConv(): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Déconnexion — vider les IDs rendus
+// Déconnexion
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSignOut(): Promise<void> {
-  _typingDebouncer?.destroy();  // envoie setTyping(false) si actif
+  _typingDebouncer?.destroy();
   _typingDebouncer = null;
   _unsubConvs?.();
   _unsubMessages?.();
@@ -1155,6 +1107,8 @@ async function handleSignOut(): Promise<void> {
   _currentConvId  = null;
   _localConvs     = [];
   _renderedMsgIds  = new Set();
+  _allDecryptedMessages.clear();
+  closeMsgSearch();
   await signOut();
 }
 
@@ -1209,7 +1163,6 @@ function applyMsgSearch(query: string): void {
     container.classList.remove('searching');
     container.querySelectorAll<HTMLElement>('.message-bubble').forEach(bubble => {
       bubble.classList.remove('search-match');
-      // Restaurer le texte brut (retirer les <mark>)
       const textEl = bubble.querySelector<HTMLElement>('.message-text');
       if (textEl && textEl.dataset.plaintext) {
         textEl.textContent = textEl.dataset.plaintext;
@@ -1245,7 +1198,7 @@ function applyMsgSearch(query: string): void {
       textEl.innerHTML = escaped.replace(pattern, m => `<mark class="msg-highlight">${m}</mark>`);
     } else {
       bubble.classList.remove('search-match');
-      textEl.textContent = raw;  // pas de match — texte brut
+      textEl.textContent = raw;
     }
   });
 
@@ -1275,14 +1228,7 @@ function applyMsgSearch(query: string): void {
 
 /** Escaper les caractères spéciaux d'une regex. */
 function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\\]\\]/g, String.raw`\/** Escaper les caractères spéciaux d'une regex. */
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\// ─────────────────────────────────────────────────────────────────────────────
-// Utilitaires
-// ─────────────────────────────────────────────────────────────────────────────
-
-function escapeHtml(str: string): string {');
-}`);
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1303,7 +1249,7 @@ function closeBackupExportModal(): void {
   const modal = document.getElementById('backup-export-modal');
   if (modal) modal.style.display = 'none';
   const confirm = document.getElementById('backup-export-confirm') as HTMLButtonElement | null;
-  if (confirm) { confirm.disabled = false; confirm.textContent = 'Télécharger .aqbackup'; }
+  if (confirm) { confirm.disabled = false; }
 }
 
 async function confirmBackupExport(): Promise<void> {
@@ -1333,12 +1279,13 @@ async function confirmBackupExport(): Promise<void> {
         convId,
         localName   : getLocalConvName(convId),
         participants: conv?.participants ?? [],
-        messages    : msgs.filter(m => !m.plaintext.startsWith('[🔒')), // exclure les placeholders
+        // Exclure les messages non déchiffrés (placeholders)
+        messages    : msgs.filter(m => !m.plaintext.startsWith('[\uD83D\uDD12')),
       });
     }
 
     if (convs.length === 0 || convs.every(c => c.messages.length === 0)) {
-      showToast('Aucun message déchiffré à exporter. Ouvrez vos conversations d’abord.');
+      showToast("Aucun message déchiffré à exporter. Ouvrez vos conversations d'abord.");
       if (confirmBtn) confirmBtn.disabled = false;
       if (prog) prog.style.display = 'none';
       return;
@@ -1354,7 +1301,7 @@ async function confirmBackupExport(): Promise<void> {
     const totalMessages = convs.reduce((n, c) => n + c.messages.length, 0);
 
     await exportBackup(payload, password, (phase) => {
-      if (phase === 'deriving')    setProgress(20, `Dérivation Argon2id… (quelques secondes)`);
+      if (phase === 'deriving')    setProgress(20, 'Dérivation Argon2id… (quelques secondes)');
       if (phase === 'encrypting')  setProgress(70, `Chiffrement AES-256-GCM de ${totalMessages} messages…`);
       if (phase === 'downloading') setProgress(100, 'Téléchargement…');
     });
@@ -1363,7 +1310,7 @@ async function confirmBackupExport(): Promise<void> {
     showToast(`Sauvegarde exportée — ${totalMessages} messages, ${convs.length} conversation(s).`);
   } catch (err) {
     console.error('[AQ] Backup export failed:', err);
-    showToast(`Export échoué : ${err instanceof Error ? err.message : String(err)}`);
+    showToast(`Export échoué : ${err instanceof Error ? err.message : String(err)}`);
     if (confirmBtn) { confirmBtn.disabled = false; }
     setProgress(0, '');
   }
