@@ -11,6 +11,7 @@ import {
   subscribeToConversations,
   subscribeToMessages,
   sendMessage,
+  sendFile,
   getOrCreateConversation,
   onConvPreviewUpdate,
 }                                           from '../services/messaging';
@@ -138,6 +139,15 @@ export async function initChat(uid: string): Promise<void> {
   });
   msgInput?.addEventListener('input',  () => _typingDebouncer?.onInput());
   msgInput?.addEventListener('blur',   () => _typingDebouncer?.onBlur());
+
+  // ── Envoi fichier ──
+  const fileInput = document.getElementById('file-input') as HTMLInputElement | null;
+  fileInput?.addEventListener('change', async (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file || !_currentContactUid) return;
+    (e.target as HTMLInputElement).value = '';
+    await handleSendFile(file);
+  });
 
   // ── Navigation settings ──
   document.getElementById('rail-btn-settings')?.addEventListener('click', () => {
@@ -667,7 +677,7 @@ function clearCryptoBox(): void {
 let _cryptoClearTimer: ReturnType<typeof setTimeout> | null = null;
 let _cryptoStepTimers: ReturnType<typeof setTimeout>[]     = [];
 
-function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCEPTION'): void {
+function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCEPTION' | 'ENVOI FICHIER'): void {
   const container = document.getElementById('crypto-steps');
   if (!container) return;
 
@@ -982,10 +992,7 @@ function renderMessages(messages: DecryptedMessage[]): void {
     bubble.dataset.msgId = msg.id;
 
     const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    bubble.innerHTML = `
-      <div class="message-text-wrap">
-        <p class="message-text">${escapeHtml(msg.plaintext)}</p>
-      </div>
+    const metaHtml = `
       <div class="message-meta">
         <span class="message-time">${time}</span>
         ${isMine
@@ -998,6 +1005,43 @@ function renderMessages(messages: DecryptedMessage[]): void {
               : '<span class="sig-pending" title="Non vérifiée">⦿</span>')
         }
       </div>`;
+
+    if (msg.file) {
+      // ── Bulle fichier ──────────────────────────────────────────────────
+      const f       = msg.file;
+      const sizeStr = _fmtSize(f.size);
+
+      const fileDiv = document.createElement('div');
+      fileDiv.className = 'file-bubble';
+      fileDiv.title     = `Télécharger ${f.name}`;
+      fileDiv.innerHTML = `
+        <div class="file-bubble-icon">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16">
+            <path d="M4 4h8l4 4v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"/>
+            <path d="M12 4v4h4"/>
+          </svg>
+        </div>
+        <div class="file-bubble-info">
+          <span class="file-bubble-name">${escapeHtml(f.name)}</span>
+          <span class="file-bubble-meta">${sizeStr} · ${escapeHtml(f.type.split('/')[1] ?? f.type)}</span>
+        </div>
+        <div class="file-bubble-dl">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" width="12" height="12">
+            <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 12h10"/>
+          </svg>
+        </div>`;
+
+      fileDiv.addEventListener('click', () => _downloadBlob(f.blob, f.name));
+      bubble.appendChild(fileDiv);
+    } else {
+      // ── Bulle texte normale ──────────────────────────────────────────────
+      bubble.innerHTML = `
+        <div class="message-text-wrap">
+          <p class="message-text">${escapeHtml(msg.plaintext)}</p>
+        </div>`;
+    }
+
+    bubble.insertAdjacentHTML('beforeend', metaHtml);
     container.appendChild(bubble);
     _renderedMsgIds.add(msg.id);
   }
@@ -1018,6 +1062,49 @@ function _updateReadReceipt(msgId: string, readBy: string[]): void {
   document
     .querySelectorAll<HTMLElement>(`[data-msg-id="${msgId}"] .msg-check`)
     .forEach(el => el.classList.toggle('read', isRead));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Envoi de fichier
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function handleSendFile(file: File): Promise<void> {
+  if (!_currentConvId || !_currentContactUid) return;
+  const contactUid = _currentContactUid;
+
+  const attachBtn = document.getElementById('btn-attach');
+  attachBtn?.classList.add('uploading');
+  setCryptoStatus('sending');
+  showCryptoSteps(SEND_STEPS, 'ENVOI FICHIER');
+
+  try {
+    await sendFile(_myUid, contactUid, file);
+    showToast(`Fichier chiffré envoyé : ${file.name}`);
+  } catch (err) {
+    console.error('[AQ] sendFile failed:', err);
+    showToast(`Échec envoi : ${err instanceof Error ? err.message : String(err)}`);
+    clearCryptoBox();
+    setCryptoStatus('idle');
+  } finally {
+    attachBtn?.classList.remove('uploading');
+  }
+}
+
+function _downloadBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
+  const a   = document.createElement('a');
+  a.href     = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function _fmtSize(bytes: number): string {
+  if (bytes < 1024)        return `${bytes} o`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} Mo`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

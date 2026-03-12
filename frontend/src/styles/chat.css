@@ -1095,6 +1095,120 @@
 }
 
 /* ═══════════════════════════════════════
+   BOUTON FICHIER
+═══════════════════════════════════════ */
+
+.btn-attach {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: none;
+  border: 1px solid var(--c-border2);
+  color: var(--c-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.btn-attach:hover {
+  background: var(--c-surface);
+  color: var(--c-accent);
+  border-color: rgba(123,159,249,0.38);
+}
+.btn-attach.uploading {
+  opacity: 0.5;
+  pointer-events: none;
+  animation: pulse 0.9s infinite;
+}
+
+/* ═══════════════════════════════════════
+   BULLES FICHIER
+═══════════════════════════════════════ */
+
+.file-bubble {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  min-width: 200px;
+  max-width: 100%;
+  cursor: pointer;
+  transition: filter var(--transition);
+  text-decoration: none;
+}
+.file-bubble:hover { filter: brightness(1.10); }
+
+.message-bubble.mine .file-bubble {
+  background: linear-gradient(135deg,#2a3f70 0%,#243460 100%);
+  border: 1px solid rgba(123,159,249,0.25);
+  border-bottom-right-radius: 3px;
+}
+.message-bubble.theirs .file-bubble {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border2);
+  border-bottom-left-radius: 3px;
+}
+
+.file-bubble-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: rgba(123,159,249,0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--c-accent);
+}
+.message-bubble.theirs .file-bubble-icon {
+  background: rgba(123,159,249,0.10);
+}
+
+.file-bubble-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.file-bubble-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--c-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.message-bubble.mine .file-bubble-name { color: #d6e4ff; }
+
+.file-bubble-meta {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--c-muted);
+}
+
+.file-bubble-dl {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(123,159,249,0.12);
+  border: 1px solid rgba(123,159,249,0.22);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--c-accent);
+  flex-shrink: 0;
+  transition: background var(--transition), box-shadow var(--transition);
+}
+.file-bubble:hover .file-bubble-dl {
+  background: rgba(123,159,249,0.22);
+  box-shadow: 0 0 8px rgba(123,159,249,0.28);
+}
+
+/* ═══════════════════════════════════════
    TOAST
 ═══════════════════════════════════════ */
 
