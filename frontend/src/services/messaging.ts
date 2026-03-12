@@ -81,34 +81,41 @@ import type { EncryptedMessage, Conversation, DecryptedMessage } from "../types/
 const IDB_NAME  = "aegisquantum-vault";
 const IDB_STORE = "keys";
 
-function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
-  });
+// Singleton IDB — connexion ouverte une seule fois pour toute la session.
+// Évite l'overhead d'ouverture/fermeture à chaque lecture/écriture de clé.
+let _dbPromise: Promise<IDBDatabase> | null = null;
+
+function getDB(): Promise<IDBDatabase> {
+  if (!_dbPromise) {
+    _dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror   = () => { _dbPromise = null; reject(req.error); };
+    });
+  }
+  return _dbPromise;
 }
 
 async function idbSet(key: string, value: string): Promise<void> {
-  const db  = await openDB();
+  const db  = await getDB();
   const tx  = db.transaction(IDB_STORE, "readwrite");
   const str = tx.objectStore(IDB_STORE);
   return new Promise((resolve, reject) => {
     const req = str.put(value, key);
-    req.onsuccess = () => { db.close(); resolve(); };
-    req.onerror   = () => { db.close(); reject(req.error); };
+    req.onsuccess = () => resolve();
+    req.onerror   = () => reject(req.error);
   });
 }
 
 async function idbGet(key: string): Promise<string | undefined> {
-  const db  = await openDB();
+  const db  = await getDB();
   const tx  = db.transaction(IDB_STORE, "readonly");
   const str = tx.objectStore(IDB_STORE);
   return new Promise((resolve, reject) => {
     const req = str.get(key);
-    req.onsuccess = () => { db.close(); resolve(req.result as string | undefined); };
-    req.onerror   = () => { db.close(); reject(req.error); };
+    req.onsuccess = () => resolve(req.result as string | undefined);
+    req.onerror   = () => reject(req.error);
   });
 }
 
@@ -155,13 +162,13 @@ const _pendingKeys = new Map<string, string>(); // `${convId}:${nonce}` → base
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Problème : updateConversationPreview() faisait un updateDoc() Firestore
-// → déclenchait subscribeToConversations chez l’envoyeur
+// → déclenchait subscribeToConversations chez l'envoyeur
 // → renderConversationList() → flash / refresh visuel côté envoyeur.
 //
 // Solution : quand ON envoie un message, on notifie la sidebar localement
 // via un callback en mémoire (zéro aller-retour réseau). Le receiver, lui,
 // met à jour Firestore quand il reçoit le message — les deux arrivent au
-// même état final mais côté envoyeur il n’y a plus de snapshot parasite.
+// même état final mais côté envoyeur il n'y a plus de snapshot parasite.
 //
 type ConvPreviewListener = (convId: string, preview: string, ts: number) => void;
 const _convPreviewListeners = new Set<ConvPreviewListener>();
@@ -532,17 +539,24 @@ export function subscribeToMessages(
 ): Unsubscribe {
   const q = query(messagesCol(conversationId), orderBy("timestamp", "asc"));
 
-  // Cache local : msgId → DecryptedMessage
-  // Évite de re-déchiffrer des messages déjà traités à chaque snapshot Firestore.
-  // Critique pour les messages propres (envoyés par nous) : la messageKey est
-  // stockée dans IDB par sendMessage(), mais le snapshot peut arriver avant
-  // que storeMessageKey() soit terminé → race condition → déchiffrement échoue.
-  // En ne re-traitant que les nouveaux docs, on élimine ce problème.
+  // Cache local : msgId → DecryptedMessage (déchiffrés)
   const decryptedCache = new Map<string, DecryptedMessage>();
 
-  // Snapshot docs en cours — nécessaire pour que les retries puissent
-  // retrouver les données du message sans attendre un nouveau snapshot.
-  let latestDocs: QueryDocumentSnapshot<DocumentData>[] = [];
+  // Registre complet des QueryDocumentSnapshot triés par timestamp.
+  // Maintenu depuis docChanges() pour reconstruire la liste ordonnée
+  // sans parcourir l'intégralité des docs à chaque snapshot Firestore.
+  const allDocs = new Map<string, QueryDocumentSnapshot<DocumentData>>();
+
+  /** Reconstruit la liste triée par timestamp et notifie l'UI. */
+  function emitResult(): void {
+    const sorted = [...allDocs.values()].sort(
+      (a, b) => ((a.data().timestamp ?? 0) as number) - ((b.data().timestamp ?? 0) as number)
+    );
+    const result = sorted
+      .map(d => decryptedCache.get(d.id))
+      .filter((m): m is DecryptedMessage => m !== undefined);
+    callback(result);
+  }
 
   /**
    * Retente le déchiffrement d'un message après un délai.
@@ -552,25 +566,18 @@ export function subscribeToMessages(
    */
   function scheduleRetry(failedMsg: EncryptedMessage): void {
     setTimeout(async () => {
-      // Retrouver les données à jour du message dans le dernier snapshot
-      const freshDoc = latestDocs.find(d => d.id === failedMsg.id);
+      const freshDoc = allDocs.get(failedMsg.id);
       const msgData  = freshDoc
         ? { id: freshDoc.id, ...freshDoc.data() } as EncryptedMessage
-        : failedMsg; // fallback : utiliser les données du snapshot d'origine
+        : failedMsg;
 
       try {
         const decrypted = await decryptMessage(myUid, msgData);
         decryptedCache.set(msgData.id, decrypted);
         _retrySet.delete(msgData.id);
-
-        // Notifier l'UI avec le message déchiffré
-        const result = latestDocs
-          .map(d => decryptedCache.get(d.id))
-          .filter((m): m is DecryptedMessage => m !== undefined);
-        callback(result);
+        emitResult();
       } catch (err) {
         console.error(`[AQ] Retry déchiffrement échoué pour ${msgData.id}:`, err);
-        // Laisser le message en erreur définitive dans le cache
         decryptedCache.set(msgData.id, {
           id       : msgData.id,
           senderUid: msgData.senderUid,
@@ -581,54 +588,64 @@ export function subscribeToMessages(
         });
         _retrySet.delete(msgData.id);
       }
-    }, 80); // 80ms — suffisant pour que storeMessageKey() soit terminé
+    }, 80);
   }
 
   return onSnapshot(q, async (snap) => {
-    latestDocs = snap.docs;
+    const changes = snap.docChanges();
 
-    // Identifier les docs vraiment nouveaux (pas encore dans le cache,
-    // ou dans le cache mais marqués pour retry)
-    const newDocs = snap.docs.filter(d =>
-      !decryptedCache.has(d.id) || _retrySet.has(d.id)
-    );
-
-    // Mettre à jour readBy pour les messages déjà en cache (read receipts)
-    // Un snapshot peut arriver sans nouveau message mais avec un readBy mis à jour.
-    let readByUpdated = false;
-    for (const d of snap.docs) {
-      if (_retrySet.has(d.id)) continue; // sera traité ci-dessous
-      const cached = decryptedCache.get(d.id);
-      if (cached) {
-        const freshReadBy = (d.data().readBy ?? []) as string[];
-        const current     = cached.readBy ?? [];
-        if (freshReadBy.length !== current.length ||
-            freshReadBy.some(uid => !current.includes(uid))) {
-          decryptedCache.set(d.id, { ...cached, readBy: freshReadBy });
-          readByUpdated = true;
-        }
+    // Mettre à jour le registre complet des docs (pour emitResult)
+    for (const change of changes) {
+      if (change.type === "added" || change.type === "modified") {
+        allDocs.set(change.doc.id, change.doc);
+      } else if (change.type === "removed") {
+        allDocs.delete(change.doc.id);
+        decryptedCache.delete(change.doc.id);
       }
     }
 
-    // Déchiffrer les nouveaux messages (et ceux marqués pour retry)
-    for (const d of newDocs) {
+    let hasChanges = false;
+
+    for (const change of changes) {
+      const d   = change.doc;
       const msg = { id: d.id, ...d.data() } as EncryptedMessage;
+
+      if (change.type === "removed") {
+        hasChanges = true;
+        continue;
+      }
+
+      if (change.type === "modified" && !_retrySet.has(d.id)) {
+        // Modification : mettre à jour uniquement readBy, sans re-déchiffrer
+        const cached = decryptedCache.get(d.id);
+        if (cached) {
+          const freshReadBy = (d.data().readBy ?? []) as string[];
+          const current     = cached.readBy ?? [];
+          if (freshReadBy.length !== current.length ||
+              freshReadBy.some(uid => !current.includes(uid))) {
+            decryptedCache.set(d.id, { ...cached, readBy: freshReadBy });
+            hasChanges = true;
+          }
+        }
+        continue;
+      }
+
+      // "added" (ou "modified" en retry) : déchiffrer si pas encore en cache
+      if (decryptedCache.has(d.id) && !_retrySet.has(d.id)) continue;
+
       const isRetry = _retrySet.has(msg.id);
       try {
         const decrypted = await decryptMessage(myUid, msg);
         decryptedCache.set(msg.id, decrypted);
-        _retrySet.delete(msg.id); // succès → plus besoin de retry
+        _retrySet.delete(msg.id);
+        hasChanges = true;
 
-        // Mettre à jour la preview Firestore uniquement côté RECEIVER (pas l’envoyeur).
-        // L’envoyeur notifie localement via _notifyConvPreviewUpdate() sans écriture réseau.
-        // On ne met à jour que pour les vrais nouveaux messages (pas les retries).
+        // Mettre à jour la preview Firestore côté RECEIVER uniquement
         if (!isRetry && msg.senderUid !== myUid) {
           updateConversationPreview(msg.conversationId, decrypted.plaintext).catch(() => {});
         }
       } catch (err) {
         if (!isRetry) {
-          // Premier échec : c'est probablement la race condition snapshot local.
-          // Afficher un placeholder et programmer un retry dans 80ms.
           console.warn(`[AQ] Déchiffrement différé pour ${msg.id} (race condition probable)`);
           _retrySet.add(msg.id);
           decryptedCache.set(msg.id, {
@@ -639,9 +656,9 @@ export function subscribeToMessages(
             verified : false,
             readBy   : [],
           });
+          hasChanges = true;
           scheduleRetry(msg);
         } else {
-          // Deuxième échec (retry explicite) → erreur définitive
           console.error(`[AQ] Échec définitif déchiffrement ${msg.id}:`, err);
           decryptedCache.set(msg.id, {
             id       : msg.id,
@@ -652,16 +669,12 @@ export function subscribeToMessages(
             readBy   : [],
           });
           _retrySet.delete(msg.id);
+          hasChanges = true;
         }
       }
     }
 
-    // Ne notifier que s'il y a du changement réel
-    if (newDocs.length === 0 && !readByUpdated) return;
-
-    const result = snap.docs
-      .map(d => decryptedCache.get(d.id))
-      .filter((m): m is DecryptedMessage => m !== undefined);
-    callback(result);
+    if (!hasChanges) return;
+    emitResult();
   });
 }
