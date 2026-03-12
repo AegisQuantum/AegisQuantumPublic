@@ -192,9 +192,18 @@ export async function doubleRatchetDecrypt(
   // Avance la chaîne jusqu'à l'index attendu.
   // Production : les messageKeys sautées (hors-ordre) devraient être cachées
   // dans une skipped-keys map pour un déchiffrement différé.
+
+  const MAX_SKIPPED_MESSAGES = 1_000; //limit to avoid DoS via messageIndex très grand
   const stepsToAdvance = messageIndex - state.receiveCount + 1; // +1 car receiveCount est l'index du prochain message attendu, pas du dernier consommé
   let chainKey   = chainKeyAfterKem;
   let messageKey = "";
+
+  if (stepsToAdvance > MAX_SKIPPED_MESSAGES) {
+  throw new Error(
+    `doubleRatchetDecrypt: messageIndex trop élevé — ` +
+    `${stepsToAdvance} steps requis, max autorisé : ${MAX_SKIPPED_MESSAGES}`
+    );
+  }
 
   for (let i = 0; i < stepsToAdvance; i++) { // faire avancer la chaîne de clés jusqu'à messageIndex
     const { nextChainKey, messageKey: mk } = await symmetricRatchetStep(chainKey);
