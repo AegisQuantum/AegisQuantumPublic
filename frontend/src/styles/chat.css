@@ -990,6 +990,111 @@
 .btn-modal-confirm:hover { opacity: 0.88; box-shadow: 0 0 20px rgba(123,159,249,0.48); }
 
 /* ═══════════════════════════════════════
+   RECHERCHE MESSAGES (topbar)
+═══════════════════════════════════════ */
+
+.msg-search-wrap {
+  display: none;                     /* caché par défaut, affiché via JS */
+  align-items: center;
+  gap: 7px;
+  background: var(--c-surface);
+  border: 1px solid rgba(123,159,249,0.35);
+  border-radius: var(--r-pill);
+  padding: 5px 10px;
+  transition: width 0.22s cubic-bezier(0.4,0,0.2,1), opacity 0.18s;
+  width: 0;
+  overflow: hidden;
+  opacity: 0;
+}
+.msg-search-wrap.open {
+  display: flex;
+  width: 260px;
+  opacity: 1;
+  box-shadow: 0 0 0 3px rgba(123,159,249,0.08);
+}
+.msg-search-wrap svg { color: var(--c-muted); flex-shrink: 0; }
+
+.msg-search-input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--c-text);
+  font-family: var(--sans);
+  font-size: 12.5px;
+}
+.msg-search-input::placeholder { color: var(--c-dim); }
+
+.msg-search-clear {
+  background: none;
+  border: none;
+  color: var(--c-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border-radius: 3px;
+  transition: color var(--transition), background var(--transition);
+  flex-shrink: 0;
+}
+.msg-search-clear:hover { color: var(--c-text); background: var(--c-surface2); }
+
+/* Highlight des occurrences trouvées */
+.msg-highlight {
+  background: rgba(252,211,77,0.28);
+  color: var(--c-amber);
+  border-radius: 2px;
+  padding: 0 1px;
+  font-weight: 600;
+}
+
+/* Messages hors-résultat : atténués pendant la recherche */
+.messages-container.searching .message-bubble { opacity: 0.25; transition: opacity 0.15s; }
+.messages-container.searching .message-bubble.search-match { opacity: 1; }
+
+/* Compteur de résultats */
+.msg-search-count {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--c-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  padding-right: 2px;
+}
+
+/* ═══════════════════════════════════════
+   BACKUP PROGRESS
+═══════════════════════════════════════ */
+
+.backup-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0 4px;
+}
+.backup-progress-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--c-surface);
+  overflow: hidden;
+}
+.backup-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--c-accent) 0%, var(--c-accent2) 100%);
+  border-radius: 2px;
+  transition: width 0.6s cubic-bezier(0.4,0,0.2,1);
+}
+.backup-progress-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--c-muted);
+  text-align: center;
+}
+
+/* ═══════════════════════════════════════
    TOAST
 ═══════════════════════════════════════ */
 

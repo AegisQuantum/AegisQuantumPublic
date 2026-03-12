@@ -19,6 +19,11 @@ import {
   markAllRead,
   createTypingDebouncer,
 }                                           from '../services/presence';
+import {
+  exportBackup,
+  type BackupConversation,
+  type BackupPayload,
+}                                           from '../services/backup';
 import type { Conversation, DecryptedMessage } from '../types/message';
 
 let _unsubConvs:        (() => void) | null = null;
@@ -35,6 +40,15 @@ let _localConvs: import('../types/message').Conversation[] = [];
 
 // Debouncer typing — créé à chaque ouverture de conversation, détruit à la fermeture
 let _typingDebouncer: ReturnType<typeof createTypingDebouncer> | null = null;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache global des messages déchiffrés (pour la recherche + backup)
+// Clé : convId  —  Valeur : derniers DecryptedMessage[] reçus du subscriber
+// ─────────────────────────────────────────────────────────────────────────────
+const _allDecryptedMessages = new Map<string, DecryptedMessage[]>();
+
+// État de la recherche dans les messages
+let _msgSearchQuery = '';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LocalStorage — noms locaux des conversations + avatar
@@ -203,6 +217,42 @@ export async function initChat(uid: string): Promise<void> {
         preview.style.background = swatch.dataset.color ?? '#6b8ff5';
       }
     });
+  });
+
+  // ── Recherche dans les messages ──
+  document.getElementById('btn-msg-search-toggle')?.addEventListener('click', toggleMsgSearch);
+  document.getElementById('msg-search-input')?.addEventListener('input', (e) => {
+    const q = (e.target as HTMLInputElement).value;
+    const clearBtn = document.getElementById('msg-search-clear');
+    if (clearBtn) clearBtn.style.display = q ? '' : 'none';
+    applyMsgSearch(q);
+  });
+  document.getElementById('msg-search-clear')?.addEventListener('click', () => {
+    const input = document.getElementById('msg-search-input') as HTMLInputElement | null;
+    if (input) input.value = '';
+    const clearBtn = document.getElementById('msg-search-clear');
+    if (clearBtn) clearBtn.style.display = 'none';
+    applyMsgSearch('');
+    input?.focus();
+  });
+  // Fermer la recherche avec Escape
+  document.getElementById('msg-search-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeMsgSearch();
+    }
+  });
+
+  // ── Export Backup ──
+  document.getElementById('btn-export-backup')?.addEventListener('click', openBackupExportModal);
+  document.getElementById('backup-export-close')?.addEventListener('click', closeBackupExportModal);
+  document.getElementById('backup-export-cancel')?.addEventListener('click', closeBackupExportModal);
+  document.getElementById('backup-export-confirm')?.addEventListener('click', confirmBackupExport);
+  document.getElementById('backup-export-password')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') confirmBackupExport();
+    if (e.key === 'Escape') closeBackupExportModal();
+  });
+  document.getElementById('backup-export-modal')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'backup-export-modal') closeBackupExportModal();
   });
 
   // ── Safety Numbers ──
@@ -935,6 +985,9 @@ function renderMessages(messages: DecryptedMessage[]): void {
   const container = document.getElementById('messages-container');
   if (!container) return;
 
+  // Mettre à jour le cache global pour la recherche + backup
+  if (_currentConvId) _allDecryptedMessages.set(_currentConvId, messages);
+
   const newMessages     = messages.filter(m => !_renderedMsgIds.has(m.id));
   const hasNewFromOther = newMessages.some(m => m.senderUid !== _myUid);
 
@@ -1103,6 +1156,217 @@ async function handleSignOut(): Promise<void> {
   _localConvs     = [];
   _renderedMsgIds  = new Set();
   await signOut();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recherche dans les messages (client-side, zéro Firestore)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Ouvre / ferme la barre de recherche dans les messages. */
+function toggleMsgSearch(): void {
+  const wrap = document.getElementById('msg-search-wrap');
+  if (!wrap) return;
+  const isOpen = wrap.classList.contains('open');
+  if (isOpen) {
+    closeMsgSearch();
+  } else {
+    wrap.classList.add('open');
+    wrap.style.display = 'flex';
+    document.getElementById('btn-msg-search-toggle')?.classList.add('active');
+    setTimeout(() => (document.getElementById('msg-search-input') as HTMLInputElement | null)?.focus(), 60);
+  }
+}
+
+/** Ferme la barre de recherche et réinitialise l'affichage. */
+function closeMsgSearch(): void {
+  const wrap  = document.getElementById('msg-search-wrap');
+  const input = document.getElementById('msg-search-input') as HTMLInputElement | null;
+  if (wrap)  { wrap.classList.remove('open'); }
+  if (input) { input.value = ''; }
+  const clearBtn = document.getElementById('msg-search-clear');
+  if (clearBtn) clearBtn.style.display = 'none';
+  document.getElementById('btn-msg-search-toggle')?.classList.remove('active');
+  applyMsgSearch('');
+}
+
+/**
+ * Filtre les bulles dans le DOM selon la requête.
+ * - Ajoute la classe .searching sur le container (atténue les non-résultats)
+ * - Ajoute la classe .search-match sur les bulles correspondantes
+ * - Injecte un <mark class="msg-highlight"> autour de chaque occurrence
+ * - Affiche un compteur de résultats dans la barre de recherche
+ * - Scrolle jusqu'au premier résultat
+ */
+function applyMsgSearch(query: string): void {
+  _msgSearchQuery = query.trim();
+  const container = document.getElementById('messages-container');
+  if (!container) return;
+
+  const countEl = document.getElementById('msg-search-count') as HTMLElement | null;
+
+  if (!_msgSearchQuery) {
+    // Mode normal — tout afficher sans highlight
+    container.classList.remove('searching');
+    container.querySelectorAll<HTMLElement>('.message-bubble').forEach(bubble => {
+      bubble.classList.remove('search-match');
+      // Restaurer le texte brut (retirer les <mark>)
+      const textEl = bubble.querySelector<HTMLElement>('.message-text');
+      if (textEl && textEl.dataset.plaintext) {
+        textEl.textContent = textEl.dataset.plaintext;
+      }
+    });
+    if (countEl) countEl.remove();
+    return;
+  }
+
+  const q = _msgSearchQuery.toLowerCase();
+  let matchCount = 0;
+  let firstMatchEl: HTMLElement | null = null;
+
+  container.classList.add('searching');
+  container.querySelectorAll<HTMLElement>('.message-bubble').forEach(bubble => {
+    const textEl = bubble.querySelector<HTMLElement>('.message-text');
+    if (!textEl) return;
+
+    // Conserver le texte brut au premier passage
+    if (!textEl.dataset.plaintext) {
+      textEl.dataset.plaintext = textEl.textContent ?? '';
+    }
+    const raw = textEl.dataset.plaintext;
+
+    if (raw.toLowerCase().includes(q)) {
+      bubble.classList.add('search-match');
+      matchCount++;
+      if (!firstMatchEl) firstMatchEl = bubble;
+
+      // Injecter le highlight HTML — escaper le raw pour sécurité
+      const escaped = escapeHtml(raw);
+      const pattern = new RegExp(escapeRegex(escapeHtml(_msgSearchQuery)), 'gi');
+      textEl.innerHTML = escaped.replace(pattern, m => `<mark class="msg-highlight">${m}</mark>`);
+    } else {
+      bubble.classList.remove('search-match');
+      textEl.textContent = raw;  // pas de match — texte brut
+    }
+  });
+
+  // Compteur de résultats dans la barre de recherche
+  let counter = document.getElementById('msg-search-count') as HTMLElement | null;
+  const wrap  = document.getElementById('msg-search-wrap');
+  if (!counter && wrap) {
+    counter = document.createElement('span');
+    counter.id        = 'msg-search-count';
+    counter.className = 'msg-search-count';
+    const clearBtn = document.getElementById('msg-search-clear');
+    if (clearBtn) wrap.insertBefore(counter, clearBtn);
+    else           wrap.appendChild(counter);
+  }
+  if (counter) {
+    counter.textContent = matchCount === 0
+      ? '0 résultat'
+      : matchCount === 1 ? '1 résultat' : `${matchCount} résultats`;
+    counter.style.color = matchCount === 0 ? 'var(--c-red)' : 'var(--c-muted)';
+  }
+
+  // Scroller jusqu'au premier résultat
+  if (firstMatchEl) {
+    (firstMatchEl as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+/** Escaper les caractères spéciaux d'une regex. */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\\]\\]/g, String.raw`\/** Escaper les caractères spéciaux d'une regex. */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\// ─────────────────────────────────────────────────────────────────────────────
+// Utilitaires
+// ─────────────────────────────────────────────────────────────────────────────
+
+function escapeHtml(str: string): string {');
+}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Export Backup
+// ─────────────────────────────────────────────────────────────────────────────
+
+function openBackupExportModal(): void {
+  const modal = document.getElementById('backup-export-modal');
+  const input = document.getElementById('backup-export-password') as HTMLInputElement | null;
+  const prog  = document.getElementById('backup-progress');
+  if (modal) modal.style.display = 'flex';
+  if (prog)  prog.style.display  = 'none';
+  if (input) { input.value = ''; }
+  setTimeout(() => input?.focus(), 60);
+}
+
+function closeBackupExportModal(): void {
+  const modal = document.getElementById('backup-export-modal');
+  if (modal) modal.style.display = 'none';
+  const confirm = document.getElementById('backup-export-confirm') as HTMLButtonElement | null;
+  if (confirm) { confirm.disabled = false; confirm.textContent = 'Télécharger .aqbackup'; }
+}
+
+async function confirmBackupExport(): Promise<void> {
+  const input    = document.getElementById('backup-export-password') as HTMLInputElement | null;
+  const password = input?.value.trim();
+  if (!password) { showToast('Mot de passe requis.'); input?.focus(); return; }
+
+  const confirmBtn = document.getElementById('backup-export-confirm') as HTMLButtonElement | null;
+  const prog       = document.getElementById('backup-progress');
+  const fill       = document.getElementById('backup-progress-fill') as HTMLElement | null;
+  const label      = document.getElementById('backup-progress-label') as HTMLElement | null;
+
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (prog)  prog.style.display  = 'flex';
+
+  const setProgress = (pct: number, text: string) => {
+    if (fill)  fill.style.width  = `${pct}%`;
+    if (label) label.textContent = text;
+  };
+
+  try {
+    // Collecter toutes les conversations chargées en mémoire
+    const convs: BackupConversation[] = [];
+    for (const [convId, msgs] of _allDecryptedMessages.entries()) {
+      const conv = _localConvs.find(c => c.id === convId);
+      convs.push({
+        convId,
+        localName   : getLocalConvName(convId),
+        participants: conv?.participants ?? [],
+        messages    : msgs.filter(m => !m.plaintext.startsWith('[🔒')), // exclure les placeholders
+      });
+    }
+
+    if (convs.length === 0 || convs.every(c => c.messages.length === 0)) {
+      showToast('Aucun message déchiffré à exporter. Ouvrez vos conversations d’abord.');
+      if (confirmBtn) confirmBtn.disabled = false;
+      if (prog) prog.style.display = 'none';
+      return;
+    }
+
+    const payload: BackupPayload = {
+      version      : 1,
+      exportedAt   : Date.now(),
+      uid          : _myUid,
+      conversations: convs,
+    };
+
+    const totalMessages = convs.reduce((n, c) => n + c.messages.length, 0);
+
+    await exportBackup(payload, password, (phase) => {
+      if (phase === 'deriving')    setProgress(20, `Dérivation Argon2id… (quelques secondes)`);
+      if (phase === 'encrypting')  setProgress(70, `Chiffrement AES-256-GCM de ${totalMessages} messages…`);
+      if (phase === 'downloading') setProgress(100, 'Téléchargement…');
+    });
+
+    closeBackupExportModal();
+    showToast(`Sauvegarde exportée — ${totalMessages} messages, ${convs.length} conversation(s).`);
+  } catch (err) {
+    console.error('[AQ] Backup export failed:', err);
+    showToast(`Export échoué : ${err instanceof Error ? err.message : String(err)}`);
+    if (confirmBtn) { confirmBtn.disabled = false; }
+    setProgress(0, '');
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

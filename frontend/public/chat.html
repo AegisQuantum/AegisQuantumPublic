@@ -142,6 +142,23 @@
             </div>
           </div>
           <div class="topbar-actions">
+            <!-- Barre de recherche dans les messages (filtre client-side sur DecryptedMessage[]) -->
+            <div class="msg-search-wrap" id="msg-search-wrap">
+              <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="12" height="12">
+                <circle cx="5.5" cy="5.5" r="3.5"/><path d="m8.5 8.5 2.5 2.5"/>
+              </svg>
+              <input type="text" id="msg-search-input" class="msg-search-input" placeholder="Rechercher dans la conversation…" autocomplete="off" spellcheck="false"/>
+              <button class="msg-search-clear" id="msg-search-clear" title="Effacer" style="display:none">
+                <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" width="10" height="10">
+                  <path d="M2 2l8 8M10 2 2 10"/>
+                </svg>
+              </button>
+            </div>
+            <button class="btn-topbar" id="btn-msg-search-toggle" title="Rechercher dans les messages">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13">
+                <circle cx="6.5" cy="6.5" r="4"/><path d="m10 10 3 3"/>
+              </svg>
+            </button>
             <button class="btn-topbar" id="btn-rename-conv" title="Renommer cette conversation">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="11" height="11">
                 <path d="M11 2.5a1.5 1.5 0 0 1 2.5 1.5L5 12.5 2 13.5l1-3L11 2.5Z"/>
@@ -278,6 +295,25 @@
         </div>
       </div>
 
+      <!-- Sauvegarde chiffrée -->
+      <div class="settings-section">
+        <div class="settings-section-title">Sauvegarde &amp; Export</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-row-left">
+              <span class="settings-row-label">Exporter les messages</span>
+              <span class="settings-row-desc">Chiffré AES-256-GCM · Argon2id · fichier .aqbackup</span>
+            </div>
+            <button class="btn-copy" id="btn-export-backup">
+              <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px">
+                <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/>
+              </svg>
+              Exporter
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div class="settings-section">
         <div class="settings-section-title">Session</div>
         <button class="btn-signout-settings" id="btn-signout-settings">
@@ -387,6 +423,36 @@
     <div class="modal-actions">
       <button class="btn-modal-cancel" id="avatar-modal-cancel">Annuler</button>
       <button class="btn-modal-confirm" id="avatar-modal-confirm">Enregistrer</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MODAL — Export sauvegarde ══ -->
+<div class="modal-overlay" id="backup-export-modal" style="display:none">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Exporter les messages</span>
+      <button class="modal-close" id="backup-export-close">&times;</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="modal-label">Mot de passe de chiffrement</div>
+      <input type="password" class="modal-input" id="backup-export-password"
+        placeholder="Votre mot de passe AegisQuantum…"
+        autocomplete="current-password"/>
+      <div class="modal-hint">Le fichier sera chiffré avec AES-256-GCM. Vous aurez besoin de ce mot de passe pour déchiffrer l&apos;archive.</div>
+      <div class="backup-progress" id="backup-progress" style="display:none">
+        <div class="backup-progress-bar"><div class="backup-progress-fill" id="backup-progress-fill"></div></div>
+        <span class="backup-progress-label" id="backup-progress-label">Dérivation de la clé…</span>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" id="backup-export-cancel">Annuler</button>
+      <button class="btn-modal-confirm" id="backup-export-confirm">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px">
+          <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/>
+        </svg>
+        Télécharger .aqbackup
+      </button>
     </div>
   </div>
 </div>
