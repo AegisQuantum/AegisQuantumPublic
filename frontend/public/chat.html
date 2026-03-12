@@ -181,6 +181,12 @@
         </div>
 
         <div class="input-bar">
+          <label class="btn-attach" id="btn-attach" title="Envoyer un fichier chiffré" for="file-input">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" width="14" height="14">
+              <path d="M16.5 9.5 9 17a5 5 0 0 1-7-7l8-8a3.3 3.3 0 0 1 4.7 4.7L7 14.2a1.7 1.7 0 0 1-2.4-2.4L11 5"/>
+            </svg>
+          </label>
+          <input type="file" id="file-input" style="display:none" />
           <textarea class="message-input" id="message-input" placeholder="Écrire un message chiffré…" rows="1"></textarea>
           <button class="btn-send" id="btn-send" title="Envoyer">
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" width="15" height="15">
@@ -267,10 +273,10 @@
           </div>
           <div class="settings-row">
             <div class="settings-row-left">
-              <span class="settings-row-label">Double Ratchet</span>
-              <span class="settings-row-desc">Forward secrecy — clés éphémères par message</span>
+              <span class="settings-row-label">Double Ratchet (ML-KEM-768)</span>
+              <span class="settings-row-desc">Forward secrecy — clé éphémère KEM + ratchet symétrique par message</span>
             </div>
-            <span class="settings-badge badge-amber">À venir</span>
+            <span class="settings-badge badge-green">Actif</span>
           </div>
         </div>
       </div>

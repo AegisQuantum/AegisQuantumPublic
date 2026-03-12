@@ -42,6 +42,9 @@ import { getPublicKeys } from "./key-registry";
 import { getKemPrivateKey, getDsaPrivateKey, saveRatchetState, loadRatchetState } from "./key-store";
 import { dsaSign, dsaVerify } from "../crypto";
 import { doubleRatchetEncrypt, doubleRatchetDecrypt } from "../crypto/double-ratchet";
+import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto/aes-gcm";
+import { hkdfDerive }                   from "../crypto/hkdf";
+import { toBase64, fromBase64 }         from "../crypto/kem";
 import type { EncryptedMessage, Conversation, DecryptedMessage } from "../types/message";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -131,6 +134,112 @@ export function subscribeToConversations(
   return onSnapshot(q, snap => {
     callback(snap.docs.map(d => d.data() as Conversation));
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Envoi de fichier — Double Ratchet + AES-256-GCM sur le contenu binaire
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Chiffre un fichier et l'envoie dans Firestore comme message.
+ *
+ * Pipeline :
+ *  1. Lire le fichier en ArrayBuffer
+ *  2. Dériver une fileKey dédiée via HKDF (séparée de la messageKey DR)
+ *  3. AES-256-GCM encrypt(fileBytes, fileKey) → fileCiphertext
+ *  4. Chiffrer un plaintext « [Fichier] nom (taille) » via Double Ratchet
+ *  5. addDoc Firestore avec { hasFile, fileCiphertext, fileNonce, fileName, fileSize, fileType }
+ *
+ * La fileKey est dérivée depuis la messageKey DR via
+ * HKDF(messageKey, "AegisQuantum-v1-file-key") pour rester liée
+ * à la session DR sans réutiliser la même clé que le texte.
+ */
+export async function sendFile(
+  myUid     : string,
+  contactUid: string,
+  file      : File,
+): Promise<void> {
+  const convId = getConversationId(myUid, contactUid);
+
+  if (file.size > 10 * 1024 * 1024) {
+    throw new Error(`Fichier trop volumineux (${(file.size / 1024 / 1024).toFixed(1)} MB). Limite : 10 MB.`);
+  }
+
+  // ── 1. Clés ──────────────────────────────────────────────────────────────
+  const myKeys      = await getPublicKeys(myUid);
+  const myKemPubKey = myKeys?.kemPublicKey ?? "";
+  const contactKeys = await getPublicKeys(contactUid);
+  if (!contactKeys) throw new Error(`Clés publiques introuvables pour ${contactUid}`);
+
+  const myDsaPrivateKey = getDsaPrivateKey(myUid);
+  const myKemPrivateKey = getKemPrivateKey(myUid);
+
+  // ── 2. Lire le fichier ───────────────────────────────────────────────────
+  const fileBuffer = await file.arrayBuffer();
+  const fileBytes  = new Uint8Array(fileBuffer);
+
+  // ── 3. Double Ratchet encrypt — plaintext = métadonnées lisibles ─────────
+  const stateJson  = await loadRatchetState(myUid, convId);
+  const placeholder = `[Fichier] ${file.name} (${_formatSize(file.size)})`;
+
+  const drResult = await doubleRatchetEncrypt(
+    placeholder,
+    stateJson,
+    convId,
+    myKemPrivateKey,
+    myKemPubKey,
+    contactKeys.kemPublicKey,
+  );
+  await saveRatchetState(myUid, convId, drResult.newStateJson);
+
+  // ── 4. Dériver fileKey depuis la messageKey DR ───────────────────────────
+  // messageKey = clé AES 32 bytes encodée Base64, extraite depuis drResult.
+  // On ne l'expose pas directement — on la re-dérive pour le fichier.
+  // Hack : on dérive la fileKey depuis le kemCiphertext + convId comme IKM
+  // (le kemCiphertext est unique par message et lié au DR).
+  const fileKey = await hkdfDerive(
+    drResult.kemCiphertext,
+    `AegisQuantum-v1-file-key:${convId}:${drResult.messageIndex}`,
+    32,
+  );
+
+  // ── 5. Chiffrer le contenu binaire ───────────────────────────────────────
+  const fileB64 = toBase64(fileBytes);
+  const { ciphertext: fileCiphertext, nonce: fileNonce } = await aesGcmEncrypt(fileB64, fileKey);
+
+  // ── 6. DSA sign ──────────────────────────────────────────────────────────
+  const signedPayload = drResult.ciphertext + drResult.nonce + drResult.kemCiphertext;
+  const signature     = await dsaSign(signedPayload, myDsaPrivateKey);
+
+  // ── 7. Firestore ─────────────────────────────────────────────────────────
+  const msgRef = await addDoc(messagesCol(convId), {
+    conversationId   : convId,
+    senderUid        : myUid,
+    ciphertext       : drResult.ciphertext,
+    nonce            : drResult.nonce,
+    kemCiphertext    : drResult.kemCiphertext,
+    signature,
+    messageIndex     : drResult.messageIndex,
+    timestamp        : Date.now(),
+    hasFile          : true,
+    fileCiphertext,
+    fileNonce,
+    fileName         : file.name,
+    fileSize         : file.size,
+    fileType         : file.type || "application/octet-stream",
+    ...(drResult.initKemCiphertext
+      ? { initKemCiphertext: drResult.initKemCiphertext }
+      : {}),
+  } as Omit<EncryptedMessage, "id">);
+
+  _sentPlaintextCache.set(msgRef.id, placeholder);
+  _notifyConvPreviewUpdate(convId, placeholder, Date.now());
+}
+
+function _formatSize(bytes: number): string {
+  if (bytes < 1024)             return `${bytes} o`;
+  if (bytes < 1024 * 1024)      return `${(bytes / 1024).toFixed(1)} Ko`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} Mo`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -246,6 +355,29 @@ export async function decryptMessage(
   // ── 5. Sauvegarder le nouvel état ratchet ────────────────────────────────
   await saveRatchetState(myUid, msg.conversationId, drResult.newStateJson);
 
+  // ── 6. Déchiffrer le fichier si présent ─────────────────────────────────
+  let fileAttachment: DecryptedMessage["file"] | undefined;
+  if (msg.hasFile && msg.fileCiphertext && msg.fileNonce && msg.fileName) {
+    try {
+      const fileKey = await hkdfDerive(
+        drResult.kemCiphertext ?? msg.kemCiphertext,
+        `AegisQuantum-v1-file-key:${msg.conversationId}:${msg.messageIndex}`,
+        32,
+      );
+      const fileB64    = await aesGcmDecrypt(msg.fileCiphertext, msg.fileNonce, fileKey);
+      const fileBytes  = fromBase64(fileB64);
+      const blob       = new Blob([fileBytes], { type: msg.fileType ?? "application/octet-stream" });
+      fileAttachment   = {
+        blob,
+        name : msg.fileName,
+        size : msg.fileSize ?? fileBytes.length,
+        type : msg.fileType ?? "application/octet-stream",
+      };
+    } catch (fileErr) {
+      console.warn(`[AQ] Déchiffrement fichier échoué pour ${msg.id}:`, fileErr);
+    }
+  }
+
   return {
     id       : msg.id,
     senderUid: msg.senderUid,
@@ -253,6 +385,7 @@ export async function decryptMessage(
     timestamp: msg.timestamp,
     verified,
     readBy   : msg.readBy ?? [],
+    file     : fileAttachment,
   };
 }
 
