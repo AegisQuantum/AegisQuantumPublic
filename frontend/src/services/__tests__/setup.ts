@@ -86,14 +86,28 @@ vi.mock("firebase/auth", async () => {
 const _store        = new Map<string, unknown>();
 const _snapListeners = new Map<string, Array<(snap: unknown) => void>>();
 
+// Tracks which doc IDs have already been delivered per collection path (for docChanges)
+const _deliveredDocs = new Map<string, Set<string>>();
+
 function _buildSnap(colPath: string) {
   const docs = [..._store.entries()]
     .filter(([k]) => k.startsWith(colPath + "/") && !k.slice(colPath.length + 1).includes("/"))
     .map(([k, v]) => ({ id: k.split("/").pop()!, data: () => v, ...(v as object) }));
+
+  // Build docChanges: new docs are "added", existing are "modified"
+  const delivered = _deliveredDocs.get(colPath) ?? new Set<string>();
+  const changes = docs.map(d => ({
+    type: delivered.has(d.id) ? "modified" : "added",
+    doc : d,
+  }));
+  docs.forEach(d => delivered.add(d.id));
+  _deliveredDocs.set(colPath, delivered);
+
   return {
     docs,
-    empty  : docs.length === 0,
-    forEach: (fn: (d: unknown) => void) => docs.forEach(fn),
+    empty      : docs.length === 0,
+    forEach    : (fn: (d: unknown) => void) => docs.forEach(fn),
+    docChanges : () => changes,
   };
 }
 
@@ -130,6 +144,15 @@ vi.mock("firebase/firestore", async () => {
       return { id };
     }),
 
+    updateDoc: vi.fn(async (ref: { _path: string }, data: unknown) => {
+      const existing = _store.get(ref._path) ?? {};
+      _store.set(ref._path, { ...(existing as object), ...(data as object) });
+      const parts = ref._path.split("/"); parts.pop();
+      _fireSnap(parts.join("/"));
+    }),
+
+    arrayUnion: vi.fn((...items: unknown[]) => items),
+
     getDocs: vi.fn(async (queryRef: { _path: string }) => _buildSnap(queryRef._path)),
 
     query  : vi.fn((colRef: { _path: string }, ...constraints: unknown[]) => ({
@@ -163,5 +186,6 @@ beforeEach(() => {
   _authListeners.length = 0;
   _store.clear();
   _snapListeners.clear();
+  _deliveredDocs.clear();
   (globalThis as Record<string, unknown>).indexedDB = new IDBFactory();
 });

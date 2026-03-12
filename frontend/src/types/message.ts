@@ -43,6 +43,14 @@ export interface EncryptedMessage {
    */
   messageIndex: number;
 
+  /**
+   * Base64 — KEM ciphertext d’initialisation de session.
+   * Présent UNIQUEMENT sur le premier message d’une conversation (stateJson === null).
+   * Généré par doubleRatchetEncrypt() et stocké dans Firestore.
+   * Le receiver le décapsule pour bootstrapper son état ratchet avec le même initSecret.
+   */
+  initKemCiphertext?: string;
+
   timestamp: number;
 
   /**
