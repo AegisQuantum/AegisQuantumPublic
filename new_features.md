@@ -44,3 +44,5 @@
 **Appels audio E2E**
 - WebRTC + DTLS-SRTP + clés négociées via KEM
 - Hors scope raisonnable pour la soutenance
+
+sdinfdsin
