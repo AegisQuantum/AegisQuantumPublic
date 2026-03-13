@@ -1,194 +1,260 @@
 /**
- * fingerprint.ts — Safety Numbers
+ * fingerprint.ts — Safety Numbers (vérification d'empreinte de clés)
  *
- * Calcul et affichage des Safety Numbers (empreinte cryptographique des clés DSA).
+ * Principe :
+ *  Chaque conversation possède une empreinte unique dérivée des clés publiques
+ *  ML-KEM-768 et ML-DSA-65 des deux participants.
  *
- * Algorithme (inspiré Signal) :
- *   1. SHA-256( dsaPublicKey_bytes + uid_bytes )  → 32 bytes
- *   5 itérations de SHA-256 supplémentaires pour durcir
- *   2. Découper en 8 groupes de 5 décimales (mod 100000 sur chaque uint32)
- *   3. Afficher les 8 groupes → facile à comparer vocalement
+ *  Si Alice et Bob voient la même empreinte en dehors de l'app (appel vocal,
+ *  en personne), la conversation n'a pas été interceptée (pas de MITM).
  *
- * Les deux participants génèrent leurs propres Safety Numbers avec les mêmes
- * clés publiques → si les chiffres correspondent, pas d'interception MITM.
+ * Algorithme :
+ *  1. Concaténer (triés par UID pour la symétrie) :
+ *       kemPub_A ‖ dsaPub_A ‖ kemPub_B ‖ dsaPub_B ‖ uid_A ‖ uid_B
+ *  2. SHA-256 → 32 bytes
+ *  3. Convertir chaque byte en nombre décimal sur 3 chiffres → 96 chiffres
+ *  4. Découper en 12 groupes de 5 chiffres (format humain lisible)
+ *
+ * Propriétés garanties :
+ *  - Déterministe : même entrée → même empreinte
+ *  - Symétrique   : Alice et Bob voient le même résultat
+ *  - Unique       : change si UNE des quatre clés change
+ *  - Opaque       : aucun matériau secret exposé
+ *
+ * Ce module ne touche pas aux clés privées — uniquement aux clés publiques
+ * récupérées depuis Firestore via key-registry.ts.
  */
 
-import { getPublicKeys } from '../services/key-registry';
+import { getPublicKeys } from "../services/key-registry";
+import { fromBase64 }    from "../crypto/kem";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers
+// Calcul de l'empreinte
 // ─────────────────────────────────────────────────────────────────────────────
 
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const bytes  = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
+/**
+ * Calcule les Safety Numbers d'une paire d'utilisateurs.
+ *
+ * @param uid1        — UID du premier participant (myUid ou contactUid — l'ordre n'importe pas)
+ * @param kemPub1     — Base64 — clé publique ML-KEM-768 du participant 1
+ * @param dsaPub1     — Base64 — clé publique ML-DSA-65  du participant 1
+ * @param uid2        — UID du second participant
+ * @param kemPub2     — Base64 — clé publique ML-KEM-768 du participant 2
+ * @param dsaPub2     — Base64 — clé publique ML-DSA-65  du participant 2
+ *
+ * @returns string — 12 groupes de 5 chiffres séparés par des espaces
+ *   ex : "12345 67890 11223 34455 66778 89900 11234 56789 01122 33445 56677 88990"
+ */
+export async function computeSafetyNumbers(
+  uid1    : string,
+  kemPub1 : string,
+  dsaPub1 : string,
+  uid2    : string,
+  kemPub2 : string,
+  dsaPub2 : string,
+): Promise<string> {
+  // Trier les participants par UID pour garantir la symétrie :
+  // computeSafetyNumbers(A, B) === computeSafetyNumbers(B, A)
+  const [first, second] = uid1 < uid2
+    ? [{ kemPub: kemPub1, dsaPub: dsaPub1, uid: uid1 }, { kemPub: kemPub2, dsaPub: dsaPub2, uid: uid2 }]
+    : [{ kemPub: kemPub2, dsaPub: dsaPub2, uid: uid2 }, { kemPub: kemPub1, dsaPub: dsaPub1, uid: uid1 }];
 
-function strToBytes(s: string): Uint8Array {
-  return new TextEncoder().encode(s);
-}
+  // Construire le matériau d'entrée : concaténation des bytes des clés + UIDs
+  const uidBytes1  = new TextEncoder().encode(first.uid);
+  const uidBytes2  = new TextEncoder().encode(second.uid);
+  const kemBytes1  = fromBase64(first.kemPub);
+  const dsaBytes1  = fromBase64(first.dsaPub);
+  const kemBytes2  = fromBase64(second.kemPub);
+  const dsaBytes2  = fromBase64(second.dsaPub);
 
-function concatBytes(...arrays: Uint8Array[]): Uint8Array {
-  const total  = arrays.reduce((n, a) => n + a.length, 0);
-  const result = new Uint8Array(total);
-  let offset   = 0;
-  for (const a of arrays) { result.set(a, offset); offset += a.length; }
-  return result;
+  // Assemblage dans un seul ArrayBuffer
+  const totalLen = kemBytes1.length + dsaBytes1.length + uidBytes1.length
+                 + kemBytes2.length + dsaBytes2.length + uidBytes2.length;
+  const combined = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const chunk of [kemBytes1, dsaBytes1, uidBytes1, kemBytes2, dsaBytes2, uidBytes2]) {
+    combined.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  // SHA-256 → 32 bytes
+  const hashBuffer = await crypto.subtle.digest("SHA-256", combined);
+  const hashBytes  = new Uint8Array(hashBuffer);
+
+  // Convertir en 12 groupes de 5 chiffres :
+  //   32 bytes → 32 nombres 0-255 → concaténer les représentations 3 chiffres
+  //   → 96 chiffres → découper en 12 groupes de 5 (+ garder les 36 premiers = 60 chiffres)
+  //
+  // On utilise les 20 premiers bytes (160 bits) → 20 × 3 = 60 chiffres → 12 groupes de 5.
+  // Les 12 derniers bytes sont ignorés — 160 bits de sécurité suffisent pour un affichage humain.
+  const digits = Array.from(hashBytes.slice(0, 20))
+    .map(b => b.toString().padStart(3, "0"))
+    .join("");                    // 60 chiffres
+
+  // Découper en 12 groupes de 5
+  const groups: string[] = [];
+  for (let i = 0; i < 60; i += 5) {
+    groups.push(digits.slice(i, i + 5));
+  }
+  return groups.join(" ");
 }
 
 /**
- * Calcule le fingerprint d'une clé publique DSA pour un uid donné.
- * 5 tours de SHA-256 pour durcir (inspiré Signal).
- * Retourne 8 groupes de 5 chiffres décimaux (strings).
+ * Charge les clés publiques depuis Firestore et calcule les Safety Numbers.
+ * Retourne null si l'un des utilisateurs n'a pas de clés enregistrées.
+ *
+ * @param myUid      — UID de l'utilisateur courant
+ * @param contactUid — UID du contact
+ * @returns Safety Numbers string | null en cas d'erreur
  */
-async function computeFingerprint(dsaPublicKeyB64: string, uid: string): Promise<string[]> {
-  let data = concatBytes(base64ToBytes(dsaPublicKeyB64), strToBytes(uid));
+export async function loadAndComputeSafetyNumbers(
+  myUid      : string,
+  contactUid : string,
+): Promise<string | null> {
+  const [myKeys, contactKeys] = await Promise.all([
+    getPublicKeys(myUid),
+    getPublicKeys(contactUid),
+  ]);
 
-  // 5 tours de SHA-256
-  for (let i = 0; i < 5; i++) {
-    const hash = await crypto.subtle.digest('SHA-256', data);
-    data = new Uint8Array(hash);
-  }
+  if (!myKeys || !contactKeys) return null;
 
-  // Extraire 8 groupes de 5 décimales
-  // SHA-256 = 32 bytes = 8 × uint32
-  const view   = new DataView(data.buffer);
-  const groups: string[] = [];
-  for (let i = 0; i < 8; i++) {
-    const uint32 = view.getUint32(i * 4, false); // big-endian
-    const mod    = uint32 % 100_000;
-    groups.push(mod.toString().padStart(5, '0'));
-  }
-  return groups;
-}
-
-function renderGroups(containerId: string, groups: string[]): void {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-  container.innerHTML = groups.map(g => `<div class="fp-block">${g}</div>`).join('');
+  return computeSafetyNumbers(
+    myUid,      myKeys.kemPublicKey,     myKeys.dsaPublicKey,
+    contactUid, contactKeys.kemPublicKey, contactKeys.dsaPublicKey,
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Modale
+// Rendu de la modale
 // ─────────────────────────────────────────────────────────────────────────────
 
-let _modalEl: HTMLElement | null = null;
-
-async function loadModal(): Promise<HTMLElement> {
-  if (_modalEl) return _modalEl;
-
-  const res  = await fetch('/src/pages/fingerprint.html');
-  if (!res.ok) {
-    // fallback: construire directement si fetch échoue (prod)
-    return buildModalInline();
-  }
-  const text  = await res.text();
-  const wrap  = document.createElement('div');
-  wrap.innerHTML = text;
-  // extraire seulement le .modal-overlay
-  const modal = wrap.querySelector<HTMLElement>('.modal-overlay');
-  if (!modal) return buildModalInline();
-  _modalEl = modal;
-  document.body.appendChild(_modalEl);
-  return _modalEl;
-}
-
-/** Construit la modale inline sans fetch (utilisé en prod si le HTML n'est pas accessible). */
-function buildModalInline(): HTMLElement {
-  const el = document.createElement('div');
-  el.id        = 'fingerprint-modal';
-  el.className = 'fp-modal-overlay';
-  el.innerHTML = `
-    <div class="fp-modal-card">
-      <div class="fp-modal-header">
-        <div class="fp-modal-title">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="13" height="13">
-            <rect x="2" y="8" width="12" height="7" rx="1.5"/>
-            <path d="M5 8V6a3 3 0 0 1 6 0v2"/>
-            <circle cx="8" cy="11.5" r="1" fill="currentColor" stroke="none"/>
-          </svg>
-          Safety Numbers
-        </div>
-        <button class="fp-modal-close" id="modal-close-btn">×</button>
-      </div>
-      <p class="fp-modal-desc">
-        Comparez ces numéros avec votre contact via un canal de confiance (vocal, en personne).
-        S'ils correspondent, votre conversation est sécurisée et n'a pas été interceptée.
-      </p>
-      <div class="fp-section">
-        <div class="fp-label">Votre empreinte — ML-DSA-65</div>
-        <div class="fp-grid" id="fp-own"></div>
-      </div>
-      <div class="fp-section">
-        <div class="fp-label">Empreinte du contact — ML-DSA-65</div>
-        <div class="fp-grid" id="fp-contact"></div>
-      </div>
-      <div class="fp-status unverified" id="fp-status">
-        <span class="fp-status-dot"></span>
-        Non vérifié — comparez hors-bande
-      </div>
-    </div>`;
-  document.body.appendChild(el);
-  _modalEl = el;
-  return el;
-}
-
-function closeModal(): void {
-  if (_modalEl) {
-    _modalEl.style.display = 'none';
+/**
+ * Injecte les 12 blocs de chiffres dans un conteneur DOM.
+ *
+ * @param container — élément DOM #fp-own ou #fp-contact
+ * @param numbers   — Safety Numbers string (12 groupes de 5 séparés par espaces)
+ */
+function renderFingerprintBlocks(container: HTMLElement, numbers: string): void {
+  container.innerHTML = "";
+  const groups = numbers.split(" ");
+  for (const group of groups) {
+    const block = document.createElement("div");
+    block.className   = "fp-block";
+    block.textContent = group;
+    container.appendChild(block);
   }
 }
 
-/** Point d'entrée appelé depuis chat.ts au clic sur btn-fingerprint. */
-export async function showSafetyNumbers(myUid: string, contactUid: string): Promise<void> {
-  const modal = await loadModal();
-  modal.style.display = 'flex';
+/**
+ * Affiche un état de chargement dans un conteneur de fingerprint.
+ */
+function renderFingerprintLoading(container: HTMLElement): void {
+  container.innerHTML = `<div class="fp-loading">Calcul en cours…</div>`;
+}
 
-  // Spinner le temps de charger
-  const ownEl     = modal.querySelector<HTMLElement>('#fp-own');
-  const contactEl = modal.querySelector<HTMLElement>('#fp-contact');
-  const statusEl  = modal.querySelector<HTMLElement>('#fp-status');
-  if (ownEl)     ownEl.innerHTML     = '<div class="fp-loading">Calcul…</div>';
-  if (contactEl) contactEl.innerHTML = '<div class="fp-loading">Chargement…</div>';
+/**
+ * Affiche une erreur dans un conteneur de fingerprint.
+ */
+function renderFingerprintError(container: HTMLElement, msg: string): void {
+  container.innerHTML = `<div class="fp-error">${msg}</div>`;
+}
 
-  // Bouton fermer
-  modal.querySelector('#modal-close-btn')?.addEventListener('click', closeModal);
-  modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+// ─────────────────────────────────────────────────────────────────────────────
+// API publique — ouvrir / fermer la modale
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Ouvre la modale Safety Numbers pour une conversation.
+ *
+ * Appelé par chat.ts → bouton #btn-fingerprint.
+ *
+ * @param myUid      — UID de l'utilisateur courant
+ * @param contactUid — UID du contact
+ */
+export async function openFingerprintModal(
+  myUid      : string,
+  contactUid : string,
+): Promise<void> {
+  // Récupérer la modale depuis le DOM (injectée dans public/chat.html)
+  const overlay = document.getElementById("fingerprint-modal");
+  if (!overlay) {
+    console.error("[AQ] fingerprint-modal introuvable dans le DOM");
+    return;
+  }
+
+  // Afficher la modale
+  overlay.style.display = "flex";
+  overlay.setAttribute("aria-hidden", "false");
+
+  // Conteneurs des empreintes
+  const fpOwn     = document.getElementById("fp-own");
+  const fpContact = document.getElementById("fp-contact");
+  const fpStatus  = document.getElementById("fp-status");
+
+  if (fpOwn)     renderFingerprintLoading(fpOwn);
+  if (fpContact) renderFingerprintLoading(fpContact);
 
   try {
-    // Récupérer clés publiques DSA du contact depuis Firestore
-    const contactKeys = await getPublicKeys(contactUid);
-    if (!contactKeys) throw new Error(`Clés introuvables pour ${contactUid}`);
-
-    // Récupérer nos propres clés publiques DSA
-    const myKeys = await getPublicKeys(myUid);
-    if (!myKeys) throw new Error(`Vos clés publiques sont introuvables`);
-
-    // Calculer les deux fingerprints
-    const [myGroups, contactGroups] = await Promise.all([
-      computeFingerprint(myKeys.dsaPublicKey, myUid),
-      computeFingerprint(contactKeys.dsaPublicKey, contactUid),
+    // Charger les clés et calculer l'empreinte commune
+    const [myKeys, contactKeys] = await Promise.all([
+      getPublicKeys(myUid),
+      getPublicKeys(contactUid),
     ]);
 
-    // Afficher
-    const ownGrid     = modal.querySelector<HTMLElement>('#fp-own');
-    const contactGrid = modal.querySelector<HTMLElement>('#fp-contact');
-    if (ownGrid)     ownGrid.innerHTML     = myGroups.map(g => `<div class="fp-block">${g}</div>`).join('');
-    if (contactGrid) contactGrid.innerHTML = contactGroups.map(g => `<div class="fp-block">${g}</div>`).join('');
+    if (!myKeys) {
+      if (fpOwn)    renderFingerprintError(fpOwn, "Vos clés publiques sont introuvables.");
+      if (fpStatus) setFpStatus(fpStatus, "error", "Erreur — clés manquantes");
+      return;
+    }
 
-    if (statusEl) {
-      statusEl.className   = 'fp-status unverified';
-      statusEl.innerHTML   = '<span class="fp-status-dot"></span> Non vérifié — comparez hors-bande avec votre contact';
+    if (!contactKeys) {
+      if (fpContact) renderFingerprintError(fpContact, "Clés du contact introuvables.");
+      if (fpStatus)  setFpStatus(fpStatus, "error", "Erreur — clés du contact manquantes");
+      return;
     }
+
+    // Calculer l'empreinte commune (même résultat pour les deux participants)
+    const safetyNumbers = await computeSafetyNumbers(
+      myUid,      myKeys.kemPublicKey,      myKeys.dsaPublicKey,
+      contactUid, contactKeys.kemPublicKey, contactKeys.dsaPublicKey,
+    );
+
+    // Alice et Bob voient la MÊME empreinte — c'est le point clé du protocole.
+    // On affiche la même valeur dans les deux sections pour que l'utilisateur
+    // comprenne qu'il doit la comparer avec ce que son contact voit chez lui.
+    if (fpOwn)     renderFingerprintBlocks(fpOwn,     safetyNumbers);
+    if (fpContact) renderFingerprintBlocks(fpContact, safetyNumbers);
+
+    if (fpStatus) {
+      setFpStatus(fpStatus, "unverified", "Non vérifié — comparez hors de l'application");
+    }
+
   } catch (err) {
-    console.error('[AQ] Safety Numbers error:', err);
-    if (ownEl)     ownEl.innerHTML     = '<div class="fp-error">Erreur de calcul</div>';
-    if (contactEl) contactEl.innerHTML = '<div class="fp-error">Clés introuvables</div>';
-    if (statusEl) {
-      statusEl.className = 'fp-status error';
-      statusEl.innerHTML = '<span class="fp-status-dot"></span> Impossible de calculer les Safety Numbers';
-    }
+    console.error("[AQ] Erreur calcul Safety Numbers :", err);
+    if (fpOwn)     renderFingerprintError(fpOwn,     "Erreur de calcul");
+    if (fpContact) renderFingerprintError(fpContact, "Erreur de calcul");
+    if (fpStatus)  setFpStatus(fpStatus, "error", "Erreur interne");
   }
+}
+
+/**
+ * Ferme la modale Safety Numbers.
+ */
+export function closeFingerprintModal(): void {
+  const overlay = document.getElementById("fingerprint-modal");
+  if (overlay) {
+    overlay.style.display = "none";
+    overlay.setAttribute("aria-hidden", "true");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers internes
+// ─────────────────────────────────────────────────────────────────────────────
+
+type FpStatusType = "unverified" | "error";
+
+function setFpStatus(el: HTMLElement, type: FpStatusType, message: string): void {
+  el.className = `fp-status ${type}`;
+  el.innerHTML = `<span class="fp-status-dot"></span>${message}`;
 }

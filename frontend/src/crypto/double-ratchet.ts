@@ -1,178 +1,66 @@
 /**
- * double-ratchet.ts — Double Ratchet Algorithm (stub — à implémenter)
+ * double-ratchet.ts — Double Ratchet Algorithm
  *
- * ═══════════════════════════════════════════════════════════════════════════
- * SCHÉMA DU PROTOCOLE COMPLET (Alice → Bob, puis Bob → Alice)
- * ═══════════════════════════════════════════════════════════════════════════
+ * Implémente le Double Ratchet de Signal pour le chiffrement de bout en bout
+ * des messages après l'établissement de la session via ML-KEM-768.
  *
- *  ┌─────────────────────────────────────────────────────────────────────┐
- *  │                        ALICE envoie à BOB                           │
- *  ├─────────────────────────────────────────────────────────────────────┤
- *  │                                                                     │
- *  │  [1] Récupérer kemPublicKey_Bob ← Firestore /publicKeys/bob         │
- *  │                                                                     │
- *  │  [2] KEM Encapsulate (ML-KEM-768)                                   │
- *  │      kemEncapsulate(kemPublicKey_Bob)                               │
- *  │      → sharedSecret (32B)  +  kemCiphertext (1088B)                 │
- *  │                                                                     │
- *  │      ╔══════════════════════════════════════════════════════╗       │
- *  │      ║  TODO [DOUBLE RATCHET — KEM RATCHET]                ║       │
- *  │      ║  Actuellement : 1 KEM par message (pas de ratchet)  ║       │
- *  │      ║  Avec DR : KEM ratchet step → nouveau sharedSecret  ║       │
- *  │      ║  qui fait avancer la rootKey via HKDF               ║       │
- *  │      ║  → HKDF(rootKey, sharedSecret) → (newRootKey,       ║       │
- *  │      ║                                   sendingChainKey)  ║       │
- *  │      ╚══════════════════════════════════════════════════════╝       │
- *  │                                                                     │
- *  │  [3] HKDF Dérivation                                                │
- *  │      hkdfDerive(sharedSecret, HKDF_INFO.MESSAGE_KEY)                │
- *  │      → messageKey (32B)                                             │
- *  │                                                                     │
- *  │      ╔══════════════════════════════════════════════════════╗       │
- *  │      ║  TODO [DOUBLE RATCHET — SYMMETRIC RATCHET]          ║       │
- *  │      ║  Actuellement : dérivation directe sans chaîne      ║       │
- *  │      ║  Avec DR : hkdfDerivePair(sendingChainKey)          ║       │
- *  │      ║  → (newSendingChainKey, messageKey)                 ║       │
- *  │      ║  sendCount++ à chaque message                       ║       │
- *  │      ╚══════════════════════════════════════════════════════╝       │
- *  │                                                                     │
- *  │  [4] AES-256-GCM Chiffrement                                        │
- *  │      aesGcmEncrypt(plaintext, messageKey)                           │
- *  │      → ciphertext + nonce (12B)                                     │
- *  │                                                                     │
- *  │  [5] DSA Sign (ML-DSA-65) — INCHANGÉ avec Double Ratchet           │
- *  │      dsaSign(ciphertext ‖ nonce ‖ kemCiphertext, dsaPrivKey_Alice)  │
- *  │      → signature (3309B)                                            │
- *  │                                                                     │
- *  │  [6] Firestore → /conversations/{convId}/messages/{msgId}          │
- *  │      { ciphertext, nonce, kemCiphertext, signature, messageIndex }  │
- *  │      messageIndex = 0 actuellement                                  │
- *  │      TODO [DOUBLE RATCHET] → sendCount du ratchet state             │
- *  │                                                                     │
- *  └─────────────────────────────────────────────────────────────────────┘
+ * Appelé par :
+ *  - messaging.ts → sendMessage()    → doubleRatchetEncrypt()
+ *  - messaging.ts → decryptMessage() → doubleRatchetDecrypt()
  *
- *  ┌─────────────────────────────────────────────────────────────────────┐
- *  │                        BOB reçoit d'Alice                           │
- *  ├─────────────────────────────────────────────────────────────────────┤
- *  │                                                                     │
- *  │  [1] Firestore snapshot → EncryptedMessage                          │
- *  │                                                                     │
- *  │  [2] DSA Verify (ML-DSA-65) — INCHANGÉ avec Double Ratchet         │
- *  │      Récupérer dsaPublicKey_Alice ← Firestore /publicKeys/alice     │
- *  │      dsaVerify(ciphertext ‖ nonce ‖ kemCiphertext,                  │
- *  │                signature, dsaPublicKey_Alice)                       │
- *  │      → boolean (verified)                                           │
- *  │                                                                     │
- *  │  [3] KEM Decapsulate (ML-KEM-768)                                   │
- *  │      kemDecapsulate(kemCiphertext, kemPrivKey_Bob)                   │
- *  │      → sharedSecret (32B) — identique à celui d'Alice en [2]       │
- *  │                                                                     │
- *  │      ╔══════════════════════════════════════════════════════╗       │
- *  │      ║  TODO [DOUBLE RATCHET — KEM RATCHET CÔTÉ RÉCEPTION] ║       │
- *  │      ║  Actuellement : KEM decapsulate direct               ║       │
- *  │      ║  Avec DR : détecter le KEM ratchet step              ║       │
- *  │      ║  (kemCiphertext provient d'une nouvelle paire)       ║       │
- *  │      ║  → HKDF(rootKey, sharedSecret) → (newRootKey,        ║       │
- *  │      ║                                   receivingChainKey) ║       │
- *  │      ╚══════════════════════════════════════════════════════╝       │
- *  │                                                                     │
- *  │  [4] HKDF Dérivation                                                │
- *  │      hkdfDerive(sharedSecret, HKDF_INFO.MESSAGE_KEY)                │
- *  │      → messageKey (32B)                                             │
- *  │                                                                     │
- *  │      ╔══════════════════════════════════════════════════════╗       │
- *  │      ║  TODO [DOUBLE RATCHET — SYMMETRIC RATCHET RÉCEPTION]║       │
- *  │      ║  Avec DR : hkdfDerivePair(receivingChainKey)         ║       │
- *  │      ║  → (newReceivingChainKey, messageKey)                ║       │
- *  │      ║  Vérifier messageIndex contre receiveCount (anti-    ║       │
- *  │      ║  replay) et gérer les messages hors-ordre (skipped   ║       │
- *  │      ║  message keys)                                       ║       │
- *  │      ╚══════════════════════════════════════════════════════╝       │
- *  │                                                                     │
- *  │  [5] AES-256-GCM Déchiffrement                                      │
- *  │      aesGcmDecrypt(ciphertext, nonce, messageKey)                   │
- *  │      → plaintext                                                    │
- *  │                                                                     │
- *  └─────────────────────────────────────────────────────────────────────┘
+ * ─────────────────────────────────────────────────────────────────────────────
+ * BOOTSTRAP (premier message, stateJson === null)
+ * ─────────────────────────────────────────────────────────────────────────────
  *
- *  ┌─────────────────────────────────────────────────────────────────────┐
- *  │  CONTOURNEMENT ACTUEL (sans forward secrecy)                        │
- *  ├─────────────────────────────────────────────────────────────────────┤
- *  │  • 1 kemEncapsulate/kemDecapsulate par message — pas de ratchet     │
- *  │  • messageKey = HKDF(sharedSecret) directement                     │
- *  │  • messageKey mise en cache IDB (msgkey:<convId>:<msgId>)           │
- *  │  • messageIndex figé à 0                                            │
- *  │  • Pas de forward secrecy : si kemPrivKey_Bob leak → tous les       │
- *  │    messages passés sont déchiffrables                               │
- *  └─────────────────────────────────────────────────────────────────────┘
+ *  Envoyeur (Alice) :
+ *   1. kemEncapsulate(bobPubKey) → { initSecret, initKemCT }
+ *   2. hkdfDerivePair(initSecret) → { rootKey, sendingChainKey }
+ *   3. KEM ratchet step + symmetric ratchet → messageKey
+ *   4. AES-256-GCM encrypt(plaintext, messageKey)
+ *   5. Stocke initKemCT dans Firestore (champ initKemCiphertext, 1er message only)
  *
- * ═══════════════════════════════════════════════════════════════════════
- * DÉPENDANCES DISPONIBLES (toutes implémentées — prêtes à l'emploi)
- * ═══════════════════════════════════════════════════════════════════════
+ *  Receiver (Bob) :
+ *   1. kemDecapsulate(initKemCT, bobPrivKey) → initSecret  ← même secret qu'Alice
+ *   2. hkdfDerivePair(initSecret) → { rootKey, receivingChainKey }
+ *   3. KEM ratchet step (reçoit kemCiphertext du message) + symmetric ratchet → messageKey
+ *   4. AES-256-GCM decrypt(ciphertext, nonce, messageKey)
  *
- *  import { kemEncapsulate, kemDecapsulate, kemGenerateKeyPair } from "./kem";
- *    kemEncapsulate(recipientPubKeyB64)         → { sharedSecret: string, ciphertext: string }
- *    kemDecapsulate(ciphertextB64, privKeyB64)  → sharedSecret: string
- *    kemGenerateKeyPair()                       → { publicKey: string, privateKey: string }
- *
- *  import { hkdfDerive, hkdfDerivePair, HKDF_INFO } from "./hkdf";
- *    hkdfDerive(secretB64, info, outputLength?) → keyB64: string
- *    hkdfDerivePair(secretB64)                  → { rootKey: string, chainKey: string }
- *    HKDF_INFO.MESSAGE_KEY   — context string pour les clés de message
- *    HKDF_INFO.RATCHET_ROOT  — context string pour la root key
- *    HKDF_INFO.RATCHET_CHAIN — context string pour les chain keys
- *
- *  import { aesGcmEncrypt, aesGcmDecrypt } from "./aes-gcm";
- *    aesGcmEncrypt(plaintext: string, keyB64: string)              → { ciphertext, nonce }
- *    aesGcmDecrypt(ciphertextB64, nonceB64, keyB64)                → plaintext: string
- *
- *  import { serializeRatchetState, deserializeRatchetState } from "./ratchet-state";
- *    serializeRatchetState(state: RatchetState)  → json: string
- *    deserializeRatchetState(json: string)       → RatchetState
- *
- *  import type { RatchetState } from "../types/ratchet";
- *    {
- *      conversationId  : string,  — ID Firestore de la conversation
- *      rootKey         : string,  — Base64 32B — mis à jour à chaque KEM ratchet step
- *      sendingChainKey : string,  — Base64 32B — avance à chaque message envoyé
- *      receivingChainKey:string,  — Base64 32B — avance à chaque message reçu
- *      ourPrivateKey   : string,  — Base64 — ML-KEM-768 current private key
- *      ourPublicKey    : string,  — Base64 — ML-KEM-768 current public key
- *      theirPublicKey  : string,  — Base64 — dernière pubkey KEM connue du contact
- *      sendCount       : number,  — messages envoyés dans la chaîne courante
- *      receiveCount    : number,  — messages reçus dans la chaîne courante
- *      updatedAt       : number,  — timestamp ms
- *    }
- *
- *  import { saveRatchetState, loadRatchetState } from "../services/key-store";
- *    saveRatchetState(uid, convId, stateJson)  → Promise<void>
- *    loadRatchetState(uid, convId)             → Promise<string | null>
+ * ─────────────────────────────────────────────────────────────────────────────
+ * MESSAGES SUIVANTS (stateJson !== null)
+ * ─────────────────────────────────────────────────────────────────────────────
+ *  État restauré depuis IDB → KEM ratchet step + symmetric ratchet → messageKey
  */
 
+import { kemEncapsulate, kemDecapsulate, kemGenerateKeyPair, toBase64, fromBase64 } from "./kem";
+import { hkdfDerivePair } from "./hkdf";
+import { aesGcmEncrypt, aesGcmDecrypt } from "./aes-gcm";
+import { serializeRatchetState, deserializeRatchetState } from "./ratchet-state";
+import type { RatchetState } from "../types/ratchet";
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Types exportés — NE PAS MODIFIER (utilisés par messaging.ts)
+// Types exportés
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Résultat de doubleRatchetEncrypt.
- * Toutes les valeurs vont directement dans le document Firestore EncryptedMessage.
- */
 export interface DoubleRatchetEncryptResult {
   /** Base64 — ciphertext AES-256-GCM du message */
-  ciphertext   : string;
+  ciphertext        : string;
   /** Base64 — nonce AES-GCM (12 bytes, frais par message) */
-  nonce        : string;
-  /** Base64 — ML-KEM-768 ciphertext du ratchet step courant (1088 bytes) */
-  kemCiphertext: string;
+  nonce             : string;
+  /** Base64 — ML-KEM-768 ciphertext du ratchet step courant */
+  kemCiphertext     : string;
   /** Index du message dans la chaîne courante — anti-replay côté réception */
-  messageIndex : number;
+  messageIndex      : number;
   /** RatchetState sérialisé → passer à saveRatchetState() dans key-store.ts */
-  newStateJson : string;
+  newStateJson      : string;
+  /**
+   * Base64 — KEM ciphertext d'initialisation de session.
+   * Présent UNIQUEMENT sur le premier message (stateJson === null).
+   * Stocké dans Firestore (champ initKemCiphertext).
+   * Le receiver le décapsule pour bootstrapper le même initSecret.
+   */
+  initKemCiphertext?: string;
 }
 
-/**
- * Résultat de doubleRatchetDecrypt.
- */
 export interface DoubleRatchetDecryptResult {
   /** Texte clair déchiffré */
   plaintext   : string;
@@ -181,121 +69,246 @@ export interface DoubleRatchetDecryptResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// doubleRatchetEncrypt — STUB (logique à implémenter)
+// doubleRatchetEncrypt
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Chiffre un message avec le Double Ratchet.
- *
- * Appelé par messaging.ts → sendMessage() en remplacement des étapes 3-5
- * (KEM encapsulate → HKDF → AES-GCM).
- *
- * Comportement attendu :
- *  1. Si stateJson === null → initialiser un nouvel état RatchetState :
- *     - Générer une nouvelle paire KEM : kemGenerateKeyPair()
- *     - KEM ratchet step : kemEncapsulate(theirPubKey) → sharedSecret
- *     - HKDF(sharedSecret) → { rootKey, sendingChainKey }
- *     - Stocker ourPrivKey, ourPubKey, theirPubKey, rootKey, chainKey dans l'état
- *  2. Si stateJson !== null → désérialiser l'état existant
- *  3. Symmetric ratchet step (envoi) :
- *     - hkdfDerivePair(sendingChainKey) → { newSendingChainKey, messageKey }
- *     - sendCount++
- *  4. AES-256-GCM encrypt(plaintext, messageKey) → { ciphertext, nonce }
- *  5. Si KEM ratchet step nécessaire (changement de tour) :
- *     - kemGenerateKeyPair() → nouvelle paire éphémère
- *     - kemEncapsulate(theirPubKey) → nouveau kemCiphertext + sharedSecret
- *     - HKDF(rootKey, sharedSecret) → (newRootKey, newSendingChainKey)
- *  6. Mettre à jour l'état et le sérialiser → newStateJson
- *
- * @param plaintext       — texte clair UTF-8 à chiffrer
- * @param stateJson       — RatchetState sérialisé, ou null (premier message)
- * @param conversationId  — ID Firestore de la conversation
- * @param ourPrivKey      — Base64 — ML-KEM-768 private key (getKemPrivateKey)
- * @param ourPubKey       — Base64 — ML-KEM-768 public key (key-registry)
- * @param theirPubKey     — Base64 — ML-KEM-768 public key du contact (key-registry)
- * @param sharedSecret    — Base64 — secret KEM initial (kemEncapsulate, utilisé
- *                          UNIQUEMENT si stateJson === null pour init)
- *
- * @returns DoubleRatchetEncryptResult
- *   .ciphertext    — Base64 — message chiffré
- *   .nonce         — Base64 — IV AES-GCM
- *   .kemCiphertext — Base64 — KEM CT du ratchet step (à stocker Firestore)
- *   .messageIndex  — numéro dans la chaîne courante (à stocker Firestore)
- *   .newStateJson  — état mis à jour (à passer à saveRatchetState)
- */
 export async function doubleRatchetEncrypt(
-  _plaintext      : string,      // IN  — texte clair
-  _stateJson      : string | null, // IN  — état ratchet courant (null = init)
-  _conversationId : string,      // IN  — ID conversation Firestore
-  _ourPrivKey     : string,      // IN  — notre clé privée KEM (getKemPrivateKey)
-  _ourPubKey      : string,      // IN  — notre clé publique KEM (key-registry)
-  _theirPubKey    : string,      // IN  — clé publique KEM du contact
-  _sharedSecret   : string,      // IN  — shared secret KEM initial (si stateJson null)
+  plaintext     : string,
+  stateJson     : string | null,
+  conversationId: string,
+  ourPrivKey    : string,
+  ourPubKey     : string,
+  theirPubKey   : string,
 ): Promise<DoubleRatchetEncryptResult> {
-  // OUT : DoubleRatchetEncryptResult
-  //   .ciphertext    → stocker dans Firestore EncryptedMessage.ciphertext
-  //   .nonce         → stocker dans Firestore EncryptedMessage.nonce
-  //   .kemCiphertext → stocker dans Firestore EncryptedMessage.kemCiphertext
-  //   .messageIndex  → stocker dans Firestore EncryptedMessage.messageIndex
-  //   .newStateJson  → passer à saveRatchetState(myUid, convId, newStateJson)
-  throw new Error("TODO: implémenter doubleRatchetEncrypt()");
+
+  let state: RatchetState;
+  let initKemCiphertext: string | undefined;
+
+  if (stateJson === null) {
+    // ── Bootstrap : premier message ──────────────────────────────────────────
+    // On génère l'init KEM en interne. L'envoyeur encapsule avec la clé publique
+    // du contact → initSecret + initKemCT. Le receiver décapsulera initKemCT avec
+    // sa clé privée pour retrouver le même initSecret. Symétrie garantie.
+    const { sharedSecret: initSecret, ciphertext: initKemCT } =
+      await kemEncapsulate(theirPubKey);
+    initKemCiphertext = initKemCT;
+
+    const { rootKey, chainKey: sendingChainKey } = await hkdfDerivePair(initSecret);
+
+    state = {
+      conversationId,
+      rootKey,
+      sendingChainKey,
+      receivingChainKey : "",
+      ourPrivateKey     : ourPrivKey,
+      ourPublicKey      : ourPubKey,
+      theirPublicKey    : theirPubKey,
+      sendCount         : 0,
+      receiveCount      : 0,
+      updatedAt         : Date.now(),
+    };
+  } else {
+    state = deserializeRatchetState(stateJson);
+  }
+
+  // ── KEM ratchet step (forward secrecy) ───────────────────────────────────
+  const {
+    newRootKey,
+    newSendingChainKey : chainKeyAfterKem,
+    kemCiphertext,
+    newOurPrivKey,
+    newOurPubKey,
+  } = await kemRatchetStepSend(state.rootKey, state.theirPublicKey);
+
+  state.rootKey       = newRootKey;
+  state.ourPrivateKey = newOurPrivKey;
+  state.ourPublicKey  = newOurPubKey;
+
+  // ── Symmetric ratchet step → messageKey ──────────────────────────────────
+  const { nextChainKey, messageKey } = await symmetricRatchetStep(chainKeyAfterKem);
+
+  state.sendingChainKey = nextChainKey;
+  const messageIndex    = state.sendCount;
+  state.sendCount++;
+
+  // ── AES-256-GCM ───────────────────────────────────────────────────────────
+  const { ciphertext, nonce } = await aesGcmEncrypt(plaintext, messageKey);
+
+  state.updatedAt = Date.now();
+  const newStateJson = serializeRatchetState(state);
+
+  return { ciphertext, nonce, kemCiphertext, messageIndex, newStateJson, initKemCiphertext };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// doubleRatchetDecrypt — STUB (logique à implémenter)
+// doubleRatchetDecrypt
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Déchiffre un message avec le Double Ratchet.
- *
- * Appelé par messaging.ts → decryptMessage() en remplacement des étapes 3-5
- * (KEM decapsulate → HKDF → AES-GCM).
- *
- * Comportement attendu :
- *  1. Si stateJson === null → initialiser un état RatchetState réception :
- *     - kemDecapsulate(kemCiphertext, ourPrivKey) → sharedSecret
- *     - HKDF(sharedSecret) → { rootKey, receivingChainKey }
- *  2. Si stateJson !== null → désérialiser l'état
- *  3. Vérifier si KEM ratchet step nécessaire (theirPubKey a changé)
- *     - Si oui : kemDecapsulate(kemCiphertext, ourPrivKey) → nouveau sharedSecret
- *       HKDF(rootKey, sharedSecret) → (newRootKey, newReceivingChainKey)
- *  4. Symmetric ratchet step (réception) :
- *     - Avancer jusqu'au messageIndex si messages hors-ordre (skipped keys)
- *     - hkdfDerivePair(receivingChainKey) → { newReceivingChainKey, messageKey }
- *     - receiveCount++
- *  5. AES-256-GCM decrypt(ciphertext, nonce, messageKey) → plaintext
- *  6. Mettre à jour l'état et le sérialiser → newStateJson
- *
- * @param ciphertext      — Base64 — message chiffré AES-256-GCM (depuis Firestore)
- * @param nonce           — Base64 — IV AES-GCM (depuis Firestore)
- * @param messageIndex    — numéro de message (depuis Firestore) — anti-replay
- * @param kemCiphertext   — Base64 — KEM CT du ratchet step (depuis Firestore)
- * @param stateJson       — RatchetState sérialisé, ou null (premier message reçu)
- * @param conversationId  — ID Firestore de la conversation
- * @param ourPrivKey      — Base64 — ML-KEM-768 private key (getKemPrivateKey)
- * @param ourPubKey       — Base64 — ML-KEM-768 public key (key-registry)
- * @param theirPubKey     — Base64 — ML-KEM-768 public key de l'expéditeur
- * @param sharedSecret    — Base64 — kemDecapsulate(kemCiphertext, ourPrivKey)
- *                          (UNIQUEMENT si stateJson === null, pour l'init)
- *
- * @returns DoubleRatchetDecryptResult
- *   .plaintext    → texte clair à afficher dans l'UI
- *   .newStateJson → passer à saveRatchetState(myUid, convId, newStateJson)
- */
 export async function doubleRatchetDecrypt(
-  _ciphertext     : string,      // IN  — ciphertext AES-GCM (Firestore)
-  _nonce          : string,      // IN  — nonce AES-GCM (Firestore)
-  _messageIndex   : number,      // IN  — index anti-replay (Firestore)
-  _kemCiphertext  : string,      // IN  — KEM CT ratchet step (Firestore)
-  _stateJson      : string | null, // IN  — état ratchet courant (null = init)
-  _conversationId : string,      // IN  — ID conversation Firestore
-  _ourPrivKey     : string,      // IN  — notre clé privée KEM (getKemPrivateKey)
-  _ourPubKey      : string,      // IN  — notre clé publique KEM
-  _theirPubKey    : string,      // IN  — clé publique KEM de l'expéditeur
-  _sharedSecret   : string,      // IN  — shared secret KEM initial (si stateJson null)
+  ciphertext        : string,
+  nonce             : string,
+  messageIndex      : number,
+  kemCiphertext     : string,
+  stateJson         : string | null,
+  conversationId    : string,
+  ourPrivKey        : string,
+  ourPubKey         : string,
+  theirPubKey       : string,
+  initKemCiphertext?: string,  // présent uniquement sur le 1er message (stateJson === null)
 ): Promise<DoubleRatchetDecryptResult> {
-  // OUT : DoubleRatchetDecryptResult
-  //   .plaintext    → afficher dans l'UI (messaging.ts → subscribeToMessages callback)
-  //   .newStateJson → passer à saveRatchetState(myUid, convId, newStateJson)
-  throw new Error("TODO: implémenter doubleRatchetDecrypt()");
+
+  let state: RatchetState;
+
+  if (stateJson === null) {
+    // ── Bootstrap : premier message reçu ─────────────────────────────────────
+    // Décapsule initKemCiphertext pour retrouver le même initSecret que l'envoyeur.
+    if (!initKemCiphertext) {
+      throw new Error(
+        "doubleRatchetDecrypt: stateJson est null (1er message) mais initKemCiphertext est absent. " +
+        "Vérifiez que le champ initKemCiphertext est bien stocké dans Firestore pour le premier message."
+      );
+    }
+    const initSecret = await kemDecapsulate(initKemCiphertext, ourPrivKey);
+    const { rootKey, chainKey: receivingChainKey } = await hkdfDerivePair(initSecret);
+
+    state = {
+      conversationId,
+      rootKey,
+      sendingChainKey  : "",
+      receivingChainKey,
+      ourPrivateKey    : ourPrivKey,
+      ourPublicKey     : ourPubKey,
+      theirPublicKey   : theirPubKey,
+      sendCount        : 0,
+      receiveCount     : 0,
+      updatedAt        : Date.now(),
+    };
+  } else {
+    state = deserializeRatchetState(stateJson);
+  }
+
+  // ── KEM ratchet step — réception ─────────────────────────────────────────
+  // Décapsule le kemCiphertext du message pour avancer rootKey + receivingChainKey.
+  const { newRootKey, newReceivingChainKey: chainKeyAfterKem } =
+    //await kemRatchetStepReceive(state.rootKey, kemCiphertext, state.ourPrivateKey);
+    await kemRatchetStepReceive(state.rootKey, kemCiphertext, ourPrivKey); // Utilise la clé longue terme passée en paramètre — celle que Bob a utilisée
+
+
+  state.rootKey        = newRootKey;
+  state.theirPublicKey = theirPubKey;
+
+  // ── Symmetric ratchet — avancer jusqu'à messageIndex ─────────────────────
+  if (messageIndex < state.receiveCount) {
+    throw new Error(
+      `doubleRatchetDecrypt: replay détecté — ` +
+      `messageIndex=${messageIndex} déjà consommé (receiveCount=${state.receiveCount})`
+    );
+  }
+
+  const MAX_SKIPPED = 1_000;
+  const steps = messageIndex - state.receiveCount + 1;
+
+  if (steps > MAX_SKIPPED) {
+    throw new Error(
+      `doubleRatchetDecrypt: messageIndex trop élevé — ` +
+      `${steps} steps requis, max autorisé : ${MAX_SKIPPED}`
+    );
+  }
+
+  let chainKey   = chainKeyAfterKem;
+  let messageKey = "";
+
+  for (let i = 0; i < steps; i++) {
+    const { nextChainKey, messageKey: mk } = await symmetricRatchetStep(chainKey);
+    chainKey   = nextChainKey;
+    messageKey = mk;
+  }
+
+  state.receivingChainKey = chainKey;
+  state.receiveCount      = messageIndex + 1;
+
+  // ── AES-256-GCM decrypt ───────────────────────────────────────────────────
+  const plaintext = await aesGcmDecrypt(ciphertext, nonce, messageKey);
+
+  state.updatedAt = Date.now();
+  const newStateJson = serializeRatchetState(state);
+
+  return { plaintext, newStateJson };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers privés
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Concatène deux secrets Base64 au niveau bytes → Base64. */
+function concatSecrets(a: string, b: string): string {
+  const bytesA = fromBase64(a);
+  const bytesB = fromBase64(b);
+  const combined = new Uint8Array(bytesA.length + bytesB.length);
+  combined.set(bytesA, 0);
+  combined.set(bytesB, bytesA.length);
+  return toBase64(combined);
+}
+
+/**
+ * KEM ratchet step — envoi.
+ * 1. Génère une nouvelle keypair KEM éphémère
+ * 2. kemEncapsulate(theirPubKey) → { kemSecret, kemCiphertext }
+ * 3. IKM = rootKey || kemSecret
+ * 4. hkdfDerivePair(IKM) → { newRootKey, newSendingChainKey }
+ */
+async function kemRatchetStepSend(
+  currentRootKey: string,
+  theirPubKey   : string,
+): Promise<{
+  newRootKey        : string;
+  newSendingChainKey: string;
+  kemCiphertext     : string;
+  newOurPrivKey     : string;
+  newOurPubKey      : string;
+}> {
+  const { publicKey: newOurPubKey, privateKey: newOurPrivKey } =
+    await kemGenerateKeyPair();
+
+  const { sharedSecret: kemSecret, ciphertext: kemCiphertext } =
+    await kemEncapsulate(theirPubKey);
+
+  const ikm = concatSecrets(currentRootKey, kemSecret);
+  const { rootKey: newRootKey, chainKey: newSendingChainKey } =
+    await hkdfDerivePair(ikm);
+
+  return { newRootKey, newSendingChainKey, kemCiphertext, newOurPrivKey, newOurPubKey };
+}
+
+/**
+ * KEM ratchet step — réception.
+ * 1. kemDecapsulate(kemCiphertext, ourPrivKey) → kemSecret
+ * 2. IKM = rootKey || kemSecret
+ * 3. hkdfDerivePair(IKM) → { newRootKey, newReceivingChainKey }
+ */
+async function kemRatchetStepReceive(
+  currentRootKey: string,
+  kemCiphertext : string,
+  ourPrivKey    : string,
+): Promise<{
+  newRootKey           : string;
+  newReceivingChainKey : string;
+}> {
+  const kemSecret = await kemDecapsulate(kemCiphertext, ourPrivKey);
+  const ikm = concatSecrets(currentRootKey, kemSecret);
+  const { rootKey: newRootKey, chainKey: newReceivingChainKey } =
+    await hkdfDerivePair(ikm);
+  return { newRootKey, newReceivingChainKey };
+}
+
+/**
+ * Symmetric ratchet step — avance la chaîne d'un cran.
+ * hkdfDerivePair(chainKey) → { nextChainKey, messageKey }
+ */
+async function symmetricRatchetStep(chainKey: string): Promise<{
+  nextChainKey: string;
+  messageKey  : string;
+}> {
+  const { rootKey: nextChainKey, chainKey: messageKey } = await hkdfDerivePair(chainKey);
+  return { nextChainKey, messageKey };
 }

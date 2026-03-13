@@ -86,20 +86,35 @@ vi.mock("firebase/auth", async () => {
 const _store        = new Map<string, unknown>();
 const _snapListeners = new Map<string, Array<(snap: unknown) => void>>();
 
-function _buildSnap(colPath: string) {
+function _buildSnap(colPath: string, seenIds?: Set<string>) {
   const docs = [..._store.entries()]
     .filter(([k]) => k.startsWith(colPath + "/") && !k.slice(colPath.length + 1).includes("/"))
     .map(([k, v]) => ({ id: k.split("/").pop()!, data: () => v, ...(v as object) }));
+
+  // docChanges: per-listener seen set passed in — new = "added", known = "modified"
+  const changes = seenIds
+    ? docs.map(d => ({ type: seenIds.has(d.id) ? "modified" : "added", doc: d }))
+    : docs.map(d => ({ type: "added", doc: d }));
+
+  if (seenIds) docs.forEach(d => seenIds.add(d.id));
+
   return {
     docs,
-    empty  : docs.length === 0,
-    forEach: (fn: (d: unknown) => void) => docs.forEach(fn),
+    empty      : docs.length === 0,
+    forEach    : (fn: (d: unknown) => void) => docs.forEach(fn),
+    docChanges : () => changes,
   };
 }
 
+// Per-listener seen-doc-id sets — keyed by listener function reference index
+const _listenerSeenIds = new Map<(snap: unknown) => void, Set<string>>();
+
 function _fireSnap(colPath: string) {
-  const snap = _buildSnap(colPath);
-  for (const cb of _snapListeners.get(colPath) ?? []) cb(snap);
+  for (const cb of _snapListeners.get(colPath) ?? []) {
+    const seenIds = _listenerSeenIds.get(cb) ?? new Set<string>();
+    _listenerSeenIds.set(cb, seenIds);
+    cb(_buildSnap(colPath, seenIds));
+  }
 }
 
 vi.mock("firebase/firestore", async () => {
@@ -130,6 +145,15 @@ vi.mock("firebase/firestore", async () => {
       return { id };
     }),
 
+    updateDoc: vi.fn(async (ref: { _path: string }, data: unknown) => {
+      const existing = _store.get(ref._path) ?? {};
+      _store.set(ref._path, { ...(existing as object), ...(data as object) });
+      const parts = ref._path.split("/"); parts.pop();
+      _fireSnap(parts.join("/"));
+    }),
+
+    arrayUnion: vi.fn((...items: unknown[]) => items),
+
     getDocs: vi.fn(async (queryRef: { _path: string }) => _buildSnap(queryRef._path)),
 
     query  : vi.fn((colRef: { _path: string }, ...constraints: unknown[]) => ({
@@ -139,14 +163,20 @@ vi.mock("firebase/firestore", async () => {
     orderBy: vi.fn(() => ({})),
 
     onSnapshot: vi.fn((queryRef: { _path: string }, cb: (snap: unknown) => void) => {
-      const path = queryRef._path;
+      const path    = queryRef._path;
       if (!_snapListeners.has(path)) _snapListeners.set(path, []);
       _snapListeners.get(path)!.push(cb);
-      setTimeout(() => cb(_buildSnap(path)), 0);
+      // Per-listener seenIds — tracks which doc IDs this specific listener has already seen.
+      // Critical for correct docChanges(): a new listener seeing existing docs gets "added",
+      // not "modified", even if other listeners have already seen those docs.
+      const seenIds = new Set<string>();
+      _listenerSeenIds.set(cb, seenIds);
+      setTimeout(() => cb(_buildSnap(path, seenIds)), 0);
       return () => {
         const list = _snapListeners.get(path) ?? [];
         const i    = list.indexOf(cb);
         if (i !== -1) list.splice(i, 1);
+        _listenerSeenIds.delete(cb);
       };
     }),
 
@@ -163,5 +193,6 @@ beforeEach(() => {
   _authListeners.length = 0;
   _store.clear();
   _snapListeners.clear();
+  _listenerSeenIds.clear();
   (globalThis as Record<string, unknown>).indexedDB = new IDBFactory();
 });

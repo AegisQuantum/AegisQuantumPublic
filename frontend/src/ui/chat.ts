@@ -6,20 +6,50 @@
 import '../styles/chat.css';
 
 import { signOut }                          from '../services/auth';
+import { openFingerprintModal, closeFingerprintModal } from './fingerprint';
 import {
   subscribeToConversations,
   subscribeToMessages,
   sendMessage,
+  sendFile,
   getOrCreateConversation,
+  onConvPreviewUpdate,
 }                                           from '../services/messaging';
-import { showSafetyNumbers }                from './fingerprint';
+import {
+  subscribeToTyping,
+  markAllRead,
+  createTypingDebouncer,
+}                                           from '../services/presence';
+import {
+  exportBackup,
+  type BackupConversation,
+  type BackupPayload,
+}                                           from '../services/backup';
 import type { Conversation, DecryptedMessage } from '../types/message';
 
 let _unsubConvs:        (() => void) | null = null;
 let _unsubMessages:     (() => void) | null = null;
+let _unsubTyping:       (() => void) | null = null;
+let _unsubPreview:      (() => void) | null = null; // listener preview local
 let _currentConvId:     string | null       = null;
 let _currentContactUid: string | null       = null;
 let _myUid:             string              = '';
+
+// Cache local des conversations — mis à jour par subscribeToConversations ET
+// par onConvPreviewUpdate (preview locale sans snapshot Firestore).
+let _localConvs: import('../types/message').Conversation[] = [];
+
+// Debouncer typing — créé à chaque ouverture de conversation, détruit à la fermeture
+let _typingDebouncer: ReturnType<typeof createTypingDebouncer> | null = null;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache global des messages déchiffrés (pour la recherche + backup)
+// Clé : convId  —  Valeur : derniers DecryptedMessage[] reçus du subscriber
+// ─────────────────────────────────────────────────────────────────────────────
+const _allDecryptedMessages = new Map<string, DecryptedMessage[]>();
+
+// État de la recherche dans les messages
+let _msgSearchQuery = '';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LocalStorage — noms locaux des conversations + avatar
@@ -101,11 +131,22 @@ export async function initChat(uid: string): Promise<void> {
   document.getElementById('btn-signout')?.addEventListener('click', handleSignOut);
   document.getElementById('btn-signout-settings')?.addEventListener('click', handleSignOut);
 
-  // ── Envoi ──
+  // ── Envoi + typing ──
   document.getElementById('btn-send')?.addEventListener('click', handleSendMessage);
   const msgInput = document.getElementById('message-input') as HTMLTextAreaElement | null;
   msgInput?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); }
+  });
+  msgInput?.addEventListener('input',  () => _typingDebouncer?.onInput());
+  msgInput?.addEventListener('blur',   () => _typingDebouncer?.onBlur());
+
+  // ── Envoi fichier ──
+  const fileInput = document.getElementById('file-input') as HTMLInputElement | null;
+  fileInput?.addEventListener('change', async (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file || !_currentContactUid) return;
+    (e.target as HTMLInputElement).value = '';
+    await handleSendFile(file);
   });
 
   // ── Navigation settings ──
@@ -115,7 +156,6 @@ export async function initChat(uid: string): Promise<void> {
   });
   document.getElementById('btn-profile-settings')?.addEventListener('click', () => {
     closeProfileDropdown();
-    // toggle aussi depuis le dropdown
     const isSettings = document.getElementById('view-settings')?.style.display !== 'none';
     switchView(isSettings ? 'chat' : 'settings');
   });
@@ -138,7 +178,6 @@ export async function initChat(uid: string): Promise<void> {
   document.getElementById('avatar-modal-cancel')?.addEventListener('click', () => { _pendingPhoto = undefined; closeAvatarModal(); });
   document.getElementById('avatar-modal-confirm')?.addEventListener('click', confirmAvatarChange);
 
-  // Input file — photo
   document.getElementById('avatar-photo-input')?.addEventListener('change', (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
@@ -159,7 +198,6 @@ export async function initChat(uid: string): Promise<void> {
     reader.readAsDataURL(file);
   });
 
-  // Supprimer photo
   document.getElementById('btn-remove-photo')?.addEventListener('click', () => {
     _pendingPhoto = null;
     const preview = document.getElementById('avatar-modal-preview') as HTMLElement | null;
@@ -173,17 +211,61 @@ export async function initChat(uid: string): Promise<void> {
     if (btnRemove) btnRemove.style.display = 'none';
   });
 
-  // Sélecteur de couleurs
   document.querySelectorAll<HTMLElement>('.avatar-color-swatch').forEach((swatch) => {
     swatch.addEventListener('click', () => {
       document.querySelectorAll('.avatar-color-swatch').forEach(s => s.classList.remove('selected'));
       swatch.classList.add('selected');
       const preview = document.getElementById('avatar-modal-preview') as HTMLElement | null;
-      // Ne changer la couleur du preview que s'il n'y a pas de photo en attente
       if (preview && !_pendingPhoto && !getAvatarPhoto()) {
         preview.style.background = swatch.dataset.color ?? '#6b8ff5';
       }
     });
+  });
+
+  // ── Recherche dans les messages ──
+  document.getElementById('btn-msg-search-toggle')?.addEventListener('click', toggleMsgSearch);
+  document.getElementById('msg-search-input')?.addEventListener('input', (e) => {
+    const q = (e.target as HTMLInputElement).value;
+    const clearBtn = document.getElementById('msg-search-clear');
+    if (clearBtn) clearBtn.style.display = q ? '' : 'none';
+    applyMsgSearch(q);
+  });
+  document.getElementById('msg-search-clear')?.addEventListener('click', () => {
+    const input = document.getElementById('msg-search-input') as HTMLInputElement | null;
+    if (input) input.value = '';
+    const clearBtn = document.getElementById('msg-search-clear');
+    if (clearBtn) clearBtn.style.display = 'none';
+    applyMsgSearch('');
+    input?.focus();
+  });
+  document.getElementById('msg-search-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeMsgSearch();
+  });
+
+  // ── Export Backup ──
+  document.getElementById('btn-export-backup')?.addEventListener('click', openBackupExportModal);
+  document.getElementById('backup-export-close')?.addEventListener('click', closeBackupExportModal);
+  document.getElementById('backup-export-cancel')?.addEventListener('click', closeBackupExportModal);
+  document.getElementById('backup-export-confirm')?.addEventListener('click', confirmBackupExport);
+  document.getElementById('backup-export-password')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') confirmBackupExport();
+    if (e.key === 'Escape') closeBackupExportModal();
+  });
+  document.getElementById('backup-export-modal')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'backup-export-modal') closeBackupExportModal();
+  });
+
+  // ── Safety Numbers ──
+  document.getElementById('btn-fingerprint')?.addEventListener('click', () => {
+    if (_currentContactUid) {
+      openFingerprintModal(_myUid, _currentContactUid);
+    } else {
+      showToast('Ouvrez une conversation pour voir les Safety Numbers.');
+    }
+  });
+  document.getElementById('modal-close-btn')?.addEventListener('click', closeFingerprintModal);
+  document.getElementById('fingerprint-modal')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'fingerprint-modal') closeFingerprintModal();
   });
 
   // ── Modal nouvelle conversation ──
@@ -196,7 +278,7 @@ export async function initChat(uid: string): Promise<void> {
     if (e.key === 'Escape') closeNewConvModal();
   });
 
-  // ── Renommer conversation (double-clic sur nom dans topbar) ──
+  // ── Renommer conversation ──
   document.getElementById('chat-contact-name')?.addEventListener('dblclick', () => {
     if (_currentConvId) openRenameModal(_currentConvId);
   });
@@ -216,7 +298,7 @@ export async function initChat(uid: string): Promise<void> {
   document.getElementById('btn-copy-uid')?.addEventListener('click', copyUid);
   document.getElementById('btn-copy-uid-settings')?.addEventListener('click', copyUid);
 
-  // ── Recherche ──
+  // ── Recherche sidebar (conversations) ──
   document.getElementById('search-input')?.addEventListener('input', (e) => {
     const q = (e.target as HTMLInputElement).value.toLowerCase();
     document.querySelectorAll<HTMLElement>('.contact-item').forEach((el) => {
@@ -225,17 +307,21 @@ export async function initChat(uid: string): Promise<void> {
     });
   });
 
-  // ── Safety Numbers ──
-  document.getElementById('btn-fingerprint')?.addEventListener('click', () => {
-    if (_currentConvId && _currentContactUid) {
-      showSafetyNumbers(_myUid, _currentContactUid);
-    } else {
-      showToast('Ouvrez une conversation pour voir les Safety Numbers.');
-    }
+  // ── S'abonner aux conversations ──
+  _unsubConvs = subscribeToConversations(uid, (convs) => {
+    _localConvs = convs;
+    renderConversationList(convs);
   });
 
-  // ── S'abonner aux conversations ──
-  _unsubConvs = subscribeToConversations(uid, renderConversationList);
+  // ── Mise à jour locale de la preview quand ON envoie un message ──
+  _unsubPreview?.();
+  _unsubPreview = onConvPreviewUpdate((convId, preview, ts) => {
+    _localConvs = _localConvs.map(c =>
+      c.id === convId ? { ...c, lastMessagePreview: preview, lastMessageAt: ts } : c
+    );
+    _localConvs = [..._localConvs].sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
+    renderConversationList(_localConvs);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -247,12 +333,10 @@ function refreshAvatar(): void {
   const color    = getAvatarColor();
   const photo    = getAvatarPhoto();
 
-  // Topnav avatar
   const topnavAvatar = document.getElementById('topnav-avatar');
   if (topnavAvatar) {
     const textNode = Array.from(topnavAvatar.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
     if (photo) {
-      // Photo : cacher le texte, appliquer l'image en background
       if (textNode) (textNode as Text).textContent = '';
       (topnavAvatar as HTMLElement).style.cssText +=
         `;background-image:url('${photo}');background-size:cover;background-position:center;background-color:transparent`;
@@ -263,7 +347,6 @@ function refreshAvatar(): void {
     }
   }
 
-  // Avatar dans les settings
   const settingsAvatar = document.getElementById('settings-avatar-preview');
   if (settingsAvatar) {
     if (photo) {
@@ -287,7 +370,6 @@ function openAvatarModal(): void {
 
   if (modal) modal.style.display = 'flex';
 
-  // Preview : photo ou initiales
   if (preview) {
     if (curPhoto) {
       preview.textContent = '';
@@ -303,16 +385,13 @@ function openAvatarModal(): void {
   }
   if (input) input.value = getAvatarInitials();
 
-  // Marquer la couleur active
   document.querySelectorAll<HTMLElement>('.avatar-color-swatch').forEach((s) => {
     s.classList.toggle('selected', s.dataset.color === curColor);
   });
 
-  // Mise à jour live du preview via l'input initiales
   input?.removeEventListener('input', _onInitialsInput);
   input?.addEventListener('input', _onInitialsInput);
 
-  // Bouton supprimer photo (si photo existe)
   const btnRemovePhoto = document.getElementById('btn-remove-photo');
   if (btnRemovePhoto) btnRemovePhoto.style.display = curPhoto ? '' : 'none';
 
@@ -330,8 +409,7 @@ function closeAvatarModal(): void {
   if (modal) modal.style.display = 'none';
 }
 
-// Photo en attente de sauvegarde (chargée dans la modale)
-let _pendingPhoto: string | null | undefined = undefined; // undefined = pas changé
+let _pendingPhoto: string | null | undefined = undefined;
 
 function confirmAvatarChange(): void {
   const input    = document.getElementById('avatar-initials-input') as HTMLInputElement | null;
@@ -340,7 +418,7 @@ function confirmAvatarChange(): void {
 
   if (input?.value.trim()) setAvatarInitials(input.value);
   setAvatarColor(color);
-  if (_pendingPhoto !== undefined) setAvatarPhoto(_pendingPhoto); // null = supprimer
+  if (_pendingPhoto !== undefined) setAvatarPhoto(_pendingPhoto);
   _pendingPhoto = undefined;
   refreshAvatar();
   closeAvatarModal();
@@ -373,11 +451,9 @@ function confirmRename(): void {
   const name  = input?.value.trim() ?? '';
   setLocalConvName(_currentConvId, name);
 
-  // Mettre à jour le nom dans la topbar
   const nameEl = document.getElementById('chat-contact-name');
   if (nameEl) nameEl.textContent = name || (_currentContactUid?.slice(0, 24) ?? '—');
 
-  // Mettre à jour dans la sidebar sans reload complet
   const item = document.querySelector<HTMLElement>(`.contact-item[data-conv-id="${_currentConvId}"] .contact-name`);
   if (item) item.textContent = name || (_currentContactUid?.slice(0, 20) ?? '—');
 
@@ -424,7 +500,7 @@ function switchView(view: 'chat' | 'settings'): void {
     if (viewChat)     viewChat.style.display     = 'none';
     if (viewSettings) viewSettings.style.display = '';
     btnSettings?.classList.add('active');
-    refreshAvatar(); // synchroniser l'aperçu avatar dans settings
+    refreshAvatar();
   }
 }
 
@@ -601,11 +677,10 @@ function clearCryptoBox(): void {
 let _cryptoClearTimer: ReturnType<typeof setTimeout> | null = null;
 let _cryptoStepTimers: ReturnType<typeof setTimeout>[]     = [];
 
-function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCEPTION'): void {
+function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCEPTION' | 'ENVOI FICHIER'): void {
   const container = document.getElementById('crypto-steps');
   if (!container) return;
 
-  // Annuler tous les setTimeout pendants du run précédent
   _cryptoStepTimers.forEach(t => clearTimeout(t));
   _cryptoStepTimers = [];
   if (_cryptoClearTimer) { clearTimeout(_cryptoClearTimer); _cryptoClearTimer = null; }
@@ -631,7 +706,6 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
       const el = document.createElement('div');
       el.className = `crypto-step-wrap`;
 
-      // Ligne principale (toujours visible)
       const row = document.createElement('div');
       row.className = `crypto-step${step.type === 'done' ? ' done-step' : ''}${ex ? ' clickable' : ''}`;
       row.innerHTML = `
@@ -648,7 +722,6 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
 
       el.appendChild(row);
 
-      // Panneau dépliable
       if (ex) {
         const panel = document.createElement('div');
         panel.className = 'crypto-step-panel';
@@ -674,7 +747,6 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
           const isOpen = el.classList.toggle('open');
           const chevron = row.querySelector('.chevron-svg') as SVGElement | null;
           if (chevron) chevron.style.transform = isOpen ? 'rotate(180deg)' : '';
-          // Annuler le timer de nettoyage pendant qu'un panneau est ouvert
           if (isOpen && _cryptoClearTimer) {
             clearTimeout(_cryptoClearTimer);
             _cryptoClearTimer = null;
@@ -684,7 +756,7 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
       }
 
       container.appendChild(el);
-      stepEls[i] = row; // garder ref sur la row pour l'icône active
+      stepEls[i] = row;
       container.scrollTop = container.scrollHeight;
     }, step.delay);
     _cryptoStepTimers.push(t);
@@ -694,7 +766,7 @@ function showCryptoSteps(stepsData: CryptoStepDef[], direction: 'ENVOI' | 'RÉCE
   setTimeout(() => setCryptoStatus('idle'), lastDelay + 600);
 
   _cryptoClearTimer = setTimeout(() => {
-    if (container.querySelector('.crypto-step-wrap.open')) return; // panneau ouvert
+    if (container.querySelector('.crypto-step-wrap.open')) return;
     clearCryptoBox();
   }, lastDelay + 10_000);
 }
@@ -707,50 +779,100 @@ function renderConversationList(convs: Conversation[]): void {
   const list = document.getElementById('contacts-list');
   if (!list) return;
 
-  list.innerHTML = '<div class="contacts-section-label">Conversations</div>';
-
   if (convs.length === 0) {
-    list.innerHTML += '<div class="contacts-empty">Aucune conversation.<br/>Appuyez sur <strong>+</strong> pour commencer.</div>';
+    list.innerHTML =
+      '<div class="contacts-section-label">Conversations</div>' +
+      '<div class="contacts-empty">Aucune conversation.<br/>Appuyez sur <strong>+</strong> pour commencer.</div>';
     return;
   }
 
+  if (!list.querySelector('.contacts-section-label')) {
+    const lbl = document.createElement('div');
+    lbl.className   = 'contacts-section-label';
+    lbl.textContent = 'Conversations';
+    list.prepend(lbl);
+  }
+
+  const existingItems = new Map<string, HTMLElement>();
+  list.querySelectorAll<HTMLElement>('.contact-item').forEach(el => {
+    if (el.dataset.convId) existingItems.set(el.dataset.convId, el);
+  });
+
+  const newConvIds = new Set(convs.map(c => c.id));
+  existingItems.forEach((el, convId) => {
+    if (!newConvIds.has(convId)) el.remove();
+  });
+
+  const label = list.querySelector('.contacts-section-label')!;
+  let insertAfter: Element = label;
+
   for (const conv of convs) {
-    const contactUid  = conv.participants.find((p) => p !== _myUid) ?? conv.participants[0];
-    const isActive    = conv.id === _currentConvId;
+    const contactUid  = conv.participants.find(p => p !== _myUid) ?? conv.participants[0];
     const displayName = getLocalConvName(conv.id) ?? contactUid.slice(0, 20);
     const preview     = conv.lastMessagePreview ?? '🔒 Chiffré';
     const timeStr     = conv.lastMessageAt
       ? new Date(conv.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : '';
 
-    const item = document.createElement('div');
-    item.className          = `contact-item${isActive ? ' active' : ''}`;
-    item.dataset.convId     = conv.id;
-    item.dataset.contactUid = contactUid;
-    item.innerHTML = `
-      <div class="contact-avatar">${displayName.slice(0, 2).toUpperCase()}</div>
-      <div class="contact-body">
-        <div class="contact-row">
-          <span class="contact-name">${escapeHtml(displayName)}</span>
-          <span class="contact-time">${timeStr}</span>
-        </div>
-        <div class="contact-preview">${escapeHtml(preview)}</div>
-      </div>`;
-    item.addEventListener('click', () => openConversation(conv.id, contactUid));
-    list.appendChild(item);
+    let item = existingItems.get(conv.id);
+
+    if (!item) {
+      item = document.createElement('div');
+      item.className           = 'contact-item';
+      item.dataset.convId      = conv.id;
+      item.dataset.contactUid  = contactUid;
+
+      const avatarEl  = document.createElement('div');
+      avatarEl.className   = 'contact-avatar';
+      avatarEl.textContent = displayName.slice(0, 2).toUpperCase();
+
+      const bodyEl    = document.createElement('div');
+      bodyEl.className = 'contact-body';
+
+      const rowEl     = document.createElement('div');
+      rowEl.className = 'contact-row';
+
+      const nameEl    = document.createElement('span');
+      nameEl.className   = 'contact-name';
+      nameEl.textContent = displayName;
+
+      const timeEl    = document.createElement('span');
+      timeEl.className   = 'contact-time';
+      timeEl.textContent = timeStr;
+
+      const previewEl = document.createElement('div');
+      previewEl.className   = 'contact-preview';
+      previewEl.textContent = preview;
+
+      rowEl.append(nameEl, timeEl);
+      bodyEl.append(rowEl, previewEl);
+      item.append(avatarEl, bodyEl);
+
+      item.addEventListener('click', () => openConversation(conv.id, contactUid));
+      existingItems.set(conv.id, item);
+    } else {
+      const nameEl    = item.querySelector<HTMLElement>('.contact-name');
+      const timeEl    = item.querySelector<HTMLElement>('.contact-time');
+      const previewEl = item.querySelector<HTMLElement>('.contact-preview');
+      const avatarEl  = item.querySelector<HTMLElement>('.contact-avatar');
+
+      if (nameEl    && nameEl.textContent    !== displayName)  nameEl.textContent    = displayName;
+      if (timeEl    && timeEl.textContent    !== timeStr)      timeEl.textContent    = timeStr;
+      if (previewEl && previewEl.textContent !== preview)      previewEl.textContent = preview;
+      if (avatarEl) avatarEl.textContent = displayName.slice(0, 2).toUpperCase();
+    }
+
+    item.classList.toggle('active', conv.id === _currentConvId);
+
+    if (insertAfter.nextSibling !== item) {
+      insertAfter.insertAdjacentElement('afterend', item);
+    }
+    insertAfter = item;
   }
 
-  // Après chaque re-render de la liste (ex: suite à un envoi Firestore),
-  // réappliquer l'état actif si une conv est ouverte — sans toucher aux messages.
   if (_currentConvId) {
-    const emptyState = document.getElementById('chat-empty');
-    const convView   = document.getElementById('conversation-view');
-    if (emptyState) { emptyState.style.display = 'none'; emptyState.classList.add('hidden'); }
-    if (convView)   { convView.classList.remove('hidden'); convView.style.display = 'contents'; }
-    // Re-marquer l'item actif dans la nouvelle liste
-    document.querySelectorAll<HTMLElement>('.contact-item').forEach((el) => {
-      el.classList.toggle('active', el.dataset.convId === _currentConvId);
-    });
+    document.getElementById('chat-empty')?.classList.add('hidden');
+    document.getElementById('conversation-view')?.classList.remove('hidden');
   }
 }
 
@@ -760,12 +882,17 @@ function renderConversationList(convs: Conversation[]): void {
 
 function openConversation(convId: string, contactUid: string): void {
   if (_unsubMessages) { _unsubMessages(); _unsubMessages = null; }
+  if (_unsubTyping)   { _unsubTyping();   _unsubTyping   = null; }
+  _typingDebouncer?.destroy();
+  _typingDebouncer = null;
 
   _currentConvId     = convId;
   _currentContactUid = contactUid;
 
-  // Toujours revenir à la vue chat si on était dans les settings
   switchView('chat');
+
+  // Fermer la recherche si on change de conversation
+  closeMsgSearch();
 
   const emptyState    = document.getElementById('chat-empty');
   const convView      = document.getElementById('conversation-view');
@@ -780,7 +907,6 @@ function openConversation(convId: string, contactUid: string): void {
   if (contactNameEl) contactNameEl.textContent = displayName;
   if (topbarAvatar)  topbarAvatar.textContent  = displayName.slice(0, 2).toUpperCase();
 
-  // Vider le DOM et l'état de rendu pour la nouvelle conversation
   const msgContainer = document.getElementById('messages-container');
   if (msgContainer) msgContainer.innerHTML = '';
   _renderedMsgIds = new Set();
@@ -789,49 +915,141 @@ function openConversation(convId: string, contactUid: string): void {
     el.classList.toggle('active', (el as HTMLElement).dataset.convId === convId);
   });
 
-  _unsubMessages = subscribeToMessages(_myUid, convId, renderMessages);
+  _typingDebouncer = createTypingDebouncer(convId, _myUid);
+  _unsubTyping     = subscribeToTyping(convId, _myUid, renderTypingIndicator);
+  _unsubMessages   = subscribeToMessages(_myUid, convId, renderMessages);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Typing indicator
+// ─────────────────────────────────────────────────────────────────────────────
+
+function renderTypingIndicator(typingUids: string[]): void {
+  const el    = document.getElementById('typing-indicator');
+  const label = document.getElementById('typing-label');
+  if (!el || !label) return;
+  if (typingUids.length === 0) {
+    el.classList.remove('visible');
+    label.textContent = '';
+    return;
+  }
+  const name = typingUids[0].slice(0, 16);
+  label.textContent = typingUids.length === 1
+    ? `${name} écrit…`
+    : `${typingUids.length} personnes écrivent…`;
+  el.classList.add('visible');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rendu des messages
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Set des IDs de messages déjà rendus pour la conversation courante.
-// Utiliser un Set d'IDs (plutôt qu'un compteur) rend le rendu idempotent :
-// peu importe combien de fois Firestore re-déclenche le snapshot (envoi propre,
-// mise à jour lastMessage, etc.), on n'affiche jamais deux fois le même message.
 let _renderedMsgIds = new Set<string>();
 
 function renderMessages(messages: DecryptedMessage[]): void {
   const container = document.getElementById('messages-container');
   if (!container) return;
 
-  // Filtrer uniquement les messages pas encore dans le DOM
+  // Mettre à jour le cache global pour la recherche + backup
+  if (_currentConvId) _allDecryptedMessages.set(_currentConvId, messages);
+
   const newMessages     = messages.filter(m => !_renderedMsgIds.has(m.id));
   const hasNewFromOther = newMessages.some(m => m.senderUid !== _myUid);
+
+  for (const msg of messages) {
+    if (!_renderedMsgIds.has(msg.id)) continue;
+    if (msg.senderUid === _myUid) _updateReadReceipt(msg.id, msg.readBy ?? []);
+    const bubble = container.querySelector<HTMLElement>(`.message-bubble[data-msg-id="${msg.id}"]`);
+    if (bubble) {
+      const textEl = bubble.querySelector<HTMLElement>('.message-text');
+      if (textEl) {
+        const current = textEl.textContent ?? '';
+        const isPlaceholder = current.startsWith('[\uD83D\uDD12');
+        if (isPlaceholder && !msg.plaintext.startsWith('[\uD83D\uDD12')) {
+          textEl.textContent = msg.plaintext;
+          // Réappliquer la recherche si active
+          if (_msgSearchQuery) {
+            textEl.dataset.plaintext = msg.plaintext;
+            applyMsgSearch(_msgSearchQuery);
+          }
+          bubble.classList.remove('decryption-pending');
+        }
+      }
+    }
+  }
+
+  if (_currentConvId) {
+    markAllRead(_currentConvId, messages, _myUid).catch(() => {});
+  }
 
   if (newMessages.length === 0) return;
 
   for (const msg of newMessages) {
     const isMine = msg.senderUid === _myUid;
+    const isRead = isMine && (msg.readBy ?? []).includes(_currentContactUid ?? '');
     const bubble = document.createElement('div');
     bubble.className     = `message-bubble ${isMine ? 'mine' : 'theirs'}`;
     bubble.dataset.msgId = msg.id;
 
     const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    bubble.innerHTML = `
-      <div class="message-text-wrap">
-        <p class="message-text">${escapeHtml(msg.plaintext)}</p>
-      </div>
+    const metaHtml = `
       <div class="message-meta">
         <span class="message-time">${time}</span>
-        ${msg.verified ? '<span class="sig-ok">✓</span>' : '<span class="sig-pending">⦿</span>'}
+        ${isMine
+          ? `<span class="msg-status" data-msg-id="${msg.id}">
+               <span class="msg-check${isRead ? ' read' : ''}">✓</span>
+               <span class="msg-check${isRead ? ' read' : ''}">✓</span>
+             </span>`
+          : (msg.verified
+              ? '<span class="sig-ok" title="Signature vérifiée">✓</span>'
+              : '<span class="sig-pending" title="Non vérifiée">⦿</span>')
+        }
       </div>`;
+
+    if (msg.file) {
+      // ── Bulle fichier ──────────────────────────────────────────────────
+      const f       = msg.file;
+      const sizeStr = _fmtSize(f.size);
+
+      const fileDiv = document.createElement('div');
+      fileDiv.className = 'file-bubble';
+      fileDiv.title     = `Télécharger ${f.name}`;
+      fileDiv.innerHTML = `
+        <div class="file-bubble-icon">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16">
+            <path d="M4 4h8l4 4v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"/>
+            <path d="M12 4v4h4"/>
+          </svg>
+        </div>
+        <div class="file-bubble-info">
+          <span class="file-bubble-name">${escapeHtml(f.name)}</span>
+          <span class="file-bubble-meta">${sizeStr} · ${escapeHtml(f.type.split('/')[1] ?? f.type)}</span>
+        </div>
+        <div class="file-bubble-dl">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" width="12" height="12">
+            <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 12h10"/>
+          </svg>
+        </div>`;
+
+      fileDiv.addEventListener('click', () => _downloadBlob(f.blob, f.name));
+      bubble.appendChild(fileDiv);
+    } else {
+      // ── Bulle texte normale ──────────────────────────────────────────────
+      bubble.innerHTML = `
+        <div class="message-text-wrap">
+          <p class="message-text">${escapeHtml(msg.plaintext)}</p>
+        </div>`;
+    }
+
+    bubble.insertAdjacentHTML('beforeend', metaHtml);
     container.appendChild(bubble);
     _renderedMsgIds.add(msg.id);
   }
 
   container.scrollTop = container.scrollHeight;
+
+  // Réappliquer la recherche sur les nouveaux messages
+  if (_msgSearchQuery) applyMsgSearch(_msgSearchQuery);
 
   if (hasNewFromOther) {
     setCryptoStatus('active');
@@ -839,8 +1057,58 @@ function renderMessages(messages: DecryptedMessage[]): void {
   }
 }
 
+function _updateReadReceipt(msgId: string, readBy: string[]): void {
+  const isRead = readBy.includes(_currentContactUid ?? '');
+  document
+    .querySelectorAll<HTMLElement>(`[data-msg-id="${msgId}"] .msg-check`)
+    .forEach(el => el.classList.toggle('read', isRead));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Envoi d'un message — FIX : ne pas réinitialiser _currentConvId
+// Envoi de fichier
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function handleSendFile(file: File): Promise<void> {
+  if (!_currentConvId || !_currentContactUid) return;
+  const contactUid = _currentContactUid;
+
+  const attachBtn = document.getElementById('btn-attach');
+  attachBtn?.classList.add('uploading');
+  setCryptoStatus('sending');
+  showCryptoSteps(SEND_STEPS, 'ENVOI FICHIER');
+
+  try {
+    await sendFile(_myUid, contactUid, file);
+    showToast(`Fichier chiffré envoyé : ${file.name}`);
+  } catch (err) {
+    console.error('[AQ] sendFile failed:', err);
+    showToast(`Échec envoi : ${err instanceof Error ? err.message : String(err)}`);
+    clearCryptoBox();
+    setCryptoStatus('idle');
+  } finally {
+    attachBtn?.classList.remove('uploading');
+  }
+}
+
+function _downloadBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
+  const a   = document.createElement('a');
+  a.href     = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function _fmtSize(bytes: number): string {
+  if (bytes < 1024)        return `${bytes} o`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} Mo`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Envoi d'un message
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSendMessage(): Promise<void> {
@@ -852,12 +1120,13 @@ async function handleSendMessage(): Promise<void> {
   const text = input.value.trim();
   if (!text) return;
 
-  // Sauvegarder la conv courante AVANT l'await pour éviter tout reset
   const convId     = _currentConvId;
   const contactUid = _currentContactUid;
 
   input.value    = '';
   input.disabled = true;
+
+  _typingDebouncer?.onBlur();
 
   setCryptoStatus('sending');
   showCryptoSteps(SEND_STEPS, 'ENVOI');
@@ -873,7 +1142,6 @@ async function handleSendMessage(): Promise<void> {
   } finally {
     input.disabled = false;
     input.focus();
-    // Restaurer la conv courante si elle a changé pendant l'await (ne devrait pas arriver)
     if (_currentConvId !== convId) {
       _currentConvId     = convId;
       _currentContactUid = contactUid;
@@ -911,15 +1179,228 @@ async function confirmNewConv(): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Déconnexion — vider les IDs rendus
+// Déconnexion
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSignOut(): Promise<void> {
+  _typingDebouncer?.destroy();
+  _typingDebouncer = null;
   _unsubConvs?.();
   _unsubMessages?.();
+  _unsubTyping?.();
+  _unsubPreview?.();
+  _unsubTyping    = null;
+  _unsubPreview   = null;
   _currentConvId  = null;
+  _localConvs     = [];
   _renderedMsgIds  = new Set();
+  _allDecryptedMessages.clear();
+  closeMsgSearch();
   await signOut();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recherche dans les messages (client-side, zéro Firestore)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Ouvre / ferme la barre de recherche dans les messages. */
+function toggleMsgSearch(): void {
+  const wrap = document.getElementById('msg-search-wrap');
+  if (!wrap) return;
+  const isOpen = wrap.classList.contains('open');
+  if (isOpen) {
+    closeMsgSearch();
+  } else {
+    wrap.classList.add('open');
+    wrap.style.display = 'flex';
+    document.getElementById('btn-msg-search-toggle')?.classList.add('active');
+    setTimeout(() => (document.getElementById('msg-search-input') as HTMLInputElement | null)?.focus(), 60);
+  }
+}
+
+/** Ferme la barre de recherche et réinitialise l'affichage. */
+function closeMsgSearch(): void {
+  const wrap  = document.getElementById('msg-search-wrap');
+  const input = document.getElementById('msg-search-input') as HTMLInputElement | null;
+  if (wrap)  { wrap.classList.remove('open'); }
+  if (input) { input.value = ''; }
+  const clearBtn = document.getElementById('msg-search-clear');
+  if (clearBtn) clearBtn.style.display = 'none';
+  document.getElementById('btn-msg-search-toggle')?.classList.remove('active');
+  applyMsgSearch('');
+}
+
+/**
+ * Filtre les bulles dans le DOM selon la requête.
+ * - Ajoute la classe .searching sur le container (atténue les non-résultats)
+ * - Ajoute la classe .search-match sur les bulles correspondantes
+ * - Injecte un <mark class="msg-highlight"> autour de chaque occurrence
+ * - Affiche un compteur de résultats dans la barre de recherche
+ * - Scrolle jusqu'au premier résultat
+ */
+function applyMsgSearch(query: string): void {
+  _msgSearchQuery = query.trim();
+  const container = document.getElementById('messages-container');
+  if (!container) return;
+
+  const countEl = document.getElementById('msg-search-count') as HTMLElement | null;
+
+  if (!_msgSearchQuery) {
+    // Mode normal — tout afficher sans highlight
+    container.classList.remove('searching');
+    container.querySelectorAll<HTMLElement>('.message-bubble').forEach(bubble => {
+      bubble.classList.remove('search-match');
+      const textEl = bubble.querySelector<HTMLElement>('.message-text');
+      if (textEl && textEl.dataset.plaintext) {
+        textEl.textContent = textEl.dataset.plaintext;
+      }
+    });
+    if (countEl) countEl.remove();
+    return;
+  }
+
+  const q = _msgSearchQuery.toLowerCase();
+  let matchCount = 0;
+  let firstMatchEl: HTMLElement | null = null;
+
+  container.classList.add('searching');
+  container.querySelectorAll<HTMLElement>('.message-bubble').forEach(bubble => {
+    const textEl = bubble.querySelector<HTMLElement>('.message-text');
+    if (!textEl) return;
+
+    // Conserver le texte brut au premier passage
+    if (!textEl.dataset.plaintext) {
+      textEl.dataset.plaintext = textEl.textContent ?? '';
+    }
+    const raw = textEl.dataset.plaintext;
+
+    if (raw.toLowerCase().includes(q)) {
+      bubble.classList.add('search-match');
+      matchCount++;
+      if (!firstMatchEl) firstMatchEl = bubble;
+
+      // Injecter le highlight HTML — escaper le raw pour sécurité
+      const escaped = escapeHtml(raw);
+      const pattern = new RegExp(escapeRegex(escapeHtml(_msgSearchQuery)), 'gi');
+      textEl.innerHTML = escaped.replace(pattern, m => `<mark class="msg-highlight">${m}</mark>`);
+    } else {
+      bubble.classList.remove('search-match');
+      textEl.textContent = raw;
+    }
+  });
+
+  // Compteur de résultats dans la barre de recherche
+  let counter = document.getElementById('msg-search-count') as HTMLElement | null;
+  const wrap  = document.getElementById('msg-search-wrap');
+  if (!counter && wrap) {
+    counter = document.createElement('span');
+    counter.id        = 'msg-search-count';
+    counter.className = 'msg-search-count';
+    const clearBtn = document.getElementById('msg-search-clear');
+    if (clearBtn) wrap.insertBefore(counter, clearBtn);
+    else           wrap.appendChild(counter);
+  }
+  if (counter) {
+    counter.textContent = matchCount === 0
+      ? '0 résultat'
+      : matchCount === 1 ? '1 résultat' : `${matchCount} résultats`;
+    counter.style.color = matchCount === 0 ? 'var(--c-red)' : 'var(--c-muted)';
+  }
+
+  // Scroller jusqu'au premier résultat
+  if (firstMatchEl) {
+    (firstMatchEl as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+/** Escaper les caractères spéciaux d'une regex. */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Export Backup
+// ─────────────────────────────────────────────────────────────────────────────
+
+function openBackupExportModal(): void {
+  const modal = document.getElementById('backup-export-modal');
+  const input = document.getElementById('backup-export-password') as HTMLInputElement | null;
+  const prog  = document.getElementById('backup-progress');
+  if (modal) modal.style.display = 'flex';
+  if (prog)  prog.style.display  = 'none';
+  if (input) { input.value = ''; }
+  setTimeout(() => input?.focus(), 60);
+}
+
+function closeBackupExportModal(): void {
+  const modal = document.getElementById('backup-export-modal');
+  if (modal) modal.style.display = 'none';
+  const confirm = document.getElementById('backup-export-confirm') as HTMLButtonElement | null;
+  if (confirm) { confirm.disabled = false; }
+}
+
+async function confirmBackupExport(): Promise<void> {
+  const input    = document.getElementById('backup-export-password') as HTMLInputElement | null;
+  const password = input?.value.trim();
+  if (!password) { showToast('Mot de passe requis.'); input?.focus(); return; }
+
+  const confirmBtn = document.getElementById('backup-export-confirm') as HTMLButtonElement | null;
+  const prog       = document.getElementById('backup-progress');
+  const fill       = document.getElementById('backup-progress-fill') as HTMLElement | null;
+  const label      = document.getElementById('backup-progress-label') as HTMLElement | null;
+
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (prog)  prog.style.display  = 'flex';
+
+  const setProgress = (pct: number, text: string) => {
+    if (fill)  fill.style.width  = `${pct}%`;
+    if (label) label.textContent = text;
+  };
+
+  try {
+    // Collecter toutes les conversations chargées en mémoire
+    const convs: BackupConversation[] = [];
+    for (const [convId, msgs] of _allDecryptedMessages.entries()) {
+      const conv = _localConvs.find(c => c.id === convId);
+      convs.push({
+        convId,
+        localName   : getLocalConvName(convId),
+        participants: conv?.participants ?? [],
+        // Exclure les messages non déchiffrés (placeholders)
+        messages    : msgs.filter(m => !m.plaintext.startsWith('[\uD83D\uDD12')),
+      });
+    }
+
+    if (convs.length === 0 || convs.every(c => c.messages.length === 0)) {
+      showToast("Aucun message déchiffré à exporter. Ouvrez vos conversations d'abord.");
+      if (confirmBtn) confirmBtn.disabled = false;
+      if (prog) prog.style.display = 'none';
+      return;
+    }
+
+    const payload: BackupPayload = {
+      version      : 1,
+      exportedAt   : Date.now(),
+      uid          : _myUid,
+      conversations: convs,
+    };
+
+    const totalMessages = convs.reduce((n, c) => n + c.messages.length, 0);
+
+    await exportBackup(payload, password, (phase) => {
+      if (phase === 'deriving')    setProgress(20, 'Dérivation Argon2id… (quelques secondes)');
+      if (phase === 'encrypting')  setProgress(70, `Chiffrement AES-256-GCM de ${totalMessages} messages…`);
+      if (phase === 'downloading') setProgress(100, 'Téléchargement…');
+    });
+
+    closeBackupExportModal();
+    showToast(`Sauvegarde exportée — ${totalMessages} messages, ${convs.length} conversation(s).`);
+  } catch (err) {
+    console.error('[AQ] Backup export failed:', err);
+    showToast(`Export échoué : ${err instanceof Error ? err.message : String(err)}`);
+    if (confirmBtn) { confirmBtn.disabled = false; }
+    setProgress(0, '');
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

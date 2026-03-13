@@ -142,6 +142,23 @@
             </div>
           </div>
           <div class="topbar-actions">
+            <!-- Barre de recherche dans les messages (filtre client-side sur DecryptedMessage[]) -->
+            <div class="msg-search-wrap" id="msg-search-wrap">
+              <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="12" height="12">
+                <circle cx="5.5" cy="5.5" r="3.5"/><path d="m8.5 8.5 2.5 2.5"/>
+              </svg>
+              <input type="text" id="msg-search-input" class="msg-search-input" placeholder="Rechercher dans la conversation…" autocomplete="off" spellcheck="false"/>
+              <button class="msg-search-clear" id="msg-search-clear" title="Effacer" style="display:none">
+                <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" width="10" height="10">
+                  <path d="M2 2l8 8M10 2 2 10"/>
+                </svg>
+              </button>
+            </div>
+            <button class="btn-topbar" id="btn-msg-search-toggle" title="Rechercher dans les messages">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13">
+                <circle cx="6.5" cy="6.5" r="4"/><path d="m10 10 3 3"/>
+              </svg>
+            </button>
             <button class="btn-topbar" id="btn-rename-conv" title="Renommer cette conversation">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="11" height="11">
                 <path d="M11 2.5a1.5 1.5 0 0 1 2.5 1.5L5 12.5 2 13.5l1-3L11 2.5Z"/>
@@ -152,7 +169,24 @@
           </div>
         </div>
         <div class="messages-container" id="messages-container"></div>
+
+        <!-- Typing indicator — visible quand le contact écrit -->
+        <div class="typing-indicator" id="typing-indicator" aria-live="polite">
+          <div class="typing-dots">
+            <span class="typing-dot"></span>
+            <span class="typing-dot"></span>
+            <span class="typing-dot"></span>
+          </div>
+          <span id="typing-label"></span>
+        </div>
+
         <div class="input-bar">
+          <label class="btn-attach" id="btn-attach" title="Envoyer un fichier chiffré" for="file-input">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" width="14" height="14">
+              <path d="M16.5 9.5 9 17a5 5 0 0 1-7-7l8-8a3.3 3.3 0 0 1 4.7 4.7L7 14.2a1.7 1.7 0 0 1-2.4-2.4L11 5"/>
+            </svg>
+          </label>
+          <input type="file" id="file-input" style="display:none" />
           <textarea class="message-input" id="message-input" placeholder="Écrire un message chiffré…" rows="1"></textarea>
           <button class="btn-send" id="btn-send" title="Envoyer">
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" width="15" height="15">
@@ -239,10 +273,10 @@
           </div>
           <div class="settings-row">
             <div class="settings-row-left">
-              <span class="settings-row-label">Double Ratchet</span>
-              <span class="settings-row-desc">Forward secrecy — clés éphémères par message</span>
+              <span class="settings-row-label">Double Ratchet (ML-KEM-768)</span>
+              <span class="settings-row-desc">Forward secrecy — clé éphémère KEM + ratchet symétrique par message</span>
             </div>
-            <span class="settings-badge badge-amber">À venir</span>
+            <span class="settings-badge badge-green">Actif</span>
           </div>
         </div>
       </div>
@@ -263,6 +297,25 @@
               <span class="settings-row-desc">Aucun email ni nom réel stocké</span>
             </div>
             <span class="settings-badge badge-green">Anonyme</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sauvegarde chiffrée -->
+      <div class="settings-section">
+        <div class="settings-section-title">Sauvegarde &amp; Export</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-row-left">
+              <span class="settings-row-label">Exporter les messages</span>
+              <span class="settings-row-desc">Chiffré AES-256-GCM · Argon2id · fichier .aqbackup</span>
+            </div>
+            <button class="btn-copy" id="btn-export-backup">
+              <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px">
+                <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/>
+              </svg>
+              Exporter
+            </button>
           </div>
         </div>
       </div>
@@ -377,5 +430,78 @@
       <button class="btn-modal-cancel" id="avatar-modal-cancel">Annuler</button>
       <button class="btn-modal-confirm" id="avatar-modal-confirm">Enregistrer</button>
     </div>
+  </div>
+</div>
+
+<!-- ══ MODAL — Export sauvegarde ══ -->
+<div class="modal-overlay" id="backup-export-modal" style="display:none">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Exporter les messages</span>
+      <button class="modal-close" id="backup-export-close">&times;</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="modal-label">Mot de passe de chiffrement</div>
+      <input type="password" class="modal-input" id="backup-export-password"
+        placeholder="Votre mot de passe AegisQuantum…"
+        autocomplete="current-password"/>
+      <div class="modal-hint">Le fichier sera chiffré avec AES-256-GCM. Vous aurez besoin de ce mot de passe pour déchiffrer l&apos;archive.</div>
+      <div class="backup-progress" id="backup-progress" style="display:none">
+        <div class="backup-progress-bar"><div class="backup-progress-fill" id="backup-progress-fill"></div></div>
+        <span class="backup-progress-label" id="backup-progress-label">Dérivation de la clé…</span>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" id="backup-export-cancel">Annuler</button>
+      <button class="btn-modal-confirm" id="backup-export-confirm">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px">
+          <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/>
+        </svg>
+        Télécharger .aqbackup
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MODAL — Safety Numbers (fingerprint) ══ -->
+<div class="fp-modal-overlay" id="fingerprint-modal" style="display:none" aria-hidden="true" role="dialog" aria-labelledby="fp-modal-title">
+  <div class="fp-modal-card">
+
+    <div class="fp-modal-header">
+      <span class="fp-modal-title" id="fp-modal-title">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13">
+          <rect x="3" y="7" width="10" height="8" rx="1.5"/>
+          <path d="M5 7V5a3 3 0 0 1 6 0v2"/>
+          <circle cx="8" cy="11" r="1"/>
+        </svg>
+        Safety Numbers
+      </span>
+      <button class="fp-modal-close" id="modal-close-btn" aria-label="Fermer">&times;</button>
+    </div>
+
+    <p class="fp-modal-desc">
+      Comparez ces nombres avec votre contact via un canal sûr (appel vocal, en personne).
+      S’ils correspondent, votre conversation n’a pas été interceptée.
+    </p>
+
+    <div class="fp-section">
+      <div class="fp-label">Empreinte de la conversation &mdash; ML-KEM-768 ‑ ML-DSA-65</div>
+      <div class="fp-grid" id="fp-own">
+        <div class="fp-loading">Chargement…</div>
+      </div>
+    </div>
+
+    <div class="fp-section">
+      <div class="fp-label">Votre contact voit les mêmes nombres</div>
+      <div class="fp-grid" id="fp-contact">
+        <div class="fp-loading">Chargement…</div>
+      </div>
+    </div>
+
+    <div class="fp-status unverified" id="fp-status">
+      <span class="fp-status-dot"></span>
+      Non vérifié &mdash; comparez hors de l’application
+    </div>
+
   </div>
 </div>

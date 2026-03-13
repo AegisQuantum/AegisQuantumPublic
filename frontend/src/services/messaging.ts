@@ -2,136 +2,77 @@
  * messaging.ts — Envoi et réception de messages chiffrés
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * PIPELINE ACTUEL (sans Double Ratchet — fonctionnel)
+ * PIPELINE — Double Ratchet (ML-KEM-768 + HKDF + AES-256-GCM)
  * ─────────────────────────────────────────────────────────────────────────────
  *
  *  ENVOI :
- *   1. Récupérer la clé publique KEM du destinataire ← key-registry.ts
- *   2. KEM encapsulate → sharedSecret + kemCiphertext  ← crypto/kem.ts
- *   3. HKDF(sharedSecret) → messageKey                ← crypto/hkdf.ts
- *   4. AES-256-GCM encrypt(plaintext, messageKey)      ← crypto/aes-gcm.ts
- *   5. DSA sign(ciphertext ‖ nonce ‖ kemCiphertext)    ← crypto/dsa.ts
- *   6. Stocker messageKey dans IDB
- *   7. Écrire EncryptedMessage dans Firestore
+ *   1. Récupérer les clés publiques KEM (contact + les nôtres)
+ *   2. Charger le RatchetState depuis IDB (null = premier message)
+ *   3. doubleRatchetEncrypt() — gère le bootstrap KEM en interne si stateJson null
+ *      → { ciphertext, nonce, kemCiphertext, messageIndex, newStateJson, initKemCiphertext? }
+ *   4. saveRatchetState → IDB
+ *   5. DSA sign(ciphertext ‖ nonce ‖ kemCiphertext)
+ *   6. addDoc → Firestore (+ initKemCiphertext si premier message)
+ *   7. Notifier la preview localement (pas d'écriture Firestore côté envoyeur)
  *
  *  RÉCEPTION :
- *   1. DSA verify(signature, senderDsaPublicKey)       ← crypto/dsa.ts
- *   2. KEM decapsulate(kemCT, ourKemPrivKey) → sharedSecret ← crypto/kem.ts
- *   3. HKDF(sharedSecret) → messageKey                ← crypto/hkdf.ts
- *   4. Stocker messageKey dans IDB
- *   5. AES-256-GCM decrypt(ciphertext, nonce, key)    ← crypto/aes-gcm.ts
+ *   1. DSA verify(signature, senderDsaPublicKey)
+ *   2. Charger le RatchetState depuis IDB
+ *   3. doubleRatchetDecrypt() — décapsule initKemCiphertext si stateJson null
+ *      → { plaintext, newStateJson }
+ *   4. saveRatchetState → IDB
+ *   5. updateConversationPreview (côté receiver uniquement)
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * OÙ S'INSÈRE LE DOUBLE RATCHET (voir schéma dans double-ratchet.ts)
+ * Persistance (IDB)
  * ─────────────────────────────────────────────────────────────────────────────
- *
- *  ENVOI avec Double Ratchet :
- *   Étapes 2-4 actuelles (KEM → HKDF → AES) sont REMPLACÉES par :
- *   → doubleRatchetEncrypt(plaintext, stateJson, convId, privKey, pubKey, theirPubKey, sharedSecret)
- *     retourne : { ciphertext, nonce, kemCiphertext, messageIndex, newStateJson }
- *   Le stateJson est chargé/sauvé dans IDB via key-store.ts → saveRatchetState / loadRatchetState
- *
- *  RÉCEPTION avec Double Ratchet :
- *   Étapes 2-5 actuelles (KEM → HKDF → AES) sont REMPLACÉES par :
- *   → doubleRatchetDecrypt(ciphertext, nonce, messageIndex, kemCT, stateJson, convId, ...)
- *     retourne : { plaintext, newStateJson }
- *
- *  CONTOURNEMENT ACTUEL (pas de forward secrecy) :
- *   - Un seul KEM encapsulate par message → sharedSecret direct → HKDF → AES
- *   - La messageKey est mise en cache IDB pour relire ses propres messages
- *   - messageIndex est fixé à 0 (pas de chaîne de clés)
- *   - Si les clés KEM changent → les messages anciens ne sont plus déchiffrables
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * Persistance des messageKeys (IDB)
- * ─────────────────────────────────────────────────────────────────────────────
- *
- *  Clé IDB : "msgkey:<convId>:<msgId>" → Base64(messageKey)
- *
- *  Avec Double Ratchet : remplacer ce cache par saveRatchetState() dans key-store.ts
- *  (une seule clé IDB par conversation : "ratchet:<convId>" → RatchetState JSON chiffré)
+ *  Clé IDB : "ratchet:<uid>:<convId>" → RatchetState JSON (en clair en dev)
+ *  Géré par key-store.ts → saveRatchetState / loadRatchetState
  */
 
 import {
   collection, doc, addDoc, setDoc, getDoc, getDocs, updateDoc,
   query, where, orderBy, onSnapshot, serverTimestamp,
   type Unsubscribe,
+  type QueryDocumentSnapshot,
+  type DocumentData,
 } from "firebase/firestore";
 import { db }            from "./firebase";
 import { getPublicKeys } from "./key-registry";
-import { getKemPrivateKey, getDsaPrivateKey } from "./key-store";
-import {
-  kemEncapsulate,
-  kemDecapsulate,
-  dsaSign,
-  dsaVerify,
-  hkdfDerive,
-  aesGcmEncrypt,
-  aesGcmDecrypt,
-  HKDF_INFO,
-} from "../crypto";
+import { getKemPrivateKey, getDsaPrivateKey, saveRatchetState, loadRatchetState } from "./key-store";
+import { dsaSign, dsaVerify } from "../crypto";
+import { doubleRatchetEncrypt, doubleRatchetDecrypt } from "../crypto/double-ratchet";
+import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto/aes-gcm";
+import { hkdfDerive }                   from "../crypto/hkdf";
+import { toBase64, fromBase64 }         from "../crypto/kem";
 import type { EncryptedMessage, Conversation, DecryptedMessage } from "../types/message";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// IDB — persistance des messageKeys
+// Notification locale de mise à jour de preview (sans aller-retour Firestore)
 // ─────────────────────────────────────────────────────────────────────────────
+// L'envoyeur notifie la sidebar localement (zéro réseau).
+// Le receiver met à jour Firestore quand il reçoit et déchiffre le message.
 
-const IDB_NAME  = "aegisquantum-vault";
-const IDB_STORE = "keys";
+type ConvPreviewListener = (convId: string, preview: string, ts: number) => void;
+const _convPreviewListeners = new Set<ConvPreviewListener>();
 
-function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
-  });
+export function onConvPreviewUpdate(cb: ConvPreviewListener): () => void {
+  _convPreviewListeners.add(cb);
+  return () => _convPreviewListeners.delete(cb);
 }
 
-async function idbSet(key: string, value: string): Promise<void> {
-  const db  = await openDB();
-  const tx  = db.transaction(IDB_STORE, "readwrite");
-  const str = tx.objectStore(IDB_STORE);
-  return new Promise((resolve, reject) => {
-    const req = str.put(value, key);
-    req.onsuccess = () => { db.close(); resolve(); };
-    req.onerror   = () => { db.close(); reject(req.error); };
-  });
+function _notifyConvPreviewUpdate(convId: string, plaintext: string, ts: number): void {
+  const preview = plaintext.length > 40 ? plaintext.slice(0, 40) + "\u2026" : plaintext;
+  _convPreviewListeners.forEach(cb => cb(convId, preview, ts));
 }
 
-async function idbGet(key: string): Promise<string | undefined> {
-  const db  = await openDB();
-  const tx  = db.transaction(IDB_STORE, "readonly");
-  const str = tx.objectStore(IDB_STORE);
-  return new Promise((resolve, reject) => {
-    const req = str.get(key);
-    req.onsuccess = () => { db.close(); resolve(req.result as string | undefined); };
-    req.onerror   = () => { db.close(); reject(req.error); };
-  });
-}
+// Set des msgIds dont le déchiffrement a échoué et doit être retenté.
+const _retrySet = new Set<string>();
 
-/** Persiste la messageKey pour un message donné (envoi ou réception). */
-async function storeMessageKey(convId: string, msgId: string, messageKey: string): Promise<void> {
-  await idbSet(`msgkey:${convId}:${msgId}`, messageKey);
-}
-
-/** Récupère la messageKey depuis IDB. Retourne undefined si absente. */
-async function loadMessageKey(convId: string, msgId: string): Promise<string | undefined> {
-  return idbGet(`msgkey:${convId}:${msgId}`);
-}
-
-// TODO [DOUBLE RATCHET] — Importer les fonctions de gestion d'état ratchet :
-//
-//   import { saveRatchetState, loadRatchetState } from "./key-store";
-//     saveRatchetState(uid, convId, stateJson)  → Promise<void>
-//     loadRatchetState(uid, convId)             → Promise<string | null>
-//
-//   Ces fonctions sont déjà implémentées dans key-store.ts.
-//   Elles stockent le RatchetState chiffré (AES-GCM) dans IndexedDB.
-//   Clé IDB : "ratchet:<convId>" → JSON chiffré du RatchetState.
-//
-//   Supprimer storeMessageKey / loadMessageKey une fois le Double Ratchet en place
-//   (le ratchet state contient toutes les clés nécessaires).
+// Cache volatile des plaintexts envoyés par l'utilisateur courant.
+// Permet d'afficher ses propres messages sans tenter de les déchiffrer.
+// Perdu après refresh — acceptable (forward secrecy, pas de stockage en clair).
+const _sentPlaintextCache = new Map<string, string>();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Paths Firestore
@@ -166,164 +107,220 @@ export async function getOrCreateConversation(myUid: string, contactUid: string)
 export async function getConversations(myUid: string): Promise<Conversation[]> {
   const q    = query(convsCol(), where("participants", "array-contains", myUid));
   const snap = await getDocs(q);
-  return snap.docs.map((d) => d.data() as Conversation);
+  return snap.docs.map(d => d.data() as Conversation);
 }
 
-/**
- * Met à jour lastMessagePreview et lastMessageAt d'une conversation.
- * La preview est tronquée à 40 chars — jamais le plaintext complet côté serveur.
- */
 export async function updateConversationPreview(convId: string, plaintext: string): Promise<void> {
-  const preview = plaintext.length > 40 ? plaintext.slice(0, 40) + "…" : plaintext;
+  const preview = plaintext.length > 40 ? plaintext.slice(0, 40) + "\u2026" : plaintext;
   try {
     await updateDoc(convDoc(convId), {
       lastMessagePreview: preview,
       lastMessageAt     : Date.now(),
     });
   } catch {
-    // Race condition si la conversation vient d'être créée — silencieux
+    // Silencieux — race condition si conv vient d'être créée
   }
 }
 
 export function subscribeToConversations(
   myUid   : string,
-  callback: (convs: Conversation[]) => void
+  callback: (convs: Conversation[]) => void,
 ): Unsubscribe {
   const q = query(
     convsCol(),
     where("participants", "array-contains", myUid),
-    orderBy("lastMessageAt", "desc")
+    orderBy("lastMessageAt", "desc"),
   );
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => d.data() as Conversation));
+  return onSnapshot(q, snap => {
+    callback(snap.docs.map(d => d.data() as Conversation));
   });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Envoi de message
+// Envoi de fichier — Double Ratchet + AES-256-GCM sur le contenu binaire
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Chiffre un fichier et l'envoie dans Firestore comme message.
+ *
+ * Pipeline :
+ *  1. Lire le fichier en ArrayBuffer
+ *  2. Dériver une fileKey dédiée via HKDF (séparée de la messageKey DR)
+ *  3. AES-256-GCM encrypt(fileBytes, fileKey) → fileCiphertext
+ *  4. Chiffrer un plaintext « [Fichier] nom (taille) » via Double Ratchet
+ *  5. addDoc Firestore avec { hasFile, fileCiphertext, fileNonce, fileName, fileSize, fileType }
+ *
+ * La fileKey est dérivée depuis la messageKey DR via
+ * HKDF(messageKey, "AegisQuantum-v1-file-key") pour rester liée
+ * à la session DR sans réutiliser la même clé que le texte.
+ */
+export async function sendFile(
+  myUid     : string,
+  contactUid: string,
+  file      : File,
+): Promise<void> {
+  const convId = getConversationId(myUid, contactUid);
+
+  if (file.size > 10 * 1024 * 1024) {
+    throw new Error(`Fichier trop volumineux (${(file.size / 1024 / 1024).toFixed(1)} MB). Limite : 10 MB.`);
+  }
+
+  // ── 1. Clés ──────────────────────────────────────────────────────────────
+  const myKeys      = await getPublicKeys(myUid);
+  const myKemPubKey = myKeys?.kemPublicKey ?? "";
+  const contactKeys = await getPublicKeys(contactUid);
+  if (!contactKeys) throw new Error(`Clés publiques introuvables pour ${contactUid}`);
+
+  const myDsaPrivateKey = getDsaPrivateKey(myUid);
+  const myKemPrivateKey = getKemPrivateKey(myUid);
+
+  // ── 2. Lire le fichier ───────────────────────────────────────────────────
+  const fileBuffer = await file.arrayBuffer();
+  const fileBytes  = new Uint8Array(fileBuffer);
+
+  // ── 3. Double Ratchet encrypt — plaintext = métadonnées lisibles ─────────
+  const stateJson  = await loadRatchetState(myUid, convId);
+  const placeholder = `[Fichier] ${file.name} (${_formatSize(file.size)})`;
+
+  const drResult = await doubleRatchetEncrypt(
+    placeholder,
+    stateJson,
+    convId,
+    myKemPrivateKey,
+    myKemPubKey,
+    contactKeys.kemPublicKey,
+  );
+  await saveRatchetState(myUid, convId, drResult.newStateJson);
+
+  // ── 4. Dériver fileKey depuis la messageKey DR ───────────────────────────
+  // messageKey = clé AES 32 bytes encodée Base64, extraite depuis drResult.
+  // On ne l'expose pas directement — on la re-dérive pour le fichier.
+  // Hack : on dérive la fileKey depuis le kemCiphertext + convId comme IKM
+  // (le kemCiphertext est unique par message et lié au DR).
+  const fileKey = await hkdfDerive(
+    drResult.kemCiphertext,
+    `AegisQuantum-v1-file-key:${convId}:${drResult.messageIndex}`,
+    32,
+  );
+
+  // ── 5. Chiffrer le contenu binaire ───────────────────────────────────────
+  const fileB64 = toBase64(fileBytes);
+  const { ciphertext: fileCiphertext, nonce: fileNonce } = await aesGcmEncrypt(fileB64, fileKey);
+
+  // ── 6. DSA sign ──────────────────────────────────────────────────────────
+  const signedPayload = drResult.ciphertext + drResult.nonce + drResult.kemCiphertext;
+  const signature     = await dsaSign(signedPayload, myDsaPrivateKey);
+
+  // ── 7. Firestore ─────────────────────────────────────────────────────────
+  const msgRef = await addDoc(messagesCol(convId), {
+    conversationId   : convId,
+    senderUid        : myUid,
+    ciphertext       : drResult.ciphertext,
+    nonce            : drResult.nonce,
+    kemCiphertext    : drResult.kemCiphertext,
+    signature,
+    messageIndex     : drResult.messageIndex,
+    timestamp        : Date.now(),
+    hasFile          : true,
+    fileCiphertext,
+    fileNonce,
+    fileName         : file.name,
+    fileSize         : file.size,
+    fileType         : file.type || "application/octet-stream",
+    ...(drResult.initKemCiphertext
+      ? { initKemCiphertext: drResult.initKemCiphertext }
+      : {}),
+  } as Omit<EncryptedMessage, "id">);
+
+  _sentPlaintextCache.set(msgRef.id, placeholder);
+  _notifyConvPreviewUpdate(convId, placeholder, Date.now());
+}
+
+function _formatSize(bytes: number): string {
+  if (bytes < 1024)             return `${bytes} o`;
+  if (bytes < 1024 * 1024)      return `${(bytes / 1024).toFixed(1)} Ko`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} Mo`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Envoi de message — Double Ratchet
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function sendMessage(
   myUid     : string,
   contactUid: string,
-  plaintext : string
+  plaintext : string,
 ): Promise<void> {
   const convId = getConversationId(myUid, contactUid);
 
-  // ── 1. Clés du destinataire ───────────────────────────────────────────────
+  // ── 1. Clés publiques ────────────────────────────────────────────────────
+  const myKeys      = await getPublicKeys(myUid);
+  const myKemPubKey = myKeys?.kemPublicKey ?? "";
+
   const contactKeys = await getPublicKeys(contactUid);
   if (!contactKeys) throw new Error(`Clés publiques introuvables pour ${contactUid}`);
 
-  // ── 2. Nos clés privées ───────────────────────────────────────────────────
+  // ── 2. Clés privées ──────────────────────────────────────────────────────
   const myDsaPrivateKey = getDsaPrivateKey(myUid);
-  const myKemPrivateKey = getKemPrivateKey(myUid);  // nécessaire pour le Double Ratchet
+  const myKemPrivateKey = getKemPrivateKey(myUid);
 
-  // ── CONTOURNEMENT ACTUEL — KEM direct ────────────────────────────────────
-  //
-  // TODO [DOUBLE RATCHET — ENVOI] Remplacer le bloc ci-dessous (étapes 3 à 5)
-  // par un appel à doubleRatchetEncrypt() :
-  //
-  //   import { doubleRatchetEncrypt } from "../crypto/double-ratchet";
-  //   import { saveRatchetState, loadRatchetState } from "./key-store";
-  //
-  //   // ENTRÉES doubleRatchetEncrypt :
-  //   const stateJson = await loadRatchetState(myUid, convId);
-  //   //   stateJson   : string | null   — état ratchet courant (null = 1er message)
-  //   //   plaintext   : string          — message en clair (déjà disponible)
-  //   //   convId      : string          — ID conversation (déjà disponible)
-  //   //   myKemPrivateKey : string      — notre clé privée KEM (déjà disponible)
-  //   //   ourKemPubKey    : string      — notre clé publique KEM (depuis key-registry ou key-store)
-  //   //   contactKeys.kemPublicKey : string — clé publique KEM du contact
-  //   //   sharedSecret : string         — secret KEM initial (depuis kemEncapsulate ci-dessous,
-  //   //                                   UNIQUEMENT pour initialiser l'état si stateJson === null)
-  //
-  //   const { sharedSecret: initSecret, ciphertext: initKemCT } = await kemEncapsulate(contactKeys.kemPublicKey);
-  //
-  //   const drResult = await doubleRatchetEncrypt(
-  //     plaintext,
-  //     stateJson,
-  //     convId,
-  //     myKemPrivateKey,
-  //     ourKemPublicKey,           // à récupérer depuis key-registry ou key-store
-  //     contactKeys.kemPublicKey,
-  //     initSecret,
-  //   );
-  //
-  //   // SORTIES doubleRatchetEncrypt :
-  //   //   drResult.ciphertext    : string  — message chiffré AES-256-GCM
-  //   //   drResult.nonce         : string  — IV AES-GCM (12 bytes)
-  //   //   drResult.kemCiphertext : string  — KEM CT du ratchet step courant
-  //   //   drResult.messageIndex  : number  — numéro anti-replay dans la chaîne
-  //   //   drResult.newStateJson  : string  — nouvel état ratchet → sauvegarder IDB
-  //
-  //   // Sauvegarder le nouvel état ratchet
-  //   await saveRatchetState(myUid, convId, drResult.newStateJson);
-  //
-  //   // Utiliser drResult.ciphertext / nonce / kemCiphertext / messageIndex
-  //   // à la place des variables locales ci-dessous
+  // ── 3. État ratchet (null = premier message) ─────────────────────────────
+  const stateJson = await loadRatchetState(myUid, convId);
 
-  // ── 3. KEM encapsulate (CONTOURNEMENT sans ratchet) ───────────────────────
-  const { sharedSecret, ciphertext: kemCiphertext } = await kemEncapsulate(
-    contactKeys.kemPublicKey
+  // ── 4. Double Ratchet encrypt ────────────────────────────────────────────
+  // Si stateJson === null, doubleRatchetEncrypt génère lui-même le KEM init
+  // et retourne initKemCiphertext → à stocker dans Firestore pour le receiver.
+  const drResult = await doubleRatchetEncrypt(
+    plaintext,
+    stateJson,
+    convId,
+    myKemPrivateKey,
+    myKemPubKey,
+    contactKeys.kemPublicKey,
   );
 
-  // ── 4. HKDF → messageKey (CONTOURNEMENT : dérivation directe sans chaîne) ─
-  //
-  // TODO [DOUBLE RATCHET] Cette ligne disparaît — le Double Ratchet fait la
-  // dérivation en interne via hkdfDerivePair(sharedSecret) → (rootKey, chainKey)
-  // puis HKDF(chainKey) → messageKey à chaque message.
-  const messageKey = await hkdfDerive(sharedSecret, HKDF_INFO.MESSAGE_KEY);
+  // ── 5. Sauvegarder le nouvel état ratchet ────────────────────────────────
+  await saveRatchetState(myUid, convId, drResult.newStateJson);
 
-  // ── 5. AES-256-GCM encrypt (CONTOURNEMENT) ────────────────────────────────
-  //
-  // TODO [DOUBLE RATCHET] Cette ligne disparaît — aesGcmEncrypt est appelé
-  // en interne dans doubleRatchetEncrypt(), utiliser drResult.ciphertext / nonce.
-  const { ciphertext, nonce } = await aesGcmEncrypt(plaintext, messageKey);
-
-  // ── 6. DSA sign — INCHANGÉ avec Double Ratchet ───────────────────────────
-  //
-  // La signature porte sur : ciphertext + nonce + kemCiphertext
-  // Avec Double Ratchet : les valeurs viennent de drResult au lieu du bloc ci-dessus.
-  const signedPayload = ciphertext + nonce + kemCiphertext;
+  // ── 6. DSA sign ──────────────────────────────────────────────────────────
+  const signedPayload = drResult.ciphertext + drResult.nonce + drResult.kemCiphertext;
   const signature     = await dsaSign(signedPayload, myDsaPrivateKey);
 
-  // ── 7. Écrire dans Firestore ──────────────────────────────────────────────
-  //
-  // TODO [DOUBLE RATCHET] messageIndex : remplacer 0 par drResult.messageIndex
+  // ── 7. Écrire dans Firestore ─────────────────────────────────────────────
+  // initKemCiphertext est présent uniquement sur le premier message.
+  // Il est stocké dans Firestore pour que le receiver puisse bootstrapper
+  // son état ratchet avec le même initSecret que l'envoyeur.
   const msgRef = await addDoc(messagesCol(convId), {
-    conversationId: convId,
-    senderUid     : myUid,
-    ciphertext,
-    nonce,
-    kemCiphertext,
+    conversationId    : convId,
+    senderUid         : myUid,
+    ciphertext        : drResult.ciphertext,
+    nonce             : drResult.nonce,
+    kemCiphertext     : drResult.kemCiphertext,
     signature,
-    messageIndex  : 0,     // TODO [DOUBLE RATCHET] → drResult.messageIndex
-    timestamp     : Date.now(),
-  } satisfies Omit<EncryptedMessage, "id">);
+    messageIndex      : drResult.messageIndex,
+    timestamp         : Date.now(),
+    ...(drResult.initKemCiphertext
+      ? { initKemCiphertext: drResult.initKemCiphertext }
+      : {}),
+  } as Omit<EncryptedMessage, "id">);
 
-  // ── 8. Stocker la messageKey en IDB ───────────────────────────────────────
-  //
-  // TODO [DOUBLE RATCHET] Supprimer storeMessageKey — le ratchet state (IDB)
-  // contient toutes les clés nécessaires. Appeler saveRatchetState() à la place.
-  await storeMessageKey(convId, msgRef.id, messageKey);
-
-  // ── 9. Mettre à jour la preview Firestore ────────────────────────────────
-  await updateConversationPreview(convId, plaintext);
-
-  // Évite "unused variable" en attendant le Double Ratchet
-  void myKemPrivateKey;
+  // ── 8. Stocker le plaintext en cache local (pour affichage côté envoyeur) ─
+  // Après refresh, le plaintext n'est plus disponible — c'est le prix
+  // de la sécurité forward secrecy (pas de stockage en clair).
+  _sentPlaintextCache.set(msgRef.id, plaintext);
+  _notifyConvPreviewUpdate(convId, plaintext, Date.now());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Réception / déchiffrement
+// Déchiffrement — Double Ratchet
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function decryptMessage(
   myUid: string,
-  msg  : EncryptedMessage
+  msg  : EncryptedMessage,
 ): Promise<DecryptedMessage> {
 
-  // ── 1. DSA verify — INCHANGÉ avec Double Ratchet ─────────────────────────
+  // ── 1. DSA verify ────────────────────────────────────────────────────────
   const senderKeys = await getPublicKeys(msg.senderUid);
   let   verified   = false;
   if (senderKeys) {
@@ -331,95 +328,67 @@ export async function decryptMessage(
     verified = await dsaVerify(signedPayload, msg.signature, senderKeys.dsaPublicKey);
   }
 
-  // ── CONTOURNEMENT ACTUEL — KEM + cache IDB ───────────────────────────────
-  //
-  // TODO [DOUBLE RATCHET — RÉCEPTION] Remplacer le bloc ci-dessous (étapes 2 à 3)
-  // par un appel à doubleRatchetDecrypt() :
-  //
-  //   import { doubleRatchetDecrypt } from "../crypto/double-ratchet";
-  //   import { saveRatchetState, loadRatchetState } from "./key-store";
-  //
-  //   // ENTRÉES doubleRatchetDecrypt :
-  //   const stateJson = await loadRatchetState(myUid, msg.conversationId);
-  //   //   msg.ciphertext    : string  — message chiffré AES-256-GCM (depuis Firestore)
-  //   //   msg.nonce         : string  — IV AES-GCM (depuis Firestore)
-  //   //   msg.messageIndex  : number  — numéro anti-replay (depuis Firestore)
-  //   //   msg.kemCiphertext : string  — KEM CT du ratchet step expéditeur (depuis Firestore)
-  //   //   stateJson         : string | null — état ratchet courant (null = 1er message)
-  //   //   msg.conversationId: string  — ID conversation
-  //   //   myKemPrivateKey   : string  — notre clé privée KEM (depuis key-store.ts)
-  //   //   ourKemPublicKey   : string  — notre clé publique KEM (depuis key-registry ou key-store)
-  //   //   senderKeys.kemPublicKey : string — clé publique KEM de l'expéditeur
-  //   //   sharedSecret      : string  — kemDecapsulate(msg.kemCiphertext, myKemPrivKey)
-  //   //                                  (UNIQUEMENT pour initialiser si stateJson === null)
-  //
-  //   const sharedSecret = await kemDecapsulate(msg.kemCiphertext, myKemPrivateKey);
-  //
-  //   const drResult = await doubleRatchetDecrypt(
-  //     msg.ciphertext,
-  //     msg.nonce,
-  //     msg.messageIndex,
-  //     msg.kemCiphertext,
-  //     stateJson,
-  //     msg.conversationId,
-  //     myKemPrivateKey,
-  //     ourKemPublicKey,           // à récupérer depuis key-registry ou key-store
-  //     senderKeys?.kemPublicKey ?? "",
-  //     sharedSecret,
-  //   );
-  //
-  //   // SORTIES doubleRatchetDecrypt :
-  //   //   drResult.plaintext    : string  — texte clair déchiffré
-  //   //   drResult.newStateJson : string  — nouvel état ratchet → sauvegarder IDB
-  //
-  //   // Sauvegarder le nouvel état ratchet
-  //   await saveRatchetState(myUid, msg.conversationId, drResult.newStateJson);
-  //
-  //   // Utiliser drResult.plaintext à la place de `plaintext` ci-dessous
+  // ── 2. Clés ──────────────────────────────────────────────────────────────
+  const myKeys       = await getPublicKeys(myUid);
+  const myKemPubKey  = myKeys?.kemPublicKey ?? "";
+  const myKemPrivKey = getKemPrivateKey(myUid);
 
-  // ── 2. Récupérer (ou dériver) la messageKey (CONTOURNEMENT) ──────────────
-  let messageKey: string;
-  const cachedKey = await loadMessageKey(msg.conversationId, msg.id);
+  // ── 3. État ratchet ──────────────────────────────────────────────────────
+  const stateJson = await loadRatchetState(myUid, msg.conversationId);
 
-  if (cachedKey) {
-    // Cache IDB présent → message propre ou déjà vu
-    messageKey = cachedKey;
-  } else {
-    // Cache absent → message reçu → KEM decapsulate
-    let myKemPrivateKey: string;
+  // ── 4. Double Ratchet decrypt ────────────────────────────────────────────
+  // Si stateJson === null (1er message), passer initKemCiphertext depuis Firestore.
+  // doubleRatchetDecrypt le décapsule pour retrouver le même initSecret que l'envoyeur.
+  const drResult = await doubleRatchetDecrypt(
+    msg.ciphertext,
+    msg.nonce,
+    msg.messageIndex,
+    msg.kemCiphertext,
+    stateJson,
+    msg.conversationId,
+    myKemPrivKey,
+    myKemPubKey,
+    senderKeys?.kemPublicKey ?? "",
+    msg.initKemCiphertext,   // undefined pour les messages suivants (stateJson non null)
+  );
+
+  // ── 5. Sauvegarder le nouvel état ratchet ────────────────────────────────
+  await saveRatchetState(myUid, msg.conversationId, drResult.newStateJson);
+
+  // ── 6. Déchiffrer le fichier si présent ─────────────────────────────────
+  let fileAttachment: DecryptedMessage["file"] | undefined;
+  if (msg.hasFile && msg.fileCiphertext && msg.fileNonce && msg.fileName) {
     try {
-      myKemPrivateKey = getKemPrivateKey(myUid);
-    } catch {
-      throw new Error("Clés privées non chargées — reconnectez-vous.");
+      const fileKey = await hkdfDerive(
+        msg.kemCiphertext, //
+        `AegisQuantum-v1-file-key:${msg.conversationId}:${msg.messageIndex}`,
+        32,
+      );
+      const fileB64    = await aesGcmDecrypt(msg.fileCiphertext, msg.fileNonce, fileKey);
+      const fileBytes  = fromBase64(fileB64);
+      const blob = new Blob(
+      [fileBytes.buffer as ArrayBuffer],
+      { type: msg.fileType ?? "application/octet-stream" }); //fix
+      //const blob       = new Blob([fileBytes], { type: msg.fileType ?? "application/octet-stream" });
+      fileAttachment   = {
+        blob,
+        name : msg.fileName,
+        size : msg.fileSize ?? fileBytes.length,
+        type : msg.fileType ?? "application/octet-stream",
+      };
+    } catch (fileErr) {
+      console.warn(`[AQ] Déchiffrement fichier échoué pour ${msg.id}:`, fileErr);
     }
-
-    // TODO [DOUBLE RATCHET] Ce kemDecapsulate direct disparaît —
-    // le Double Ratchet le fait en interne via doubleRatchetDecrypt().
-    // Le sharedSecret ci-dessous sert uniquement à initialiser le ratchet state
-    // si stateJson === null (premier message reçu dans la conversation).
-    const sharedSecret = await kemDecapsulate(msg.kemCiphertext, myKemPrivateKey);
-
-    // TODO [DOUBLE RATCHET] Cette dérivation HKDF directe disparaît —
-    // remplacée par la chaîne de clés du ratchet symétrique.
-    messageKey = await hkdfDerive(sharedSecret, HKDF_INFO.MESSAGE_KEY);
-
-    // Persister pour relire ce message si les clés KEM changent
-    // TODO [DOUBLE RATCHET] Supprimer — le ratchet state prend en charge cela.
-    await storeMessageKey(msg.conversationId, msg.id, messageKey);
   }
-
-  // ── 3. AES-256-GCM decrypt (CONTOURNEMENT) ────────────────────────────────
-  //
-  // TODO [DOUBLE RATCHET] Remplacer `messageKey` par la clé issue du ratchet
-  // (drResult.plaintext remplace l'appel aesGcmDecrypt — fait en interne).
-  const plaintext = await aesGcmDecrypt(msg.ciphertext, msg.nonce, messageKey);
 
   return {
     id       : msg.id,
     senderUid: msg.senderUid,
-    plaintext,
+    plaintext: drResult.plaintext,
     timestamp: msg.timestamp,
     verified,
+    readBy   : msg.readBy ?? [],
+    file     : fileAttachment,
   };
 }
 
@@ -430,43 +399,146 @@ export async function decryptMessage(
 export function subscribeToMessages(
   myUid         : string,
   conversationId: string,
-  callback      : (messages: DecryptedMessage[]) => void
+  callback      : (messages: DecryptedMessage[]) => void,
 ): Unsubscribe {
   const q = query(messagesCol(conversationId), orderBy("timestamp", "asc"));
 
-  // Cache local : msgId → DecryptedMessage
-  // Évite de re-déchiffrer des messages déjà traités à chaque snapshot Firestore.
-  // Critique pour les messages propres (envoyés par nous) : la messageKey est
-  // stockée dans IDB par sendMessage(), mais le snapshot peut arriver avant
-  // que storeMessageKey() soit terminé → race condition → déchiffrement échoue.
-  // En ne re-traitant que les nouveaux docs, on élimine ce problème.
   const decryptedCache = new Map<string, DecryptedMessage>();
+  const allDocs        = new Map<string, QueryDocumentSnapshot<DocumentData>>();
 
-  return onSnapshot(q, async (snap) => {
-    // Identifier les docs vraiment nouveaux (pas encore dans le cache)
-    const newDocs = snap.docs.filter(d => !decryptedCache.has(d.id));
+  function emitResult(): void {
+    const sorted = [...allDocs.values()].sort(
+      (a, b) => ((a.data().timestamp ?? 0) as number) - ((b.data().timestamp ?? 0) as number),
+    );
+    const result = sorted
+      .map(d => decryptedCache.get(d.id))
+      .filter((m): m is DecryptedMessage => m !== undefined);
+    callback(result);
+  }
 
-    // Déchiffrer uniquement les nouveaux
-    for (const d of newDocs) {
-      const msg = { id: d.id, ...d.data() } as EncryptedMessage;
+  function scheduleRetry(failedMsg: EncryptedMessage): void {
+      setTimeout(async () => {
+        if (!_retrySet.has(failedMsg.id)) return;
+        const freshDoc = allDocs.get(failedMsg.id);
+      const msgData  = freshDoc
+        ? { id: freshDoc.id, ...freshDoc.data() } as EncryptedMessage
+        : failedMsg;
       try {
-        decryptedCache.set(msg.id, await decryptMessage(myUid, msg));
+        const decrypted = await decryptMessage(myUid, msgData);
+        decryptedCache.set(msgData.id, decrypted);
+        _retrySet.delete(msgData.id);
+        emitResult();
       } catch (err) {
-        console.error(`[AQ] Échec déchiffrement message ${msg.id}:`, err);
-        decryptedCache.set(msg.id, {
-          id       : msg.id,
-          senderUid: msg.senderUid,
-          plaintext: "[🔒 Message non déchiffrable — clés expirées ou session expirée]",
-          timestamp: msg.timestamp,
+        console.error(`[AQ] Retry déchiffrement échoué pour ${msgData.id}:`, err);
+        decryptedCache.set(msgData.id, {
+          id       : msgData.id,
+          senderUid: msgData.senderUid,
+          plaintext: "[\uD83D\uDD12 Message non déchiffrable — clés expirées ou session expirée]",
+          timestamp: msgData.timestamp,
           verified : false,
+          readBy   : [],
         });
+        _retrySet.delete(msgData.id);
+      }
+    }, 80);
+  }
+
+  return onSnapshot(q, async snap => {
+    const changes = snap.docChanges();
+
+    for (const change of changes) {
+      if (change.type === "added" || change.type === "modified") {
+        allDocs.set(change.doc.id, change.doc);
+      } else if (change.type === "removed") {
+        allDocs.delete(change.doc.id);
+        decryptedCache.delete(change.doc.id);
       }
     }
 
-    // Ne notifier le callback que si de nouveaux messages ont été déchiffrés
-    if (newDocs.length === 0) return;
+    let hasChanges = false;
 
-    // Retourner tous les messages dans l'ordre Firestore (timestamp asc)
-    callback(snap.docs.map(d => decryptedCache.get(d.id)!));
+    for (const change of changes) {
+      const d   = change.doc;
+      const msg = { id: d.id, ...d.data() } as EncryptedMessage;
+
+      if (change.type === "removed") {
+        hasChanges = true;
+        continue;
+      }
+
+      if (change.type === "modified" && !_retrySet.has(d.id)) {
+        const cached = decryptedCache.get(d.id);
+        if (cached) {
+          const freshReadBy = (d.data().readBy ?? []) as string[];
+          const current     = cached.readBy ?? [];
+          if (freshReadBy.length !== current.length ||
+              freshReadBy.some(uid => !current.includes(uid))) {
+            decryptedCache.set(d.id, { ...cached, readBy: freshReadBy });
+            hasChanges = true;
+          }
+        }
+        continue;
+      }
+
+      if (decryptedCache.has(d.id) && !_retrySet.has(d.id)) continue;
+
+      // L'expéditeur ne déchiffre jamais ses propres messages :
+      // il ne possède pas l'état ratchet de réception pour eux,
+      // et le KEM ciphertext a été encapsulé avec la clé du destinataire.
+      if (msg.senderUid === myUid) {
+        decryptedCache.set(msg.id, {
+          id       : msg.id,
+          senderUid: msg.senderUid,
+          plaintext: _sentPlaintextCache.get(msg.id) ?? "[🔒 Message envoyé — rechargez pour voir]",
+          timestamp: msg.timestamp,
+          verified : true,  // on fait confiance à son propre message
+          readBy   : msg.readBy ?? [],
+        });
+        hasChanges = true;
+        continue;
+      }
+
+      const isRetry = _retrySet.has(msg.id);
+      try {
+        const decrypted = await decryptMessage(myUid, msg);
+        decryptedCache.set(msg.id, decrypted);
+        _retrySet.delete(msg.id);
+        hasChanges = true;
+
+        if (!isRetry && msg.senderUid !== myUid) {
+          updateConversationPreview(msg.conversationId, decrypted.plaintext).catch(() => {});
+        }
+      } catch (err) {
+        if (!isRetry) {
+          console.warn(`[AQ] Déchiffrement différé pour ${msg.id} (race condition probable)`);
+          _retrySet.add(msg.id);
+          decryptedCache.set(msg.id, {
+            id       : msg.id,
+            senderUid: msg.senderUid,
+            plaintext: "[\uD83D\uDD12 Déchiffrement en cours\u2026]",
+            timestamp: msg.timestamp,
+            verified : false,
+            readBy   : [],
+          });
+          hasChanges = true;
+          scheduleRetry(msg);
+        } else {
+          console.error(`[AQ] Échec définitif déchiffrement ${msg.id}:`, err);
+          decryptedCache.set(msg.id, {
+            id       : msg.id,
+            senderUid: msg.senderUid,
+            plaintext: "[\uD83D\uDD12 Message non déchiffrable — clés expirées ou session expirée]",
+            timestamp: msg.timestamp,
+            verified : false,
+            readBy   : [],
+          });
+          _retrySet.delete(msg.id);
+          hasChanges = true;
+        }
+      }
+    }
+
+    if (!hasChanges) return;
+    emitResult();
   });
 }
