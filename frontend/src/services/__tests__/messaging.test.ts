@@ -4,6 +4,12 @@
  * Ces tests utilisent le VRAI crypto (liboqs WASM, WebCrypto) via le mock Firestore/IDB.
  * Chaque test alice↔bob utilise de vraies keypairs ML-KEM-768 / ML-DSA-65.
  */
+import { webcrypto } from 'node:crypto';
+import { vi } from 'vitest';
+
+// Polyfill the Web Crypto API for Node.js
+vi.stubGlobal('crypto', webcrypto);
+
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {

@@ -414,8 +414,9 @@ export function subscribeToMessages(
   }
 
   function scheduleRetry(failedMsg: EncryptedMessage): void {
-    setTimeout(async () => {
-      const freshDoc = allDocs.get(failedMsg.id);
+      setTimeout(async () => {
+        if (!_retrySet.has(failedMsg.id)) return;
+        const freshDoc = allDocs.get(failedMsg.id);
       const msgData  = freshDoc
         ? { id: freshDoc.id, ...freshDoc.data() } as EncryptedMessage
         : failedMsg;

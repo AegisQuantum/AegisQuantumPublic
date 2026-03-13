@@ -190,7 +190,9 @@ export async function doubleRatchetDecrypt(
   // ── KEM ratchet step — réception ─────────────────────────────────────────
   // Décapsule le kemCiphertext du message pour avancer rootKey + receivingChainKey.
   const { newRootKey, newReceivingChainKey: chainKeyAfterKem } =
-    await kemRatchetStepReceive(state.rootKey, kemCiphertext, state.ourPrivateKey);
+    //await kemRatchetStepReceive(state.rootKey, kemCiphertext, state.ourPrivateKey);
+    await kemRatchetStepReceive(state.rootKey, kemCiphertext, ourPrivKey); // Utilise la clé longue terme passée en paramètre — celle que Bob a utilisée
+
 
   state.rootKey        = newRootKey;
   state.theirPublicKey = theirPubKey;
