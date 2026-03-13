@@ -3,9 +3,10 @@
  * src/crypto/__tests__/double-ratchet.test.ts
  *
  * Compatible avec la nouvelle API doubleRatchetDecrypt :
- *   - sharedSecret supprimé
- *   - initKemCiphertext?: string  (optionnel, présent uniquement sur le 1er message)
- *   - doubleRatchetEncrypt retourne initKemCiphertext sur le 1er message
+ * - sharedSecret supprimé
+ * - initKemCiphertext?: string  (optionnel, présent uniquement sur le 1er message)
+ * - doubleRatchetEncrypt retourne initKemCiphertext sur le 1er message
+ * - senderEphPub ajouté à doubleRatchetDecrypt
  */
 
 import { describe, it, expect, vi, beforeAll } from "vitest";
@@ -50,9 +51,10 @@ beforeAll(async () => {
  * Effectue un aller-retour Alice→Bob.
  *
  * Nouvelle API :
- *  - doubleRatchetEncrypt n'a plus besoin de sharedSecret (le fait en interne)
- *  - doubleRatchetDecrypt reçoit initKemCiphertext (depuis enc.initKemCiphertext)
- *    au lieu du sharedSecret pré-calculé
+ * - doubleRatchetEncrypt n'a plus besoin de sharedSecret (le fait en interne)
+ * - doubleRatchetDecrypt reçoit initKemCiphertext (depuis enc.initKemCiphertext)
+ * au lieu du sharedSecret pré-calculé
+ * - senderEphPub est maintenant requis
  */
 async function roundTrip(
   plaintext  : string,
@@ -66,6 +68,7 @@ async function roundTrip(
 
   const dec = await doubleRatchetDecrypt(
     enc.ciphertext, enc.nonce, enc.messageIndex, enc.kemCiphertext,
+    enc.senderEphPub, // ← paramètre ajouté
     bobState, bob.convId,
     bob.privKey, bob.pubKey, alice.pubKey,
     enc.initKemCiphertext,   // ← présent sur le 1er message, undefined ensuite
@@ -125,6 +128,7 @@ describe("Initialisation depuis sharedSecret", () => {
     );
     const dec = await doubleRatchetDecrypt(
       enc.ciphertext, enc.nonce, enc.messageIndex, enc.kemCiphertext,
+      enc.senderEphPub, // ← paramètre ajouté
       null, bob.convId,
       bob.privKey, bob.pubKey, alice.pubKey,
       enc.initKemCiphertext,
@@ -142,6 +146,7 @@ describe("Initialisation depuis sharedSecret", () => {
     await expect(
       doubleRatchetDecrypt(
         enc.ciphertext, enc.nonce, enc.messageIndex, enc.kemCiphertext,
+        enc.senderEphPub, // ← paramètre ajouté
         null, bob.convId,
         bob.privKey, bob.pubKey, alice.pubKey,
         undefined, // ← manquant intentionnellement
@@ -164,7 +169,8 @@ describe("Chiffrement de base", () => {
     expect(enc.ciphertext).not.toBe(plaintext);
     expect(enc.ciphertext.length).toBeGreaterThan(0);
     expect(enc.nonce.length).toBeGreaterThan(0);
-    expect(enc.kemCiphertext.length).toBeGreaterThan(0);
+    expect(enc.kemCiphertext).toBe(""); // ← Corrigé : vide sur le bootstrap
+    expect(enc.initKemCiphertext!.length).toBeGreaterThan(0); // ← Ajouté
   });
 
   it("deux chiffrements du même plaintext produisent des ciphertexts différents", async () => {
@@ -178,7 +184,8 @@ describe("Chiffrement de base", () => {
     );
     expect(enc1.ciphertext).not.toBe(enc2.ciphertext);
     expect(enc1.nonce).not.toBe(enc2.nonce);
-    expect(enc1.kemCiphertext).not.toBe(enc2.kemCiphertext);
+    expect(enc1.kemCiphertext).toBe(""); // ← Corrigé
+    expect(enc2.kemCiphertext).toBe(""); // ← Corrigé
     expect(enc1.initKemCiphertext).not.toBe(enc2.initKemCiphertext);
   });
 });
@@ -319,6 +326,7 @@ describe("messageIndex et receiveCount", () => {
       );
       const dec = await doubleRatchetDecrypt(
         enc.ciphertext, enc.nonce, enc.messageIndex, enc.kemCiphertext,
+        enc.senderEphPub, // ← paramètre ajouté
         bobState, bob.convId,
         bob.privKey, bob.pubKey, alice.pubKey,
         enc.initKemCiphertext,
@@ -343,6 +351,7 @@ describe("Persistance de l'état ratchet", () => {
     );
     const dec1 = await doubleRatchetDecrypt(
       enc1.ciphertext, enc1.nonce, enc1.messageIndex, enc1.kemCiphertext,
+      enc1.senderEphPub, // ← paramètre ajouté
       null, bob.convId,
       bob.privKey, bob.pubKey, alice.pubKey,
       enc1.initKemCiphertext,
@@ -358,6 +367,7 @@ describe("Persistance de l'état ratchet", () => {
     );
     const dec2 = await doubleRatchetDecrypt(
       enc2.ciphertext, enc2.nonce, enc2.messageIndex, enc2.kemCiphertext,
+      enc2.senderEphPub, // ← paramètre ajouté
       savedBobState, bob.convId,
       bob.privKey, bob.pubKey, alice.pubKey,
       enc2.initKemCiphertext, // undefined sur les messages suivants
@@ -434,6 +444,7 @@ describe("KPI Performance", () => {
     );
     const dec1 = await doubleRatchetDecrypt(
       enc1.ciphertext, enc1.nonce, enc1.messageIndex, enc1.kemCiphertext,
+      enc1.senderEphPub, // ← paramètre ajouté
       null, bob.convId,
       bob.privKey, bob.pubKey, alice.pubKey,
       enc1.initKemCiphertext,
@@ -446,6 +457,7 @@ describe("KPI Performance", () => {
     const start = performance.now();
     await doubleRatchetDecrypt(
       enc2.ciphertext, enc2.nonce, enc2.messageIndex, enc2.kemCiphertext,
+      enc2.senderEphPub, // ← paramètre ajouté
       dec1.newStateJson, bob.convId,
       bob.privKey, bob.pubKey, alice.pubKey,
       enc2.initKemCiphertext,
@@ -474,6 +486,7 @@ describe("Pentests", () => {
     try {
       await doubleRatchetDecrypt(
         enc.ciphertext, enc.nonce, 1_000_000, enc.kemCiphertext,
+        enc.senderEphPub, // ← paramètre ajouté
         null, bob.convId,
         bob.privKey, bob.pubKey, alice.pubKey,
         enc.initKemCiphertext,
@@ -500,11 +513,12 @@ describe("Pentests", () => {
 
     await expect(
       doubleRatchetDecrypt(
-        enc.ciphertext, enc.nonce, enc.messageIndex,
-        garbage,
+        enc.ciphertext, enc.nonce, enc.messageIndex, 
+        enc.kemCiphertext, // ← Leave as original (which is "")
+        enc.senderEphPub,
         null, bob.convId,
         bob.privKey, bob.pubKey, alice.pubKey,
-        enc.initKemCiphertext,
+        garbage,           // ← Inject the garbage here!
       )
     ).rejects.toThrow();
   });
@@ -534,26 +548,35 @@ describe("Pentests", () => {
   });
 
   it("replay du même message → throw (replay détecté)", async () => {
-    const enc = await doubleRatchetEncrypt(
-      "msg original", null, alice.convId,
-      alice.privKey, alice.pubKey, bob.pubKey,
+    // 1. Initialiser la conversation (Bootstrap)
+    const enc1 = await doubleRatchetEncrypt(
+      "msg1", null, alice.convId, alice.privKey, alice.pubKey, bob.pubKey
+    );
+    const dec1 = await doubleRatchetDecrypt(
+      enc1.ciphertext, enc1.nonce, enc1.messageIndex, enc1.kemCiphertext,
+      enc1.senderEphPub, null, bob.convId, bob.privKey, bob.pubKey, alice.pubKey,
+      enc1.initKemCiphertext
     );
 
-    const dec = await doubleRatchetDecrypt(
-      enc.ciphertext, enc.nonce, enc.messageIndex, enc.kemCiphertext,
-      null, bob.convId,
-      bob.privKey, bob.pubKey, alice.pubKey,
-      enc.initKemCiphertext,
+    // 2. Envoyer un 2ème message (kemCiphertext sera > 0)
+    const enc2 = await doubleRatchetEncrypt(
+      "msg2", enc1.newStateJson, alice.convId, alice.privKey, alice.pubKey, bob.pubKey
     );
-    expect(dec.plaintext).toBe("msg original");
 
+    // 3. Réception normale du 2ème message
+    const dec2 = await doubleRatchetDecrypt(
+      enc2.ciphertext, enc2.nonce, enc2.messageIndex, enc2.kemCiphertext,
+      enc2.senderEphPub, dec1.newStateJson, bob.convId, bob.privKey, bob.pubKey, alice.pubKey,
+      undefined
+    );
+    expect(dec2.plaintext).toBe("msg2");
+
+    // 4. Tentative de replay du 2ème message sur le nouvel état
     await expect(
       doubleRatchetDecrypt(
-        enc.ciphertext, enc.nonce, enc.messageIndex, enc.kemCiphertext,
-        dec.newStateJson,
-        bob.convId,
-        bob.privKey, bob.pubKey, alice.pubKey,
-        enc.initKemCiphertext,
+        enc2.ciphertext, enc2.nonce, enc2.messageIndex, enc2.kemCiphertext,
+        enc2.senderEphPub, dec2.newStateJson, bob.convId, bob.privKey, bob.pubKey, alice.pubKey,
+        undefined
       )
     ).rejects.toThrow(/replay/i);
   });
@@ -567,6 +590,7 @@ describe("Pentests", () => {
     await expect(
       doubleRatchetDecrypt(
         enc.ciphertext, enc.nonce, enc.messageIndex, enc.kemCiphertext,
+        enc.senderEphPub, // ← paramètre ajouté
         null, alice.convId,
         alice.privKey, alice.pubKey, bob.pubKey,
         enc.initKemCiphertext,
@@ -584,6 +608,7 @@ describe("Pentests", () => {
     await expect(
       doubleRatchetDecrypt(
         tampered, enc.nonce, enc.messageIndex, enc.kemCiphertext,
+        enc.senderEphPub, // ← paramètre ajouté
         null, bob.convId,
         bob.privKey, bob.pubKey, alice.pubKey,
         enc.initKemCiphertext,
@@ -600,6 +625,7 @@ describe("Pentests", () => {
     await expect(
       doubleRatchetDecrypt(
         enc.ciphertext, enc.nonce, -1, enc.kemCiphertext,
+        enc.senderEphPub, // ← paramètre ajouté
         null, bob.convId,
         bob.privKey, bob.pubKey, alice.pubKey,
         enc.initKemCiphertext,
