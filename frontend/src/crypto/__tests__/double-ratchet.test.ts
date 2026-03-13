@@ -502,9 +502,9 @@ describe("Pentests", () => {
   });
 
   it("stateJson corrompu → throw propre", async () => {
-    const enc = await doubleRatchetEncrypt(
-      "msg", null, alice.convId,
-      alice.privKey, alice.pubKey, bob.pubKey,
+    await doubleRatchetEncrypt(
+    "msg", null, alice.convId,
+    alice.privKey, alice.pubKey, bob.pubKey,
     );
     await expect(
       doubleRatchetEncrypt(

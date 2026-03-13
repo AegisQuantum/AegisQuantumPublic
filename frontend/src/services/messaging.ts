@@ -360,13 +360,16 @@ export async function decryptMessage(
   if (msg.hasFile && msg.fileCiphertext && msg.fileNonce && msg.fileName) {
     try {
       const fileKey = await hkdfDerive(
-        drResult.kemCiphertext ?? msg.kemCiphertext,
+        msg.kemCiphertext, //
         `AegisQuantum-v1-file-key:${msg.conversationId}:${msg.messageIndex}`,
         32,
       );
       const fileB64    = await aesGcmDecrypt(msg.fileCiphertext, msg.fileNonce, fileKey);
       const fileBytes  = fromBase64(fileB64);
-      const blob       = new Blob([fileBytes], { type: msg.fileType ?? "application/octet-stream" });
+      const blob = new Blob(
+      [fileBytes.buffer as ArrayBuffer],
+      { type: msg.fileType ?? "application/octet-stream" }); //fix
+      //const blob       = new Blob([fileBytes], { type: msg.fileType ?? "application/octet-stream" });
       fileAttachment   = {
         blob,
         name : msg.fileName,
