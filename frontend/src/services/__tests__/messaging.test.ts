@@ -241,19 +241,36 @@ describe("decryptMessage [UNIT]", () => {
   }, 18_000);
 
   it("initKemCiphertext absent + stateJson null -> erreur explicite", async () => {
+    // Pour que doubleRatchetDecrypt lance l'erreur sur initKemCiphertext,
+    // il faut que stateJson soit null (premier message, pas d'état IDB pour Bob)
+    // ET que initKemCiphertext soit absent.
+    // On utilise un uid frais sans état IDB préexistant.
+    const UID_FRESH = "msg-test-fresh-receiver-" + Date.now();
+    const kem = await import("../../crypto/kem").then(m => m.kemGenerateKeyPair());
+    const dsa = await import("../../crypto/dsa").then(m => m.dsaGenerateKeyPair());
+    await storePrivateKeys(UID_FRESH, {
+      kemPrivateKey: kem.privateKey,
+      dsaPrivateKey: dsa.privateKey,
+      masterKey    : btoa(String.fromCharCode(...new Uint8Array(32).fill(0x41))),
+      argon2Salt   : btoa(String.fromCharCode(...new Uint8Array(16).fill(0x42))),
+    });
+    await import("../key-registry").then(m => m.publishPublicKeys(UID_FRESH, {
+      uid: UID_FRESH, kemPublicKey: kem.publicKey, dsaPublicKey: dsa.publicKey, createdAt: Date.now(),
+    }));
     const msg: EncryptedMessage = {
       id            : "no-init-kem",
-      conversationId: getConversationId(UID_ALICE, UID_BOB),
+      conversationId: getConversationId(UID_ALICE, UID_FRESH),
       senderUid     : UID_ALICE,
       ciphertext    : btoa("X"),
       nonce         : btoa("N"),
-      kemCiphertext : btoa("C"),
+      kemCiphertext : btoa("C".repeat(1088)), // taille valide pour passer la validation KEM
       signature     : "",
       messageIndex  : 0,
       timestamp     : Date.now(),
+      // initKemCiphertext intentionnellement absent
     };
-    await expect(decryptMessage(UID_BOB, msg)).rejects.toThrow(/initKemCiphertext/i);
-  });
+    await expect(decryptMessage(UID_FRESH, msg)).rejects.toThrow(/initKemCiphertext/i);
+  }, 15_000);
 
   it("verified = false si signature vide (stateJson null + initKemCiphertext present)", async () => {
     // Construire un message avec un vrai initKemCiphertext (encapsule avec la cle de Bob)

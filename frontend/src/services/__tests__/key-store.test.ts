@@ -96,7 +96,7 @@ describe("storePrivateKeys", () => {
   it("should persist to IDB (unlockPrivateKeys reads it back)", async () => {
     await storePrivateKeys(UID_ALICE, makeBundle());
     clearPrivateKeys();
-    await unlockPrivateKeys(UID_ALICE, "any-master-key");
+    await unlockPrivateKeys(UID_ALICE, "master-key-base64-32bytes=====");
     expect(getKemPrivateKey(UID_ALICE)).toBe("kem-private-key-base64-alice");
   });
 
@@ -138,7 +138,7 @@ describe("unlockPrivateKeys", () => {
     await storePrivateKeys(UID_ALICE, makeBundle({ kemPrivateKey: "alice-kem" }));
     await storePrivateKeys(UID_BOB,   makeBundle({ kemPrivateKey: "bob-kem" }));
     clearPrivateKeys();
-    await unlockPrivateKeys(UID_ALICE, "master-key");
+    await unlockPrivateKeys(UID_ALICE, "master-key-base64-32bytes=====");
     expect(() => getKemPrivateKey(UID_BOB)).toThrow();
   });
 
@@ -207,7 +207,7 @@ describe("clearPrivateKeys", () => {
   it("should NOT delete IDB vault (unlockPrivateKeys still works after clear)", async () => {
     await storePrivateKeys(UID_ALICE, makeBundle());
     clearPrivateKeys();
-    await expect(unlockPrivateKeys(UID_ALICE, "any")).resolves.not.toThrow();
+    await expect(unlockPrivateKeys(UID_ALICE, "master-key-base64-32bytes=====")).resolves.not.toThrow();
   });
 
   // ── [SESSION EXPIRY] Simuler onAuthChange → null ─────────────────────────
@@ -230,7 +230,7 @@ describe("clearPrivateKeys", () => {
     clearPrivateKeys(); // déconnexion
 
     // Simuler une reconnexion — unlock depuis IDB doit fonctionner
-    await unlockPrivateKeys(UID_ALICE, "master");
+    await unlockPrivateKeys(UID_ALICE, "master-key-base64-32bytes=====");
     expect(getKemPrivateKey(UID_ALICE)).toBe("reconnect-key");
   });
 });
@@ -256,7 +256,7 @@ describe("deleteVault", () => {
     await storePrivateKeys(UID_BOB,   makeBundle({ kemPrivateKey: "bob-kem" }));
     clearPrivateKeys();
     await deleteVault(UID_ALICE);
-    await unlockPrivateKeys(UID_BOB, "any");
+    await unlockPrivateKeys(UID_BOB, "master-key-base64-32bytes=====");
     expect(getKemPrivateKey(UID_BOB)).toBe("bob-kem");
   });
 });
@@ -312,7 +312,7 @@ describe("Performance KPIs — key-store (specs §2.2)", () => {
   it("unlockPrivateKeys should complete in < 50 ms", async () => {
     await storePrivateKeys(UID_ALICE, makeBundle());
     clearPrivateKeys();
-    const ms = await measureMs(() => unlockPrivateKeys(UID_ALICE, "master"));
+    const ms = await measureMs(() => unlockPrivateKeys(UID_ALICE, "master-key-base64-32bytes====="));
     console.log(`[KPI] unlockPrivateKeys: ${ms.toFixed(2)} ms`);
     expect(ms).toBeLessThan(50);
   });

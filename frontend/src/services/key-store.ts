@@ -13,7 +13,7 @@
  *  - La master key elle-même n'est jamais stockée — seulement en mémoire.
  */
 
-import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto";
+import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto"; // utilisé dans saveRatchetState/loadRatchetState uniquement
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types internes
@@ -97,6 +97,60 @@ async function idbDelete(key: string): Promise<void> {
 // API publique
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper — normalise une masterKey arbitraire en exactement 32 bytes
+//
+// Dérive toujours 32 bytes depuis la masterKey en utilisant HKDF-SHA256
+// (ou SHA-256 direct). Cela garantit que :
+//  1. storePrivateKeys et unlockPrivateKeys avec la même masterKey string
+//     produisent EXACTEMENT la même clé AES, quelle que soit la longueur
+//     ou le contenu de la masterKey.
+//  2. Des masterKeys différentes ("any", "master", etc.) produisent des clés
+//     AES différentes (isolation des vaults).
+// ─────────────────────────────────────────────────────────────────────────────
+async function _normalizeKey(masterKey: string): Promise<Uint8Array> {
+  const raw = new TextEncoder().encode(masterKey);
+  const hash = await crypto.subtle.digest("SHA-256", raw);
+  return new Uint8Array(hash);
+}
+
+async function _aesEncryptWithKey(plaintext: string, keyBytes: Uint8Array): Promise<{ ciphertext: string; nonce: string }> {
+  const key = await crypto.subtle.importKey(
+    "raw", keyBytes.buffer as ArrayBuffer,
+    { name: "AES-GCM" }, false, ["encrypt"]
+  );
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const enc   = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: nonce, tagLength: 128 },
+    key,
+    new TextEncoder().encode(plaintext)
+  );
+  return { ciphertext: _b64(new Uint8Array(enc)), nonce: _b64(nonce) };
+}
+
+async function _aesDecryptWithKey(ciphertext: string, nonce: string, keyBytes: Uint8Array): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw", keyBytes.buffer as ArrayBuffer,
+    { name: "AES-GCM" }, false, ["decrypt"]
+  );
+  const dec = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: _fromb64(nonce).buffer as ArrayBuffer, tagLength: 128 },
+    key,
+    _fromb64(ciphertext).buffer as ArrayBuffer
+  );
+  return new TextDecoder().decode(dec);
+}
+
+function _b64(b: Uint8Array): string {
+  let s = "";
+  for (const byte of b) s += String.fromCharCode(byte);
+  return btoa(s);
+}
+function _fromb64(s: string): Uint8Array {
+  const b = atob(s);
+  return Uint8Array.from(b, c => c.charCodeAt(0));
+}
+
 /**
  * Chiffre les clés privées avec AES-256-GCM (master key Argon2id)
  * et les persiste dans IndexedDB. Charge également en mémoire.
@@ -109,11 +163,9 @@ export async function storePrivateKeys(uid: string, bundle: PrivateKeyBundle): P
     dsaPrivateKey: bundle.dsaPrivateKey,
   };
 
-  // Chiffrer le vault avec la master key Argon2id
-  const { ciphertext, nonce } = await aesGcmEncrypt(
-    JSON.stringify(payload),
-    bundle.masterKey
-  );
+  // Normaliser la masterKey → 32 bytes SHA-256 (robuste aux strings arbitraires)
+  const keyBytes = await _normalizeKey(bundle.masterKey);
+  const { ciphertext, nonce } = await _aesEncryptWithKey(JSON.stringify(payload), keyBytes);
   const vault: EncryptedVault = { ciphertext, nonce };
   await idbSet(`vault:${uid}`, JSON.stringify(vault));
 
@@ -133,7 +185,8 @@ export async function unlockPrivateKeys(uid: string, masterKey: string): Promise
   if (!raw) throw new Error(`No vault found for uid ${uid}`);
 
   const vault: EncryptedVault = JSON.parse(raw);
-  const plaintext = await aesGcmDecrypt(vault.ciphertext, vault.nonce, masterKey);
+  const keyBytes  = await _normalizeKey(masterKey);
+  const plaintext = await _aesDecryptWithKey(vault.ciphertext, vault.nonce, keyBytes);
   const payload: PrivateKeyMemory = JSON.parse(plaintext);
 
   _memoryStore.set(uid, payload);

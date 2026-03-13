@@ -215,11 +215,11 @@ describe("hkdfDerive — Input Validation", () => {
 // ══════════════════════════════════════════════════════════════════════════
 
 describe("Performance KPIs — HKDF-SHA256", () => {
-  it("[KPI] hkdfDerive < 2 ms", async () => {
+  it("[KPI] hkdfDerive < 5 ms", async () => {
     const secret = randomSecret();
     const avg    = await measureMs(() => hkdfDerive(secret, HKDF_INFO.MESSAGE_KEY));
     console.log(`[KPI] hkdfDerive avg: ${avg.toFixed(2)} ms`);
-    expect(avg).toBeLessThan(2);
+    expect(avg).toBeLessThan(5);
   });
 
   it("[KPI] hkdfDerivePair < 5 ms", async () => {

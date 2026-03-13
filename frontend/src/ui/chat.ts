@@ -1046,9 +1046,13 @@ function renderMessages(messages: DecryptedMessage[]): void {
     _renderedMsgIds.add(msg.id);
   }
 
-  container.scrollTop = container.scrollHeight;
+  // Scroller uniquement si l'utilisateur etait deja en bas (ou si c'est son propre message)
+  const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+  if (isAtBottom || newMessages.some(m => m.senderUid === _myUid)) {
+    container.scrollTop = container.scrollHeight;
+  }
 
-  // Réappliquer la recherche sur les nouveaux messages
+  // Reappliquer la recherche sur les nouveaux messages
   if (_msgSearchQuery) applyMsgSearch(_msgSearchQuery);
 
   if (hasNewFromOther) {

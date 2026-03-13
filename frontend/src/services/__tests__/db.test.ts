@@ -256,7 +256,7 @@ describe("POST /conversations/*/messages — Envoi", () => {
 
   it("sendMessage throw si destinataire sans clés publiques", async () => {
     await expect(sendMessage(UID_ALICE, UID_GHOST, "test"))
-      .rejects.toThrow(/no public keys/i);
+      .rejects.toThrow(/introuvable|no public keys/i);
   });
 
   it("sendMessage throw si clés privées expéditeur absentes du KeyStore", async () => {
@@ -345,7 +345,7 @@ describe("PENTEST — Isolation des données", () => {
 
   it("[P02] sendMessage avec destinataire inconnu → throw explicite", async () => {
     await expect(sendMessage(UID_ALICE, "uid-attacker-unknown", "injected"))
-      .rejects.toThrow(/no public keys/i);
+      .rejects.toThrow(/introuvable|no public keys/i);
   });
 
   it("[P03] PublicKeyBundle ne contient jamais de clé privée", async () => {
