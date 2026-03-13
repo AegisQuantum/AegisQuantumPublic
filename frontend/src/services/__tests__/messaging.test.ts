@@ -23,11 +23,18 @@ const UID_BOB   = "msg-test-bob-uid";
 const UID_CAROL = "msg-test-carol-uid";
 
 async function seedKeys(uid: string): Promise<void> {
+  // masterKey doit être du Base64 valide représentant 32 bytes
+  // btoa(String.fromCharCode(...32 bytes)) = Base64 de 32 bytes (44 chars avec padding)
+  const masterKeyBytes = new Uint8Array(32).fill(0x41); // 32× 'A'
+  const masterKey = btoa(String.fromCharCode(...masterKeyBytes));   // "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUA="
+  const argon2SaltBytes = new Uint8Array(16).fill(0x42); // 16× 'B'
+  const argon2Salt = btoa(String.fromCharCode(...argon2SaltBytes)); // "QUJCQUJCQUJCQUJCQUJCQUJCQUJCQUJCQUJC" (24 chars)
+
   await storePrivateKeys(uid, {
     kemPrivateKey: `kem-priv-${uid}`,
     dsaPrivateKey: `dsa-priv-${uid}`,
-    masterKey    : "master-key-32bytes===========",
-    argon2Salt   : "argon2-salt-16bytes=",
+    masterKey,
+    argon2Salt,
   });
   await publishPublicKeys(uid, {
     uid,
@@ -386,8 +393,8 @@ describe("Security invariants — messaging", () => {
     await storePrivateKeys(CORRUPT_UID, {
       kemPrivateKey: "kem-priv-corrupt",
       dsaPrivateKey: "dsa-priv-corrupt",
-      masterKey    : "master-key-32bytes===========",
-      argon2Salt   : "argon2-salt-16bytes=",
+      masterKey    : btoa(String.fromCharCode(...new Uint8Array(32).fill(0x41))),
+      argon2Salt   : btoa(String.fromCharCode(...new Uint8Array(16).fill(0x42))),
     });
     let threw = false;
     try {
