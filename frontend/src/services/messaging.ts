@@ -204,6 +204,7 @@ export async function sendFile(
     ciphertext       : drResult.ciphertext,
     nonce            : drResult.nonce,
     kemCiphertext    : drResult.kemCiphertext,
+    senderEphPub     : drResult.senderEphPub, // <-- ADD THIS
     signature,
     messageIndex     : drResult.messageIndex,
     timestamp        : ts,
@@ -268,6 +269,7 @@ export async function sendMessage(
     ciphertext        : drResult.ciphertext,
     nonce             : drResult.nonce,
     kemCiphertext     : drResult.kemCiphertext,
+    senderEphPub      : drResult.senderEphPub, // <-- ADD THIS
     signature,
     messageIndex      : drResult.messageIndex,
     timestamp         : ts,
@@ -322,6 +324,7 @@ export async function decryptMessage(
 
   const drResult = await doubleRatchetDecrypt(
     msg.ciphertext, msg.nonce, msg.messageIndex, msg.kemCiphertext,
+    msg.senderEphPub,    // <-- ADD THIS
     stateJson, msg.conversationId, myKemPrivKey, myKemPubKey,
     senderKeys?.kemPublicKey ?? "", msg.initKemCiphertext,
   );

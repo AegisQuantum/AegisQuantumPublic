@@ -263,7 +263,8 @@ describe("decryptMessage [UNIT]", () => {
       senderUid     : UID_ALICE,
       ciphertext    : btoa("X"),
       nonce         : btoa("N"),
-      kemCiphertext : btoa("C".repeat(1088)), // taille valide pour passer la validation KEM
+      kemCiphertext : btoa("C".repeat(1088)),
+      senderEphPub  : btoa("E"),               // <-- ADD THIS
       signature     : "",
       messageIndex  : 0,
       timestamp     : Date.now(),
@@ -278,22 +279,24 @@ describe("decryptMessage [UNIT]", () => {
     const { kemEncapsulate } = await import("../../crypto/kem");
     const bobKeys = await import("../key-registry").then(m => m.getPublicKeys(UID_BOB));
     const { ciphertext: initKemCiphertext } = await kemEncapsulate(bobKeys!.kemPublicKey);
+    const UID_FRESH = "msg-test-fresh-receiver-" + Date.now();
 
     // On ne peut pas construire un ciphertext AES valide facilement sans le vrai ratchet,
     // donc ce test verifie juste que la signature invalide est bien detectee (verified=false)
     // quand decryptMessage peut au moins bootstrapper l'etat (initKemCiphertext present).
     // Le dechiffrement AES echouera ensuite — ce qui est attendu pour un message forge.
     const msg: EncryptedMessage = {
-      id                : "forged-sig",
-      conversationId    : getConversationId(UID_ALICE, UID_BOB),
-      senderUid         : UID_ALICE,
-      ciphertext        : btoa("X"),
-      nonce             : btoa("N".repeat(12)),
-      kemCiphertext     : btoa("C".repeat(1088)),
-      signature         : "",
-      messageIndex      : 0,
-      timestamp         : Date.now(),
-      initKemCiphertext,
+      id            : "no-init-kem",
+      conversationId: getConversationId(UID_ALICE, UID_FRESH),
+      senderUid     : UID_ALICE,
+      ciphertext    : btoa("X"),
+      nonce         : btoa("N"),
+      kemCiphertext : btoa("C".repeat(1088)),
+      senderEphPub  : btoa("E"),               // <-- ADD THIS
+      signature     : "",
+      messageIndex  : 0,
+      timestamp     : Date.now(),
+      // initKemCiphertext intentionnellement absent
     };
     // Le dechiffrement AES va echouer (ciphertext/kemCiphertext invalides),
     // mais verified=false doit etre determine avant ce crash.
@@ -374,11 +377,12 @@ describe("Performance KPIs", () => {
   it("[KPI] taille EncryptedMessage prod <= 15 KB", () => {
     const msg: EncryptedMessage = {
       id               : "prod-size",
-      conversationId   : getConversationId(UID_ALICE, UID_BOB),
+      conversationId   : getConversationId(UID_ALICE, UID_BOB), // <-- Corrigé : utilise UID_BOB
       senderUid        : UID_ALICE,
       ciphertext       : btoa("A".repeat(100)),
       nonce            : btoa("N".repeat(12)),
       kemCiphertext    : btoa("C".repeat(1088)),
+      senderEphPub     : btoa("E"),                             // <-- Le nouveau champ
       signature        : btoa("S".repeat(3309)),
       messageIndex     : 0,
       timestamp        : Date.now(),

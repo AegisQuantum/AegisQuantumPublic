@@ -30,6 +30,8 @@ export interface EncryptedMessage {
    */
   kemCiphertext: string;
 
+  senderEphPub: string; // <-- ADD THIS: Base64 — clé publique éphémère ML-KEM-768 utilisée pour ce message.
+
   /**
    * Base64 — signature ML-DSA-65 du message (ciphertext + nonce + kemCiphertext).
    * Produit par dsaSign() dans crypto/dsa.ts
