@@ -278,7 +278,7 @@ describe("decryptMessage [UNIT]", () => {
     // mais une signature vide. decryptMessage doit retourner verified: false sans crash.
     const { kemEncapsulate } = await import("../../crypto/kem");
     const bobKeys = await import("../key-registry").then(m => m.getPublicKeys(UID_BOB));
-    const { ciphertext: initKemCiphertext } = await kemEncapsulate(bobKeys!.kemPublicKey);
+    const { ciphertext: _initKemCiphertext } = await kemEncapsulate(bobKeys!.kemPublicKey);
     const UID_FRESH = "msg-test-fresh-receiver-" + Date.now();
 
     // On ne peut pas construire un ciphertext AES valide facilement sans le vrai ratchet,
@@ -453,7 +453,7 @@ describe("Security invariants [SEC]", () => {
   it("[SEC] messageIndex negatif ne crash pas decryptMessage", async () => {
     // Envoyer un vrai message pour avoir un initKemCiphertext valide
     const convId = getConversationId(UID_ALICE, UID_BOB);
-    let initKemCiphertext: string | undefined;
+    //let _initKemCiphertext: string | undefined;
 
     await new Promise<void>((resolve, reject) => {
       const unsub = subscribeToMessages(UID_BOB, convId, msgs => {

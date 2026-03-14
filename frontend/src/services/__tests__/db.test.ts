@@ -443,6 +443,7 @@ describe("PENTEST — Isolation des données", () => {
       ciphertext    : btoa("Replay scenario"),
       nonce         : "",
       kemCiphertext : "",
+      senderEphPub  : btoa("E"), // <-- Add this line
       signature     : "",
       messageIndex  : 42,
       timestamp     : Date.now(),

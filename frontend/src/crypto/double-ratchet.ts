@@ -152,8 +152,8 @@ export async function doubleRatchetEncrypt(
   plaintext     : string,
   stateJson     : string | null,
   conversationId: string,
-  ourPrivKey    : string,   // our long-term KEM private key (unused after bootstrap)
-  ourPubKey     : string,   // our long-term KEM public key
+  _ourPrivKey    : string,   // our long-term KEM private key (unused after bootstrap)
+  _ourPubKey     : string,   // our long-term KEM public key
   theirPubKey   : string,   // recipient's long-term KEM public key
 ): Promise<DoubleRatchetEncryptResult> {
 
@@ -267,7 +267,7 @@ export async function doubleRatchetDecrypt(
   conversationId    : string,
   ourPrivKey        : string,   // our long-term KEM private key
   ourPubKey         : string,   // our long-term KEM public key
-  theirLongTermPub  : string,   // sender's long-term KEM public key (for reference)
+  _theirLongTermPub  : string,   // sender's long-term KEM public key (for reference)
   initKemCiphertext?: string,   // only on bootstrap message (stateJson === null)
 ): Promise<DoubleRatchetDecryptResult> {
 
