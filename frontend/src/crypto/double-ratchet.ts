@@ -24,6 +24,22 @@
  *    (new ephemeral key each message).
  *
  * ─────────────────────────────────────────────────────────────────────────────
+ * SKIPPED KEYS — messages received out of order
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Because ML-KEM is one-directional, each message carries its own kemCiphertext
+ * encapsulated to state.ourPublicKey at the time of sending. If message N+1
+ * arrives before N, we must KEM-decapsulate N+1 NOW (while we still hold the
+ * matching ourPrivateKey), derive and cache its messageKey, then wait for N.
+ *
+ * Fix (Signal spec §2.6 adapted for KEM):
+ *  - In _advanceReceivingChain(), for every skipped index i < messageIndex,
+ *    store the derived messageKey in state.skippedMessageKeys[i].
+ *  - In doubleRatchetDecrypt(), check skippedMessageKeys[messageIndex] first.
+ *    If found → use cached key, skip KEM ratchet step entirely.
+ *    If not   → normal KEM ratchet step (message arrived in order).
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
  * BOOTSTRAP (stateJson === null — first message ever in this conversation)
  * ─────────────────────────────────────────────────────────────────────────────
  *
@@ -95,54 +111,24 @@ import type { RatchetState } from "../types/ratchet";
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface DoubleRatchetEncryptResult {
-  /** Base64 — AES-256-GCM ciphertext */
   ciphertext        : string;
-  /** Base64 — AES-GCM nonce (12 fresh bytes per message) */
   nonce             : string;
-  /**
-   * Base64 — ML-KEM-768 ciphertext for this ratchet step.
-   * Empty string ("") on the bootstrap message (messageIndex 0).
-   * The receiver checks: if stateJson was null → skip KEM ratchet step.
-   */
   kemCiphertext     : string;
-  /**
-   * Base64 — sender's fresh ephemeral public key.
-   * Stored in Firestore as senderEphPub.
-   * The receiver stores it as state.theirPublicKey for the next send step.
-   * Always present.
-   */
   senderEphPub      : string;
-  /** 0-based index in the sending chain — anti-replay guard on receive side */
   messageIndex      : number;
-  /** Serialised RatchetState → pass to saveRatchetState() in key-store.ts */
   newStateJson      : string;
-  /**
-   * Base64 — session bootstrap KEM ciphertext.
-   * Present ONLY on the first message (stateJson === null).
-   * Store in Firestore as initKemCiphertext.
-   * The receiver decapsulates it to recover initSecret.
-   */
   initKemCiphertext?: string;
-  /**
-   * Base64 — 32-byte file encryption secret.
-   * Derived from messageKey (a true secret) via HKDF.
-   * Use to AES-encrypt file attachments in messaging.ts.
-   * Never stored in Firestore.
-   */
   fileSecret        : string;
 }
 
 export interface DoubleRatchetDecryptResult {
-  /** Decrypted plaintext */
   plaintext   : string;
-  /** Updated RatchetState → pass to saveRatchetState() in key-store.ts */
   newStateJson: string;
-  /**
-   * Base64 — 32-byte file secret matching the sender's fileSecret.
-   * Use to AES-decrypt file attachments in messaging.ts.
-   */
   fileSecret  : string;
 }
+
+// Maximum skipped keys stored — protection contre les DoS / fuites mémoire
+const MAX_SKIPPED_STORED = 1_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // doubleRatchetEncrypt
@@ -152,48 +138,39 @@ export async function doubleRatchetEncrypt(
   plaintext     : string,
   stateJson     : string | null,
   conversationId: string,
-  _ourPrivKey    : string,   // our long-term KEM private key (unused after bootstrap)
-  _ourPubKey     : string,   // our long-term KEM public key
-  theirPubKey   : string,   // recipient's long-term KEM public key
+  _ourPrivKey   : string,
+  _ourPubKey    : string,
+  theirPubKey   : string,
 ): Promise<DoubleRatchetEncryptResult> {
 
   // ── Bootstrap : first message ─────────────────────────────────────────────
   if (stateJson === null) {
-    // 1. KEM encapsulate to recipient's long-term key.
-    //    initKemCiphertext goes to Firestore; initSecret never leaves this scope.
     const { sharedSecret: initSecret, ciphertext: initKemCiphertext } =
       await kemEncapsulate(theirPubKey);
 
-    // Derive root key + initial sending chain key from initSecret.
     const { rootKey, chainKey: sendingChainKey } = await hkdfDerivePair(initSecret);
 
-    // 2. Generate first ephemeral keypair.
-    //    ourEphPub is sent in senderEphPub so the receiver can encapsulate to us.
     const { publicKey: ourEphPub, privateKey: ourEphPriv } = await kemGenerateKeyPair();
 
     const state: RatchetState = {
       conversationId,
       rootKey,
       sendingChainKey,
-      receivingChainKey : "",
-      ourPrivateKey     : ourEphPriv,
-      ourPublicKey      : ourEphPub,
-      theirPublicKey    : theirPubKey,
-      sendCount         : 0,
-      receiveCount      : 0,
-      updatedAt         : Date.now(),
+      receivingChainKey  : "",
+      ourPrivateKey      : ourEphPriv,
+      ourPublicKey       : ourEphPub,
+      theirPublicKey     : theirPubKey,
+      sendCount          : 0,
+      receiveCount       : 0,
+      updatedAt          : Date.now(),
+      skippedMessageKeys : {},   // ← nouveau champ
     };
 
-    // 3. Symmetric ratchet only — no KEM ratchet step on bootstrap.
-    //    Both sides derive messageKey from the same chain key (from initSecret).
     const { nextChainKey, messageKey } = await symmetricRatchetStep(state.sendingChainKey);
     state.sendingChainKey = nextChainKey;
     const messageIndex    = state.sendCount++;
 
-    // 4. Encrypt.
     const { ciphertext, nonce } = await aesGcmEncrypt(plaintext, messageKey);
-
-    // File secret: derived from messageKey (secret), NOT from kemCiphertext (public).
     const fileSecret = await hkdfDerive(messageKey, HKDF_INFO.RATCHET_CHAIN + ":file", 32);
 
     state.updatedAt = Date.now();
@@ -201,7 +178,7 @@ export async function doubleRatchetEncrypt(
     return {
       ciphertext,
       nonce,
-      kemCiphertext    : "",    // no ratchet KEM CT on bootstrap
+      kemCiphertext    : "",
       senderEphPub     : ourEphPub,
       messageIndex,
       newStateJson     : serializeRatchetState(state),
@@ -213,31 +190,25 @@ export async function doubleRatchetEncrypt(
   // ── Subsequent messages ───────────────────────────────────────────────────
   const state = deserializeRatchetState(stateJson);
 
-  // 1. KEM ratchet step: encapsulate to receiver's current ephemeral public key.
-  //    state.theirPublicKey was set to their latest senderEphPub on last receive.
+  // Ensure skippedMessageKeys exists on states serialized before this fix
+  if (!state.skippedMessageKeys) state.skippedMessageKeys = {};
+
   const { sharedSecret: kemSecret, ciphertext: kemCiphertext } =
     await kemEncapsulate(state.theirPublicKey);
 
-  // Mix kemSecret into root chain: IKM = rootKey ‖ kemSecret.
   const ikm = concatSecrets(state.rootKey, kemSecret);
   const { rootKey: newRootKey, chainKey: newSendingChainKey } = await hkdfDerivePair(ikm);
   state.rootKey = newRootKey;
 
-  // 2. Generate fresh ephemeral keypair.
-  //    newEphPriv stored in state — used to decapsulate on the NEXT receive step.
-  //    newEphPub sent in senderEphPub so receiver encapsulates to it when replying.
   const { publicKey: newEphPub, privateKey: newEphPriv } = await kemGenerateKeyPair();
   state.ourPrivateKey = newEphPriv;
   state.ourPublicKey  = newEphPub;
 
-  // 3. Symmetric ratchet step → per-message key.
   const { nextChainKey, messageKey } = await symmetricRatchetStep(newSendingChainKey);
   state.sendingChainKey = nextChainKey;
   const messageIndex    = state.sendCount++;
 
-  // 4. Encrypt.
   const { ciphertext, nonce } = await aesGcmEncrypt(plaintext, messageKey);
-
   const fileSecret = await hkdfDerive(messageKey, HKDF_INFO.RATCHET_CHAIN + ":file", 32);
 
   state.updatedAt = Date.now();
@@ -261,14 +232,14 @@ export async function doubleRatchetDecrypt(
   ciphertext        : string,
   nonce             : string,
   messageIndex      : number,
-  kemCiphertext     : string,   // "" on bootstrap message
-  senderEphPub      : string,   // sender's fresh ephemeral public key
+  kemCiphertext     : string,
+  senderEphPub      : string,
   stateJson         : string | null,
   conversationId    : string,
-  ourPrivKey        : string,   // our long-term KEM private key
-  ourPubKey         : string,   // our long-term KEM public key
-  _theirLongTermPub  : string,   // sender's long-term KEM public key (for reference)
-  initKemCiphertext?: string,   // only on bootstrap message (stateJson === null)
+  ourPrivKey        : string,
+  ourPubKey         : string,
+  _theirLongTermPub : string,
+  initKemCiphertext?: string,
 ): Promise<DoubleRatchetDecryptResult> {
 
   // ── Bootstrap : first message received ───────────────────────────────────
@@ -280,27 +251,23 @@ export async function doubleRatchetDecrypt(
       );
     }
 
-    // 1. Decapsulate initKemCiphertext with our long-term private key.
-    //    Recovers the same initSecret the sender derived.
     const initSecret = await kemDecapsulate(initKemCiphertext, ourPrivKey);
     const { rootKey, chainKey: receivingChainKey } = await hkdfDerivePair(initSecret);
 
-    // 2. Store sender's ephemeral pub key as theirPublicKey.
-    //    We will encapsulate to it when we send our first reply.
     const state: RatchetState = {
       conversationId,
       rootKey,
-      sendingChainKey  : "",
+      sendingChainKey    : "",
       receivingChainKey,
-      ourPrivateKey    : ourPrivKey,   // long-term for now; updated when we send
-      ourPublicKey     : ourPubKey,
-      theirPublicKey   : senderEphPub, // ← encapsulate here on next send
-      sendCount        : 0,
-      receiveCount     : 0,
-      updatedAt        : Date.now(),
+      ourPrivateKey      : ourPrivKey,
+      ourPublicKey       : ourPubKey,
+      theirPublicKey     : senderEphPub,
+      sendCount          : 0,
+      receiveCount       : 0,
+      updatedAt          : Date.now(),
+      skippedMessageKeys : {},   // ← nouveau champ
     };
 
-    // 3. Symmetric ratchet only — matches sender's bootstrap (no KEM ratchet step).
     const { messageKey } = await _advanceReceivingChain(state, messageIndex);
 
     const plaintext  = await aesGcmDecrypt(ciphertext, nonce, messageKey);
@@ -313,9 +280,32 @@ export async function doubleRatchetDecrypt(
   // ── Subsequent messages ───────────────────────────────────────────────────
   const state = deserializeRatchetState(stateJson);
 
-  // 1. KEM ratchet step: decapsulate with our current ephemeral private key.
-  //    The sender encapsulated to state.ourPublicKey (our last senderEphPub),
-  //    so we decapsulate with state.ourPrivateKey (the matching private key).
+  // Ensure skippedMessageKeys exists on states serialized before this fix
+  if (!state.skippedMessageKeys) state.skippedMessageKeys = {};
+
+  // ── Skipped key path : message arrived out of order ──────────────────────
+  //
+  // If messageIndex is in the skippedMessageKeys buffer, we already derived
+  // this messageKey when a later message arrived first. Use the cached key
+  // directly — do NOT perform another KEM ratchet step (state.ourPrivateKey
+  // has already advanced past this message).
+  const cachedMessageKey = state.skippedMessageKeys[String(messageIndex)];
+
+  if (cachedMessageKey !== undefined) {
+    // Consume and purge the cached key
+    delete state.skippedMessageKeys[String(messageIndex)];
+
+    const plaintext  = await aesGcmDecrypt(ciphertext, nonce, cachedMessageKey);
+    const fileSecret = await hkdfDerive(cachedMessageKey, HKDF_INFO.RATCHET_CHAIN + ":file", 32);
+
+    state.updatedAt = Date.now();
+    return { plaintext, newStateJson: serializeRatchetState(state), fileSecret };
+  }
+
+  // ── Normal path : message arrived in order ────────────────────────────────
+  //
+  // Perform KEM ratchet step: decapsulate with our current ephemeral private key.
+  // The sender encapsulated to state.ourPublicKey, so ourPrivateKey matches.
   const kemSecret = await kemDecapsulate(kemCiphertext, state.ourPrivateKey);
   const ikm       = concatSecrets(state.rootKey, kemSecret);
   const { rootKey: newRootKey, chainKey: newReceivingChainKey } = await hkdfDerivePair(ikm);
@@ -323,11 +313,10 @@ export async function doubleRatchetDecrypt(
   state.rootKey           = newRootKey;
   state.receivingChainKey = newReceivingChainKey;
 
-  // 2. Update theirPublicKey to sender's new ephemeral key.
-  //    We will encapsulate to it on our next send.
+  // Update theirPublicKey to sender's new ephemeral key for next send step.
   state.theirPublicKey = senderEphPub;
 
-  // 3. Symmetric ratchet — advance to messageIndex (with anti-replay + DoS guard).
+  // Advance the symmetric chain, caching any skipped messageKeys along the way.
   const { messageKey } = await _advanceReceivingChain(state, messageIndex);
 
   const plaintext  = await aesGcmDecrypt(ciphertext, nonce, messageKey);
@@ -343,9 +332,14 @@ export async function doubleRatchetDecrypt(
 
 /**
  * Advance the receiving chain to messageIndex.
- * Applies anti-replay check (messageIndex < receiveCount → throw) and
- * DoS guard (steps > 1000 → throw).
- * Mutates state.receivingChainKey and state.receiveCount.
+ *
+ * - Anti-replay  : messageIndex < receiveCount → throw
+ * - DoS guard    : steps > MAX_SKIPPED_STORED  → throw
+ * - Skipped keys : for every index i < messageIndex that we step over,
+ *   store the intermediate messageKey in state.skippedMessageKeys[i].
+ *   These will be used if those messages arrive later (out-of-order delivery).
+ *
+ * Mutates state.receivingChainKey, state.receiveCount, state.skippedMessageKeys.
  * Returns the messageKey at messageIndex.
  */
 async function _advanceReceivingChain(
@@ -359,12 +353,11 @@ async function _advanceReceivingChain(
     );
   }
 
-  const MAX_SKIPPED = 1_000;
   const steps = messageIndex - state.receiveCount + 1;
-  if (steps > MAX_SKIPPED) {
+  if (steps > MAX_SKIPPED_STORED) {
     throw new Error(
       `doubleRatchetDecrypt: messageIndex too far ahead — ` +
-      `${steps} steps required, max allowed: ${MAX_SKIPPED}`
+      `${steps} steps required, max allowed: ${MAX_SKIPPED_STORED}`
     );
   }
 
@@ -375,6 +368,17 @@ async function _advanceReceivingChain(
     const result = await symmetricRatchetStep(chainKey);
     chainKey   = result.nextChainKey;
     messageKey = result.messageKey;
+
+    // Cache every key we skip over (all except the last one, which is the
+    // target messageKey we return to the caller).
+    if (i < steps - 1) {
+      const skippedIndex = state.receiveCount + i;
+
+      // Guard against unbounded growth
+      if (Object.keys(state.skippedMessageKeys).length < MAX_SKIPPED_STORED) {
+        state.skippedMessageKeys[String(skippedIndex)] = messageKey;
+      }
+    }
   }
 
   state.receivingChainKey = chainKey;

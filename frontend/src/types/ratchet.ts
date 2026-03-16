@@ -56,4 +56,18 @@ export interface RatchetState {
 
   /** Timestamp de dernière mise à jour (ms) */
   updatedAt: number;
+
+  /**
+   * Buffer des messageKeys pour les messages reçus hors-ordre (skipped keys).
+   *
+   * Clé   : messageIndex (stringifié pour JSON)
+   * Valeur : Base64 — messageKey dérivée lors du passage de la chaîne
+   *
+   * Peuplé dans _advanceReceivingChain() quand on saute des indices.
+   * Consulté dans doubleRatchetDecrypt() AVANT de tenter le KEM ratchet step.
+   * Purgé dès qu'une clé est consommée.
+   *
+   * ⚠ Limité à MAX_SKIPPED_STORED entrées pour éviter les fuites mémoire/stockage.
+   */
+  skippedMessageKeys: Record<string, string>;
 }

@@ -35,7 +35,8 @@
     "test:pentest": "vitest run -t '\\[PENTEST\\]'",
     "test:pentest:crypto": "vitest run src/crypto/__tests__/ -t '\\[PENTEST\\]'",
     "test:pentest:services": "vitest run src/services/__tests__/ -t '\\[PENTEST\\]|\\[SEC\\]|\\[SESSION\\]'",
-    "test:double-ratchet": "vitest run src/crypto/__tests__/double-ratchet.test.ts "
+    "test:double-ratchet": "vitest run src/crypto/__tests__/double-ratchet.test.ts ",
+    "test:bug-doubleratchet": "vitest run src/crypto/__tests__/debug-double-ratchet.test.ts"
   },
   "dependencies": {
     "@openforge-sh/liboqs": "latest",

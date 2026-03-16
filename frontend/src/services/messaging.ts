@@ -33,7 +33,7 @@
  */
 
 import {
-  collection, doc, addDoc, setDoc, getDoc, getDocs, updateDoc,
+  collection, doc, setDoc, getDoc, getDocs, updateDoc,
   query, where, orderBy, onSnapshot, serverTimestamp,
   type Unsubscribe,
   type QueryDocumentSnapshot,
