@@ -97,6 +97,7 @@
             Protocole crypto
           </span>
           <span class="crypto-box-status" id="crypto-status-dot"></span>
+          <button class="crypto-glass-btn" id="btn-crypto-glass" title="Machine sous verre — voir les opérations en direct">🔬</button>
         </div>
         <div class="crypto-steps" id="crypto-steps">
           <div class="crypto-idle">
@@ -255,14 +256,14 @@
               <span class="settings-row-label">ML-KEM-768 (FIPS 203)</span>
               <span class="settings-row-desc">Key Encapsulation — résistant quantique</span>
             </div>
-            <span class="settings-badge badge-blue">FIPS 203</span>
+            <span class="settings-badge badge-blue crypto-glass-trigger" id="badge-mlkem" title="Voir les opérations en direct" style="cursor:pointer">FIPS 203 🔬</span>
           </div>
           <div class="settings-row">
             <div class="settings-row-left">
               <span class="settings-row-label">ML-DSA-65 (FIPS 204)</span>
               <span class="settings-row-desc">Signatures numériques post-quantiques</span>
             </div>
-            <span class="settings-badge badge-blue">FIPS 204</span>
+            <span class="settings-badge badge-blue crypto-glass-trigger" id="badge-mldsa" title="Voir les signatures en direct" style="cursor:pointer">FIPS 204 🔬</span>
           </div>
           <div class="settings-row">
             <div class="settings-row-left">
@@ -274,9 +275,9 @@
           <div class="settings-row">
             <div class="settings-row-left">
               <span class="settings-row-label">Double Ratchet (ML-KEM-768)</span>
-              <span class="settings-row-desc">Forward secrecy — clé éphémère KEM + ratchet symétrique par message</span>
+              <span class="settings-row-desc">Forward secrecy — clé éphème KEM + ratchet symétrique par message</span>
             </div>
-            <span class="settings-badge badge-green">Actif</span>
+            <span class="settings-badge badge-green crypto-glass-trigger" id="badge-ratchet" title="Voir le ratchet en direct" style="cursor:pointer">Actif 🔬</span>
           </div>
         </div>
       </div>

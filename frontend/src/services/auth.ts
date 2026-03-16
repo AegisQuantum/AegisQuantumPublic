@@ -12,7 +12,7 @@ import {
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
 import { clearPrivateKeys, storePrivateKeys, unlockPrivateKeys, getKemPrivateKey, getDsaPrivateKey } from "./key-store";
-import { publishPublicKeys, getPublicKeys } from "./key-registry";
+import { publishPublicKeys, getPublicKeys, clearPublicKeysCache } from "./key-registry";
 import { kemGenerateKeyPair, dsaGenerateKeyPair, argon2Derive } from "../crypto";
 import type { AQUser } from "../types/user";
 
@@ -186,6 +186,7 @@ export async function mustChangePassword(uid: string): Promise<boolean> {
 
 export async function signOut(): Promise<void> {
   clearPrivateKeys();
+  clearPublicKeysCache();
   await firebaseSignOut(auth);
   _currentUser = null;
 }

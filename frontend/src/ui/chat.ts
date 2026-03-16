@@ -26,6 +26,7 @@ import {
   type BackupPayload,
 }                                           from '../services/backup';
 import type { Conversation, DecryptedMessage } from '../types/message';
+import { onCryptoEvent, type CryptoEventPayload } from '../services/crypto-events';
 
 let _unsubConvs:        (() => void) | null = null;
 let _unsubMessages:     (() => void) | null = null;
@@ -47,6 +48,14 @@ let _typingDebouncer: ReturnType<typeof createTypingDebouncer> | null = null;
 // Clé : convId  —  Valeur : derniers DecryptedMessage[] reçus du subscriber
 // ─────────────────────────────────────────────────────────────────────────────
 const _allDecryptedMessages = new Map<string, DecryptedMessage[]>();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Crypto Event Log — alimente la "machine sous verre" en temps réel
+// Ring-buffer de 60 events max pour le popup protocoles
+// ─────────────────────────────────────────────────────────────────────────────
+const CRYPTO_LOG_MAX = 60;
+const _cryptoLog: CryptoEventPayload[] = [];
+let _unsubCryptoEvents: (() => void) | null = null;
 
 // État de la recherche dans les messages
 let _msgSearchQuery = '';
@@ -305,6 +314,28 @@ export async function initChat(uid: string): Promise<void> {
       const name = el.querySelector('.contact-name')?.textContent?.toLowerCase() ?? '';
       el.style.display = name.includes(q) ? '' : 'none';
     });
+  });
+
+  // ── Machine sous verre — bouton dans la crypto-box + badges settings ──
+  const _openGlass = (anchorId: string) => (e: Event) => {
+    e.stopPropagation();
+    if (_cryptoPopupOpen) { closeCryptoPopup(); return; }
+    openCryptoPopup(anchorId);
+  };
+  document.getElementById('btn-crypto-glass')?.addEventListener('click', _openGlass('btn-crypto-glass'));
+  document.getElementById('badge-mlkem')?.addEventListener('click',     _openGlass('badge-mlkem'));
+  document.getElementById('badge-mldsa')?.addEventListener('click',     _openGlass('badge-mldsa'));
+  document.getElementById('badge-ratchet')?.addEventListener('click',   _openGlass('badge-ratchet'));
+
+  // ── Brancher le bus d'événements crypto (machine sous verre) ──
+  _unsubCryptoEvents?.();
+  _unsubCryptoEvents = onCryptoEvent((ev) => {
+    _cryptoLog.push(ev);
+    if (_cryptoLog.length > CRYPTO_LOG_MAX) _cryptoLog.shift();
+    // Mettre à jour le popup si ouvert
+    _refreshCryptoPopupIfOpen();
+    // Mettre à jour les panels dépliant ouverts avec les données live
+    _updateLiveDataInOpenPanels(ev);
   });
 
   // ── S'abonner aux conversations ──
@@ -660,6 +691,226 @@ const ICONS_SVG: Record<CryptoStepType, string> = {
   warn:   `<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10"><path d="M6 1 11 10H1L6 1Z"/><path d="M6 5v2.5M6 8.5v.5"/></svg>`,
   active: `<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10"><circle cx="6" cy="6" r="4.5"/><path d="M6 3v3l2 1.5"/></svg>`,
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Machine sous verre — Popup crypto live
+// S'ouvre quand on clique sur un badge protocole en bas (ML-KEM, ML-DSA, etc.)
+// Affiche le ring-buffer _cryptoLog en temps réel.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const STEP_LABELS: Record<string, string> = {
+  'kem:encapsulate'      : '🔗 KEM Encapsulate',
+  'kem:decapsulate'      : '🔓 KEM Décapsule',
+  'hkdf:derive'          : '🧩 HKDF Dérivation',
+  'aes:encrypt'          : '🔒 AES-GCM Chiffre',
+  'aes:decrypt'          : '✅ AES-GCM Déchiffre',
+  'dsa:sign'             : '✍️ DSA Signature',
+  'dsa:verify'           : '🔍 DSA Vérification',
+  'ratchet:load'         : '⚙️ Ratchet Chargé',
+  'ratchet:save'         : '💾 Ratchet Sauvé',
+  'firestore:write'      : '📤 Firestore Écriture',
+  'firestore:read-pubkey': '📡 Firestore Clé Pub',
+  'idb:cache-hit'        : '⚡ IDB Cache Hit',
+  'idb:cache-write'      : '💾 IDB Cache Write',
+};
+
+function _formatCryptoEvent(ev: CryptoEventPayload): string {
+  const parts: string[] = [];
+  if (ev.messageIndex !== undefined) parts.push(`#${ev.messageIndex}`);
+  if (ev.peerUid)               parts.push(`peer:${ev.peerUid}`);
+  if (ev.convId)                parts.push(`conv:${ev.convId}`);
+  if (ev.kemCiphertextPreview)  parts.push(`kem:${ev.kemCiphertextPreview}`);
+  if (ev.ciphertextPreview)     parts.push(`ct:${ev.ciphertextPreview}`);
+  if (ev.signaturePreview)      parts.push(`sig:${ev.signaturePreview}`);
+  if (ev.nonce)                 parts.push(`nonce:${ev.nonce.slice(0,12)}…`);
+  if (ev.ciphertextLen)         parts.push(`${ev.ciphertextLen}B`);
+  if (ev.signatureLen)          parts.push(`${ev.signatureLen}B`);
+  if (ev.verified !== undefined) parts.push(ev.verified ? '✓ ok' : '✗ FAIL');
+  if (ev.firestoreDocId)        parts.push(`doc:${ev.firestoreDocId}`);
+  if (ev.cacheKey)              parts.push(`store:${ev.cacheKey}`);
+  if (ev.cacheCount !== undefined) parts.push(`n=${ev.cacheCount}`);
+  return parts.join('  ');
+}
+
+let _cryptoPopupOpen = false;
+
+function openCryptoPopup(anchorId?: string): void {
+  // Supprimer ancien popup s'il existe
+  document.getElementById('crypto-glass-popup')?.remove();
+
+  const popup = document.createElement('div');
+  popup.id        = 'crypto-glass-popup';
+  popup.className = 'crypto-glass-popup';
+  popup.innerHTML = `
+    <div class="cgp-header">
+      <span class="cgp-title">🔬 Machine sous verre</span>
+      <span class="cgp-subtitle">Opérations cryptographiques en temps réel</span>
+      <button class="cgp-close" id="cgp-close-btn" title="Fermer">✕</button>
+    </div>
+    <div class="cgp-legend">
+      <span class="cgp-legend-item"><span style="color:var(--c-accent)">■</span> KEM/HKDF</span>
+      <span class="cgp-legend-item"><span style="color:#6fffb0">■</span> AES/DSA</span>
+      <span class="cgp-legend-item"><span style="color:#ffd06f">■</span> Ratchet/IDB</span>
+      <span class="cgp-legend-item"><span style="color:#c084fc">■</span> Firestore</span>
+    </div>
+    <div class="cgp-log" id="cgp-log-container"></div>
+    <div class="cgp-footer">
+      <span id="cgp-event-count">0 événements</span>
+      <span class="cgp-secure-badge">🔐 Clés privées jamais exposées</span>
+    </div>`;
+
+  // Positionner près de l'ancre si fournie
+  const anchor = anchorId ? document.getElementById(anchorId) : null;
+  if (anchor) {
+    const rect = anchor.getBoundingClientRect();
+    popup.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+    popup.style.left   = `${Math.max(8, rect.left - 20)}px`;
+  }
+
+  document.body.appendChild(popup);
+  _cryptoPopupOpen = true;
+
+  document.getElementById('cgp-close-btn')?.addEventListener('click', closeCryptoPopup);
+
+  // Clic en dehors ferme le popup
+  setTimeout(() => {
+    document.addEventListener('click', _onCryptoPopupOutsideClick);
+  }, 50);
+
+  _renderCryptoLog();
+
+  // Animation d'entrée
+  requestAnimationFrame(() => popup.classList.add('visible'));
+}
+
+function closeCryptoPopup(): void {
+  _cryptoPopupOpen = false;
+  document.removeEventListener('click', _onCryptoPopupOutsideClick);
+  const popup = document.getElementById('crypto-glass-popup');
+  if (popup) {
+    popup.classList.remove('visible');
+    setTimeout(() => popup.remove(), 200);
+  }
+}
+
+function _onCryptoPopupOutsideClick(e: MouseEvent): void {
+  const popup = document.getElementById('crypto-glass-popup');
+  if (popup && !popup.contains(e.target as Node)) closeCryptoPopup();
+}
+
+function _renderCryptoLog(): void {
+  const container = document.getElementById('cgp-log-container');
+  const countEl   = document.getElementById('cgp-event-count');
+  if (!container) return;
+
+  container.innerHTML = '';
+
+  if (_cryptoLog.length === 0) {
+    container.innerHTML = '<div class="cgp-empty">Aucune activité pour l\'instant…<br/>Envoyez ou recevez un message.</div>';
+    if (countEl) countEl.textContent = '0 événements';
+    return;
+  }
+
+  // Afficher du plus récent au plus ancien
+  const logs = [..._cryptoLog].reverse();
+  for (const ev of logs) {
+    const row = document.createElement('div');
+    row.className = `cgp-row cgp-row-${_eventColorClass(ev.step)}`;
+
+    const time = new Date(ev.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const label = STEP_LABELS[ev.step] ?? ev.step;
+    const detail = _formatCryptoEvent(ev);
+
+    row.innerHTML = `
+      <span class="cgp-time">${time}</span>
+      <span class="cgp-step-label">${label}</span>
+      <span class="cgp-detail">${detail}</span>`;
+
+    container.appendChild(row);
+  }
+
+  if (countEl) {
+    countEl.textContent = `${_cryptoLog.length} événement${_cryptoLog.length > 1 ? 's' : ''}`;
+  }
+}
+
+function _refreshCryptoPopupIfOpen(): void {
+  if (!_cryptoPopupOpen) return;
+  _renderCryptoLog();
+}
+
+function _eventColorClass(step: string): string {
+  if (step.startsWith('kem:') || step === 'hkdf:derive')     return 'kem';
+  if (step.startsWith('aes:') || step.startsWith('dsa:'))   return 'aes';
+  if (step.startsWith('ratchet:') || step.startsWith('idb:')) return 'ratchet';
+  if (step.startsWith('firestore:'))                         return 'firestore';
+  return 'other';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Live data dans les panels dépliant existants
+// Quand un panel est ouvert et qu'un event arrive, on injecte les données réelles
+// dans une zone "live" dédiée en bas du panel.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Mapping event step → index du step dans SEND_STEPS / RECV_STEPS
+const SEND_STEP_MAP: Record<string, number> = {
+  'kem:encapsulate': 1,   // Encapsulation KEM
+  'hkdf:derive':     2,   // Dérivation HKDF
+  'aes:encrypt':     3,   // AES-256-GCM
+  'dsa:sign':        4,   // Signature
+  'firestore:write': 5,   // Envoi Firestore
+};
+const RECV_STEP_MAP: Record<string, number> = {
+  'firestore:read-pubkey': 0, // Récupération clé pub
+  'dsa:verify':            1, // Vérification signature
+  'kem:decapsulate':       2, // Décapsulation KEM
+  'hkdf:derive':           3, // Re-dérivation HKDF
+  'aes:decrypt':           4, // Déchiffrement AES
+};
+
+function _updateLiveDataInOpenPanels(ev: CryptoEventPayload): void {
+  // Trouver tous les panels ouverts dans le crypto-steps container
+  const container = document.getElementById('crypto-steps');
+  if (!container) return;
+
+  const openWraps = container.querySelectorAll<HTMLElement>('.crypto-step-wrap.open');
+  if (openWraps.length === 0) return;
+
+  openWraps.forEach((wrap) => {
+    const panel = wrap.querySelector<HTMLElement>('.crypto-step-panel');
+    if (!panel) return;
+
+    // Identifier à quel step correspond ce panel (via index dans le DOM)
+    const allWraps = [...container.querySelectorAll('.crypto-step-wrap')];
+    const stepIdx  = allWraps.indexOf(wrap);
+
+    // Vérifier si cet event correspond à ce step (envoi ou réception)
+    const isSendStep = Object.entries(SEND_STEP_MAP).some(([k, v]) => k === ev.step && v === stepIdx);
+    const isRecvStep = Object.entries(RECV_STEP_MAP).some(([k, v]) => k === ev.step && v === stepIdx);
+    if (!isSendStep && !isRecvStep) return;
+
+    // Créer ou mettre à jour la zone live dans le panel
+    let liveZone = panel.querySelector<HTMLElement>('.crypto-panel-live');
+    if (!liveZone) {
+      liveZone = document.createElement('div');
+      liveZone.className = 'crypto-panel-live';
+      panel.appendChild(liveZone);
+    }
+
+    const detail = _formatCryptoEvent(ev);
+    const time   = new Date(ev.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    liveZone.innerHTML = `
+      <div class="cpl-header">⚡ Données temps réel — ${time}</div>
+      <div class="cpl-row">${detail || '—'}</div>
+      ${ev.verified !== undefined
+        ? `<div class="cpl-row cpl-verify ${ev.verified ? 'ok' : 'fail'}">
+             ${ev.verified ? '✓ Signature valide' : '✗ Signature INVALIDE'}
+           </div>`
+        : ''}
+    `;
+  });
+}
 
 function setCryptoStatus(state: 'idle' | 'sending' | 'active' | 'error'): void {
   const dot = document.getElementById('crypto-status-dot');
@@ -1138,8 +1389,9 @@ async function handleSendMessage(): Promise<void> {
   try {
     await sendMessage(_myUid, contactUid, text);
   } catch (err) {
+    const msg = err instanceof Error ? `${err.message}` : String(err);
     console.error('[AQ] sendMessage failed:', err);
-    showToast('Envoi échoué. Vérifiez la console.');
+    showToast(`Envoi échoué : ${msg}`);
     input.value = text;
     clearCryptoBox();
     setCryptoStatus('idle');
@@ -1193,12 +1445,16 @@ async function handleSignOut(): Promise<void> {
   _unsubMessages?.();
   _unsubTyping?.();
   _unsubPreview?.();
-  _unsubTyping    = null;
-  _unsubPreview   = null;
-  _currentConvId  = null;
-  _localConvs     = [];
-  _renderedMsgIds  = new Set();
+  _unsubTyping       = null;
+  _unsubPreview      = null;
+  _unsubCryptoEvents?.();
+  _unsubCryptoEvents = null;
+  _currentConvId     = null;
+  _localConvs        = [];
+  _renderedMsgIds    = new Set();
   _allDecryptedMessages.clear();
+  _cryptoLog.length  = 0;
+  closeCryptoPopup();
   closeMsgSearch();
   await signOut();
 }

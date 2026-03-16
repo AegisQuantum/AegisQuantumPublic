@@ -35,6 +35,13 @@ import {
 import { db }            from "./firebase";
 import { getPublicKeys } from "./key-registry";
 import { getKemPrivateKey, getDsaPrivateKey, saveRatchetState, loadRatchetState } from "./key-store";
+import {
+  emitCryptoEvent, previewB64, shortUid, shortConvId,
+} from "./crypto-events";
+import {
+  loadCachedMessages, saveCachedMessages, getLastCachedMessageTs,
+  saveCachedConversations, loadCachedConversations,
+} from "./idb-cache";
 import { dsaSign, dsaVerify } from "../crypto";
 import { doubleRatchetEncrypt, doubleRatchetDecrypt } from "../crypto/double-ratchet";
 import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto/aes-gcm";
@@ -58,11 +65,6 @@ function _notifyConvPreviewUpdate(convId: string, plaintext: string, ts: number)
   const preview = plaintext.length > 40 ? plaintext.slice(0, 40) + "\u2026" : plaintext;
   _convPreviewListeners.forEach(cb => cb(convId, preview, ts));
 }
-
-// ---------------------------------------------------------------------------
-// Retry — dechiffrement differe (race condition)
-// ---------------------------------------------------------------------------
-const _retrySet = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Pre-load envoye — injecte APRES addDoc (realId connu) dans decryptedCache
@@ -131,7 +133,7 @@ export async function updateConversationPreview(convId: string, plaintext: strin
   try {
     await updateDoc(convDoc(convId), {
       lastMessagePreview: preview,
-      lastMessageAt     : Date.now(),
+      lastMessageAt     : serverTimestamp(), // serverTimestamp pour tri Firestore coherent
     });
   } catch {
     // Silencieux
@@ -142,13 +144,21 @@ export function subscribeToConversations(
   myUid   : string,
   callback: (convs: Conversation[]) => void,
 ): Unsubscribe {
+  // Servir le cache IDB immédiatement (avant la réponse Firestore)
+  loadCachedConversations(myUid).then(cached => {
+    if (cached && cached.length > 0) callback(cached);
+  }).catch(() => {});
+
   const q = query(
     convsCol(),
     where("participants", "array-contains", myUid),
     orderBy("lastMessageAt", "desc"),
   );
   return onSnapshot(q, snap => {
-    callback(snap.docs.map(d => d.data() as Conversation));
+    const convs = snap.docs.map(d => d.data() as Conversation);
+    callback(convs);
+    // Persister dans IDB pour la prochaine session
+    saveCachedConversations(myUid, convs).catch(() => {});
   });
 }
 
@@ -239,43 +249,94 @@ export async function sendMessage(
   contactUid: string,
   plaintext : string,
 ): Promise<void> {
-  const convId = getConversationId(myUid, contactUid);
+  console.log('[AQ:send] 1/6 — getOrCreateConversation', { myUid, contactUid });
+  // S'assurer que la conversation existe dans Firestore AVANT d'ecrire le message.
+  const convId = await getOrCreateConversation(myUid, contactUid);
+  console.log('[AQ:send] 2/6 — convId OK:', convId);
 
   const myKeys      = await getPublicKeys(myUid);
   const myKemPubKey = myKeys?.kemPublicKey ?? "";
+  console.log('[AQ:send] 3/6 — myKemPubKey:', myKemPubKey ? myKemPubKey.slice(0,20)+'...' : 'ABSENT');
+
   const contactKeys = await getPublicKeys(contactUid);
   if (!contactKeys) throw new Error(`Cles publiques introuvables pour ${contactUid}`);
+  console.log('[AQ:send] 4/6 — contactKeys OK');
 
   const myDsaPrivateKey = getDsaPrivateKey(myUid);
   const myKemPrivateKey = getKemPrivateKey(myUid);
+  console.log('[AQ:send] 5/6 — clés privées OK');
 
   const stateJson = await loadRatchetState(myUid, convId);
+  emitCryptoEvent({ step: 'ratchet:load', convId: shortConvId(convId) });
 
   const drResult = await doubleRatchetEncrypt(
     plaintext, stateJson, convId, myKemPrivateKey, myKemPubKey, contactKeys.kemPublicKey,
   );
+  emitCryptoEvent({
+    step: 'kem:encapsulate',
+    convId: shortConvId(convId),
+    peerUid: shortUid(contactUid),
+    kemCiphertextPreview: previewB64(drResult.kemCiphertext),
+    messageIndex: drResult.messageIndex,
+  });
+  emitCryptoEvent({
+    step: 'hkdf:derive',
+    convId: shortConvId(convId),
+    messageIndex: drResult.messageIndex,
+  });
+  emitCryptoEvent({
+    step: 'aes:encrypt',
+    convId: shortConvId(convId),
+    ciphertextPreview: previewB64(drResult.ciphertext),
+    nonce: drResult.nonce.slice(0, 24),
+    ciphertextLen: Math.round(drResult.ciphertext.length * 3 / 4),
+    messageIndex: drResult.messageIndex,
+  });
 
   await saveRatchetState(myUid, convId, drResult.newStateJson);
+  emitCryptoEvent({ step: 'ratchet:save', convId: shortConvId(convId), messageIndex: drResult.messageIndex });
 
   const signedPayload = drResult.ciphertext + drResult.nonce + drResult.kemCiphertext;
   const signature     = await dsaSign(signedPayload, myDsaPrivateKey);
+  emitCryptoEvent({
+    step: 'dsa:sign',
+    convId: shortConvId(convId),
+    signaturePreview: previewB64(signature),
+    signatureLen: Math.round(signature.length * 3 / 4),
+    messageIndex: drResult.messageIndex,
+  });
   const ts            = Date.now();
 
   // addDoc d'abord — on obtient le realId avant de notifier le cache
-  const msgRef = await addDoc(messagesCol(convId), {
-    conversationId    : convId,
-    senderUid         : myUid,
-    ciphertext        : drResult.ciphertext,
-    nonce             : drResult.nonce,
-    kemCiphertext     : drResult.kemCiphertext,
-    signature,
-    messageIndex      : drResult.messageIndex,
-    timestamp         : ts,
-    ...(drResult.initKemCiphertext ? { initKemCiphertext: drResult.initKemCiphertext } : {}),
-  } as Omit<EncryptedMessage, "id">);
+  console.log('[AQ:send] 6/6 — addDoc vers', `conversations/${convId}/messages`);
+  let msgRef;
+  try {
+    msgRef = await addDoc(messagesCol(convId), {
+      conversationId    : convId,
+      senderUid         : myUid,
+      ciphertext        : drResult.ciphertext,
+      nonce             : drResult.nonce,
+      kemCiphertext     : drResult.kemCiphertext,
+      signature,
+      messageIndex      : drResult.messageIndex,
+      timestamp         : ts,
+      ...(drResult.initKemCiphertext ? { initKemCiphertext: drResult.initKemCiphertext } : {}),
+    } as Omit<EncryptedMessage, "id">);
+  } catch (firestoreErr: unknown) {
+    const e = firestoreErr as { code?: string; message?: string };
+    console.error('[AQ:send] addDoc FAILED — code:', e.code, '— message:', e.message, '— full:', firestoreErr);
+    throw firestoreErr;
+  }
+  console.log('[AQ:send] addDoc OK — msgId:', msgRef.id);
+  emitCryptoEvent({
+    step: 'firestore:write',
+    convId: shortConvId(convId),
+    firestoreDocId: msgRef.id.slice(0, 12) + '…',
+    firestoreCollection: `conversations/${shortConvId(convId)}/messages`,
+    messageIndex: drResult.messageIndex,
+  });
 
   // Injecter dans decryptedCache de tous les subscribers AVEC LE VRAI ID
-  // -> quand le snapshot Firestore arrive, decryptedCache.has(realId) == true -> SKIP -> zero flash
   _preloadSentMessage(convId, {
     id: msgRef.id, senderUid: myUid, plaintext,
     timestamp: ts, verified: true, readBy: [],
@@ -309,24 +370,60 @@ export async function decryptMessage(
   }
 
   const senderKeys = await getPublicKeys(msg.senderUid);
+  emitCryptoEvent({
+    step: 'firestore:read-pubkey',
+    peerUid: shortUid(msg.senderUid),
+    convId: shortConvId(msg.conversationId),
+  });
   let   verified   = false;
   if (senderKeys) {
     const payload = msg.ciphertext + msg.nonce + msg.kemCiphertext;
     verified = await dsaVerify(payload, msg.signature, senderKeys.dsaPublicKey);
+    emitCryptoEvent({
+      step: 'dsa:verify',
+      peerUid: shortUid(msg.senderUid),
+      convId: shortConvId(msg.conversationId),
+      signaturePreview: previewB64(msg.signature),
+      signatureLen: Math.round(msg.signature.length * 3 / 4),
+      verified,
+      messageIndex: msg.messageIndex,
+    });
   }
 
   const myKeys       = await getPublicKeys(myUid);
   const myKemPubKey  = myKeys?.kemPublicKey ?? "";
   const myKemPrivKey = getKemPrivateKey(myUid);
   const stateJson    = await loadRatchetState(myUid, msg.conversationId);
+  emitCryptoEvent({ step: 'ratchet:load', convId: shortConvId(msg.conversationId), messageIndex: msg.messageIndex });
 
   const drResult = await doubleRatchetDecrypt(
     msg.ciphertext, msg.nonce, msg.messageIndex, msg.kemCiphertext,
     stateJson, msg.conversationId, myKemPrivKey, myKemPubKey,
     senderKeys?.kemPublicKey ?? "", msg.initKemCiphertext,
   );
+  emitCryptoEvent({
+    step: 'kem:decapsulate',
+    peerUid: shortUid(msg.senderUid),
+    convId: shortConvId(msg.conversationId),
+    kemCiphertextPreview: previewB64(msg.kemCiphertext),
+    messageIndex: msg.messageIndex,
+  });
+  emitCryptoEvent({
+    step: 'hkdf:derive',
+    convId: shortConvId(msg.conversationId),
+    messageIndex: msg.messageIndex,
+  });
+  emitCryptoEvent({
+    step: 'aes:decrypt',
+    convId: shortConvId(msg.conversationId),
+    ciphertextPreview: previewB64(msg.ciphertext),
+    nonce: msg.nonce.slice(0, 24),
+    ciphertextLen: Math.round(msg.ciphertext.length * 3 / 4),
+    messageIndex: msg.messageIndex,
+  });
 
   await saveRatchetState(myUid, msg.conversationId, drResult.newStateJson);
+  emitCryptoEvent({ step: 'ratchet:save', convId: shortConvId(msg.conversationId), messageIndex: msg.messageIndex });
 
   let fileAttachment: DecryptedMessage["file"] | undefined;
   if (msg.hasFile && msg.fileCiphertext && msg.fileNonce && msg.fileName) {
@@ -367,10 +464,51 @@ export function subscribeToMessages(
   conversationId: string,
   callback      : (messages: DecryptedMessage[]) => void,
 ): Unsubscribe {
-  const q = query(messagesCol(conversationId), orderBy("timestamp", "asc"));
-
   const decryptedCache = new Map<string, DecryptedMessage>();
   const allDocs        = new Map<string, QueryDocumentSnapshot<DocumentData>>();
+
+  // ── Charger le cache IDB immédiatement (affichage instantané) ──────────
+  // On appelle callback avec les messages cachés AVANT même que Firestore
+  // réponde. Le onSnapshot viendra ensuite patcher uniquement les deltas.
+  let _idbLoaded = false;
+  loadCachedMessages(conversationId).then((cached) => {
+    if (cached && cached.msgs.length > 0 && !_idbLoaded) {
+      _idbLoaded = true;
+      // Pré-peupler le cache mémoire avec les messages IDB
+      for (const m of cached.msgs) decryptedCache.set(m.id, m);
+      callback([...cached.msgs].sort((a, b) => a.timestamp - b.timestamp));
+    }
+  }).catch(() => {});
+
+  // Firestore : ne demander que les messages après le dernier timestamp caché
+  // Cela réduit les reads à seulement les nouveaux messages.
+  // On initialise la query d'abord avec tout (cas où le cache est vide),
+  // et on raffinera via _lastCachedTs ci-dessous.
+  let _queryStartTs = 0;
+  getLastCachedMessageTs(conversationId).then(ts => { _queryStartTs = ts; }).catch(() => {});
+
+  // On garde la query full pour l'instant (ratchet stateful = on a besoin
+  // que les IDs Firestore correspondent au cache). Le gain principal est le
+  // skip de déchiffrement via decryptedCache.has().
+  const q = query(messagesCol(conversationId), orderBy("timestamp", "asc"));
+
+  // File sequentielle — garantit qu'un seul decryptMessage() tourne a la fois
+  // Le Double Ratchet est STATEFUL : chaque dechiffrement lit IDB, avance l'etat,
+  // ecrit IDB. Deux dechiffrements concurrents lisent le meme etat -> replay.
+  let _decryptQueue: Promise<void> = Promise.resolve();
+
+  function enqueueDecrypt(task: () => Promise<void>): void {
+    _decryptQueue = _decryptQueue.then(task).catch(() => {});
+  }
+
+  // Debounce pour la sauvegarde IDB (ne pas écrire à chaque message individuel)
+  let _saveCacheTimer: ReturnType<typeof setTimeout> | null = null;
+  function _scheduleCacheSave(msgs: DecryptedMessage[]): void {
+    if (_saveCacheTimer) clearTimeout(_saveCacheTimer);
+    _saveCacheTimer = setTimeout(() => {
+      saveCachedMessages(conversationId, msgs).catch(() => {});
+    }, 800);
+  }
 
   function emitResult(): void {
     // Messages Firestore confirmes, tries par timestamp
@@ -385,41 +523,19 @@ export function subscribeToMessages(
       .filter(m => !allDocs.has(m.id))
       .sort((a, b) => a.timestamp - b.timestamp);
 
-    callback([...result, ...preloaded]);
+    const all = [...result, ...preloaded];
+    callback(all);
+    // Sauvegarder les messages déchiffrés dans IDB (debounced)
+    _scheduleCacheSave(all);
   }
 
   // Preload : injecte un message envoye (avec realId) avant le snapshot
   const unregisterPreload = _registerPreloadListener(conversationId, (msg) => {
     decryptedCache.set(msg.id, msg);
-    // allDocs ne contient pas encore ce msg (snapshot pas encore arrive)
-    // On emet avec la liste Firestore + preloaded
     emitResult();
   });
 
-  function scheduleRetry(failedMsg: EncryptedMessage): void {
-    setTimeout(async () => {
-      if (!_retrySet.has(failedMsg.id)) return;
-      const freshDoc = allDocs.get(failedMsg.id);
-      const msgData  = freshDoc ? { id: freshDoc.id, ...freshDoc.data() } as EncryptedMessage : failedMsg;
-      try {
-        const decrypted = await decryptMessage(myUid, msgData);
-        decryptedCache.set(msgData.id, decrypted);
-        _retrySet.delete(msgData.id);
-        emitResult();
-      } catch (err) {
-        console.error(`[AQ] Retry dechiffrement echoue pour ${msgData.id}:`, err);
-        decryptedCache.set(msgData.id, {
-          id: msgData.id, senderUid: msgData.senderUid,
-          plaintext: "[\uD83D\uDD12 Message non dechiffrable]",
-          timestamp: msgData.timestamp, verified: false, readBy: [],
-        });
-        _retrySet.delete(msgData.id);
-        emitResult();
-      }
-    }, 80);
-  }
-
-  const unsubFirestore = onSnapshot(q, async snap => {
+  const unsubFirestore = onSnapshot(q, snap => {
     const changes = snap.docChanges();
 
     // Capturer quels IDs sont nouveaux AVANT de mettre a jour allDocs.
@@ -439,106 +555,76 @@ export function subscribeToMessages(
       }
     }
 
-    let hasNewWork = false;
-
     // ── Modifications (readBy uniquement) ─────────────────────────────────
+    let hasImmediateWork = false;
     for (const change of changes) {
-      if (change.type !== "modified" || _retrySet.has(change.doc.id)) continue;
+      if (change.type !== "modified") continue;
       const cached = decryptedCache.get(change.doc.id);
       if (cached) {
         const freshReadBy = (change.doc.data().readBy ?? []) as string[];
         const current     = cached.readBy ?? [];
         if (freshReadBy.length !== current.length || freshReadBy.some(u => !current.includes(u))) {
           decryptedCache.set(change.doc.id, { ...cached, readBy: freshReadBy });
-          hasNewWork = true;
+          hasImmediateWork = true;
         }
       }
     }
 
-    // ── Suppressions ──────────────────────────────────────────────────────
-    if (changes.some(c => c.type === "removed")) hasNewWork = true;
+    if (changes.some(c => c.type === "removed")) hasImmediateWork = true;
+    if (newlyConfirmedPreloads.size > 0)          hasImmediateWork = true;
+    if (hasImmediateWork) emitResult();
 
-    // ── Confirmations de preload ──────────────────────────────────────────
-    if (newlyConfirmedPreloads.size > 0) hasNewWork = true;
-
-    // ── Nouveaux messages a dechiffrer — PARALLELE ────────────────────────
-    // On collecte d'abord tous les messages necessitant un dechiffrement,
-    // puis on les dechiffre tous en parallele (Promise.all).
-    // Avant : boucle sequentielle -> N * ~5ms = lent au chargement initial.
-    // Apres : dechiffrement simultane -> ~max(5ms) quelle que soit la quantite.
-    const toDecrypt: Array<{ msg: EncryptedMessage; isRetry: boolean }> = [];
-
+    // ── Nouveaux messages a dechiffrer ────────────────────────────────────
+    // Collecter uniquement les messages pas encore dans le cache
+    const toDecrypt: EncryptedMessage[] = [];
     for (const change of changes) {
       if (change.type === "removed" || change.type === "modified") continue;
       const d   = change.doc;
+      // Deja dans le cache (preloade ou deja dechiffre) -> SKIP
+      if (decryptedCache.has(d.id)) continue;
       const msg = { id: d.id, ...d.data() } as EncryptedMessage;
-
-      // Deja dans le cache (preloade ou dechiffre) et pas en retry -> SKIP
-      if (decryptedCache.has(d.id) && !_retrySet.has(d.id)) continue;
-
-      toDecrypt.push({ msg, isRetry: _retrySet.has(msg.id) });
+      toDecrypt.push(msg);
     }
 
-    if (toDecrypt.length > 0) {
-      // Inserer les placeholders immediatement pour un affichage rapide
-      for (const { msg, isRetry } of toDecrypt) {
-        if (!isRetry && !decryptedCache.has(msg.id)) {
+    if (toDecrypt.length === 0) return;
+
+    // Trier par messageIndex avant d'enqueuer — ordre du ratchet
+    toDecrypt.sort((a, b) => (a.messageIndex ?? 0) - (b.messageIndex ?? 0));
+
+    // Inserer les placeholders immediatement (avant que la queue tourne)
+    for (const msg of toDecrypt) {
+      decryptedCache.set(msg.id, {
+        id: msg.id, senderUid: msg.senderUid,
+        plaintext: "[\uD83D\uDD12 Dechiffrement\u2026]",
+        timestamp: msg.timestamp, verified: false, readBy: [],
+      });
+    }
+    emitResult();
+
+    // Enqueuer UN PAR UN dans la file sequentielle
+    // Chaque tache attend la precedente -> jamais deux decryptMessage() en meme temps
+    for (const msg of toDecrypt) {
+      enqueueDecrypt(async () => {
+        try {
+          const decrypted = await decryptMessage(myUid, msg);
+          decryptedCache.set(msg.id, decrypted);
+          updateConversationPreview(msg.conversationId, decrypted.plaintext).catch(() => {});
+        } catch (err) {
+          console.error(`[AQ] Dechiffrement echoue pour ${msg.id}:`, err);
           decryptedCache.set(msg.id, {
             id: msg.id, senderUid: msg.senderUid,
-            plaintext: "[\uD83D\uDD12 Dechiffrement\u2026]",
+            plaintext: "[\uD83D\uDD12 Message non dechiffrable]",
             timestamp: msg.timestamp, verified: false, readBy: [],
           });
         }
-      }
-      // Emettre avec les placeholders pendant que le dechiffrement tourne
-      emitResult();
-
-      // Dechiffrer tous les messages en parallele
-      const results = await Promise.allSettled(
-        toDecrypt.map(({ msg }) => decryptMessage(myUid, msg).then(d => ({ msg, decrypted: d })))
-      );
-
-      for (const result of results) {
-        if (result.status === "fulfilled") {
-          const { msg, decrypted } = result.value;
-          decryptedCache.set(msg.id, decrypted);
-          _retrySet.delete(msg.id);
-          const { isRetry } = toDecrypt.find(t => t.msg.id === msg.id)!;
-          if (!isRetry) {
-            updateConversationPreview(msg.conversationId, decrypted.plaintext).catch(() => {});
-          }
-        } else {
-          // Trouver le message en echec
-          const idx     = results.indexOf(result);
-          const { msg, isRetry } = toDecrypt[idx];
-          if (!isRetry) {
-            console.warn(`[AQ] Dechiffrement differe pour ${msg.id}`);
-            _retrySet.add(msg.id);
-            decryptedCache.set(msg.id, {
-              id: msg.id, senderUid: msg.senderUid,
-              plaintext: "[\uD83D\uDD12 Dechiffrement en cours\u2026]",
-              timestamp: msg.timestamp, verified: false, readBy: [],
-            });
-            scheduleRetry(msg);
-          } else {
-            console.error(`[AQ] Echec definitif dechiffrement ${msg.id}`);
-            decryptedCache.set(msg.id, {
-              id: msg.id, senderUid: msg.senderUid,
-              plaintext: "[\uD83D\uDD12 Message non dechiffrable]",
-              timestamp: msg.timestamp, verified: false, readBy: [],
-            });
-            _retrySet.delete(msg.id);
-          }
-        }
-      }
-      hasNewWork = true;
+        emitResult();
+      });
     }
-
-    if (hasNewWork) emitResult();
   });
 
   return () => {
     unsubFirestore();
     unregisterPreload();
+    if (_saveCacheTimer) clearTimeout(_saveCacheTimer);
   };
 }
