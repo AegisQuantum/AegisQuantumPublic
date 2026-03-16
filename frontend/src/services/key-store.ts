@@ -48,14 +48,46 @@ const _memoryStore = new Map<string, PrivateKeyMemory>();
 
 const IDB_NAME    = "aegisquantum-vault";
 const IDB_STORE   = "keys";
-const IDB_VERSION = 1;
+const IDB_VERSION = 2; // bump a 2 pour forcer onupgradeneeded sur Safari
 
+// openDB — robuste Safari :
+// Safari peut ouvrir la DB avec succes sans declencher onupgradeneeded
+// (notamment en navigation privee ou apres un deleteDatabase partiel).
+// On verifie apres ouverture que l'objectStore existe ; s'il est absent on
+// force un upgrade en reopenrant avec version + 1.
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(IDB_NAME, IDB_VERSION);
-    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
+
+    req.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE);
+      }
+    };
+
+    req.onsuccess = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      // Verif defensive : si l'objectStore est absent malgre tout (Safari bug),
+      // on ferme et on force un re-open avec version incrementee.
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.close();
+        const version = db.version + 1;
+        const req2 = indexedDB.open(IDB_NAME, version);
+        req2.onupgradeneeded = (ev2) => {
+          const db2 = (ev2.target as IDBOpenDBRequest).result;
+          if (!db2.objectStoreNames.contains(IDB_STORE)) {
+            db2.createObjectStore(IDB_STORE);
+          }
+        };
+        req2.onsuccess = (ev2) => resolve((ev2.target as IDBOpenDBRequest).result);
+        req2.onerror   = (ev2) => reject((ev2.target as IDBOpenDBRequest).error);
+        return;
+      }
+      resolve(db);
+    };
+
+    req.onerror = (event) => reject((event.target as IDBOpenDBRequest).error);
   });
 }
 

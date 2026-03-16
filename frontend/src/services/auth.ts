@@ -113,10 +113,23 @@ export async function loadCryptoKeys(uid: string, password: string): Promise<voi
   try {
     await unlockPrivateKeys(uid, masterKey);
     console.log("[AQ:crypto] Vault déchiffré ✓");
-  } catch {
-    // Vault IDB absent (effacé manuellement) ou corrompu → régénérer
-    console.warn("[AQ:crypto] Vault IDB introuvable — régénération des clés…");
-    await _generateAndPublishKeys(uid, password);
+  } catch (e) {
+    // Vault IDB absent ou corrompu.
+    //
+    // CRITIQUE : des clés publiques existent déjà dans Firestore, ce qui signifie
+    // que des messages ont été échangés avec ces clés. Régénérer ici écraserait
+    // les clés publiques → tous les anciens messages deviendraient indéchiffrables
+    // et la communication avec les contacts serait rompue silencieusement.
+    //
+    // On leve une erreur explicite pour que l'UI puisse avertir l'utilisateur
+    // ("Vos clés locales sont introuvables. Effacez vos données et recréez un compte.").
+    // Ne jamais régénérer silencieusement quand des clés publiques existent déjà.
+    console.error("[AQ:crypto] Vault IDB introuvable alors que des clés publiques existent dans Firestore.");
+    throw new Error(
+      "VAULT_MISSING: Vos cl\u00e9s priv\u00e9es locales sont introuvables (IDB vid\u00e9 ?). " +
+      "Impossible de se connecter sans elles — r\u00e9g\u00e9n\u00e9rer casserait toutes vos conversations. " +
+      "Pour repartir de z\u00e9ro : supprimez votre compte et recr\u00e9ez-en un."
+    );
   }
 }
 

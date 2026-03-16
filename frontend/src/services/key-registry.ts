@@ -22,21 +22,31 @@ import type { PublicKeyBundle } from "../types/user";
 const publicKeysCol = () => collection(db, "publicKeys");
 const publicKeyDoc  = (uid: string) => doc(db, "publicKeys", uid);
 
+// Cache mémoire — les clés publiques ne changent jamais après l'inscription.
+// Evite de refaire un read Firestore à chaque sendMessage/decryptMessage.
+const _publicKeysCache = new Map<string, PublicKeyBundle>();
+
 /**
  * Publie les clés publiques d'un utilisateur dans Firestore.
  */
 export async function publishPublicKeys(uid: string, bundle: PublicKeyBundle): Promise<void> {
   await setDoc(publicKeyDoc(uid), bundle);
+  _publicKeysCache.set(uid, bundle);
 }
 
 /**
  * Récupère le bundle de clés publiques d'un utilisateur depuis Firestore.
  * Retourne null si l'utilisateur n'existe pas.
+ * Les clés sont mises en cache mémoire — 1 seul read Firestore par uid par session.
  */
 export async function getPublicKeys(uid: string): Promise<PublicKeyBundle | null> {
+  const cached = _publicKeysCache.get(uid);
+  if (cached) return cached;
   const snap = await getDoc(publicKeyDoc(uid));
   if (!snap.exists()) return null;
-  return snap.data() as PublicKeyBundle;
+  const bundle = snap.data() as PublicKeyBundle;
+  _publicKeysCache.set(uid, bundle);
+  return bundle;
 }
 
 /**

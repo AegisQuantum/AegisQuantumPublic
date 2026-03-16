@@ -23,6 +23,13 @@
  *  2. DSA verify + Double Ratchet decrypt
  *  3. saveRatchetState IDB
  *  4. decryptedCache.set(msgId, decrypted) -> emitResult -> renderMessages
+ *
+ * IMPORTANT — SERIALISATION DU RATCHET :
+ * Le Double Ratchet est un état séquentiel : chaque message avance la chaîne.
+ * Les déchiffrements DOIVENT être effectués en séquence (par messageIndex croissant),
+ * jamais en parallèle. Un traitement parallèle ferait lire le même état depuis IDB
+ * par deux appels concurrents, produire deux états N+1 divergents, et l'un écraserait
+ * l'autre → corruption silencieuse → OperationError sur tous les messages suivants.
  */
 
 import {
@@ -32,6 +39,7 @@ import {
   type QueryDocumentSnapshot,
   type DocumentData,
 } from "firebase/firestore";
+import { toBase64 as _toB64 } from "../crypto/kem";
 import { db }            from "./firebase";
 import { getPublicKeys } from "./key-registry";
 import { getKemPrivateKey, getDsaPrivateKey, saveRatchetState, loadRatchetState } from "./key-store";
@@ -61,20 +69,14 @@ function _notifyConvPreviewUpdate(convId: string, plaintext: string, ts: number)
 
 // ---------------------------------------------------------------------------
 // Retry — dechiffrement differe (race condition)
+// _retrySet  : messages en cours de retry (un seul retry actif par message)
+// _retryFailed : messages definitivement non-dechiffrables (plus jamais retentes)
 // ---------------------------------------------------------------------------
-const _retrySet = new Set<string>();
+const _retrySet    = new Set<string>();
+const _retryFailed = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Pre-load envoye — injecte APRES addDoc (realId connu) dans decryptedCache
-//
-// Fonctionnement :
-//  1. sendMessage() appelle addDoc -> obtient realId
-//  2. Appelle _preloadSentMessage(convId, { id: realId, ... })
-//  3. Chaque subscriber actif pour cette conv reçoit le message via preloadFn
-//  4. Le subscriber l'insere dans decryptedCache + appelle emitResult
-//  5. renderMessages cree la bulle avec realId, ajoute realId dans _renderedMsgIds
-//  6. Snapshot Firestore arrive : decryptedCache.has(realId) == true -> SKIP
-//     -> aucun rerender, aucun flash
 // ---------------------------------------------------------------------------
 
 type PreloadFn = (msg: DecryptedMessage) => void;
@@ -88,6 +90,49 @@ function _registerPreloadListener(convId: string, fn: PreloadFn): () => void {
 
 function _preloadSentMessage(convId: string, msg: DecryptedMessage): void {
   _preloadListeners.get(convId)?.forEach(fn => fn(msg));
+}
+
+// ---------------------------------------------------------------------------
+// Mutex par conversation — garantit que le ratchet est avancé en séquence
+//
+// Le Double Ratchet est un état séquentiel stocké dans IndexedDB. Si deux
+// messages sont déchiffrés en parallèle (ex: chargement initial avec N msgs),
+// les deux appels font loadRatchetState → même état → saveRatchetState en
+// dernier gagne → état corrompu → OperationError sur tous les msgs suivants.
+//
+// Solution : un verrou (mutex) par conversationId. Chaque opération ratchet
+// (encrypt ou decrypt) acquiert le verrou, effectue load→avance→save, puis
+// relâche. Les opérations concurrentes sont mises en file d'attente.
+// ---------------------------------------------------------------------------
+
+const _ratchetLocks = new Map<string, Promise<void>>();
+
+// ---------------------------------------------------------------------------
+// ID deterministe pour un message — SHA-256(convId + uid + messageIndex + nonce)
+// tronque a 20 chars base64url. Rend addDoc/setDoc idempotent face aux retries
+// reseau du SDK Firestore (webchannel replay -> already-exists ignoree).
+// ---------------------------------------------------------------------------
+
+async function _deterministicMsgId(
+  convId      : string,
+  uid         : string,
+  messageIndex: number,
+  nonce       : string,
+): Promise<string> {
+  const raw    = new TextEncoder().encode(`${convId}:${uid}:${messageIndex}:${nonce}`);
+  const hash   = await crypto.subtle.digest('SHA-256', raw);
+  const b64    = _toB64(new Uint8Array(hash));
+  // Base64 -> base64url, tronque a 20 chars (suffisant pour l'unicite)
+  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '').slice(0, 20);
+}
+
+function _withRatchetLock<T>(convId: string, fn: () => Promise<T>): Promise<T> {
+  const current = _ratchetLocks.get(convId) ?? Promise.resolve();
+  let resolve!: () => void;
+  const next = new Promise<void>(r => { resolve = r; });
+  _ratchetLocks.set(convId, next);
+
+  return current.then(fn).finally(resolve) as Promise<T>;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +206,8 @@ export async function sendFile(
   contactUid: string,
   file      : File,
 ): Promise<void> {
-  const convId = getConversationId(myUid, contactUid);
+  // Meme raison que sendMessage : garantir l'existence du doc conversation.
+  const convId = await getOrCreateConversation(myUid, contactUid);
 
   if (file.size > 10 * 1024 * 1024) {
     throw new Error(`Fichier trop volumineux (${(file.size / 1024 / 1024).toFixed(1)} MB). Limite : 10 MB.`);
@@ -178,48 +224,60 @@ export async function sendFile(
   const fileBuffer = await file.arrayBuffer();
   const fileBytes  = new Uint8Array(fileBuffer);
 
-  const stateJson   = await loadRatchetState(myUid, convId);
-  const placeholder = `[Fichier] ${file.name} (${_formatSize(file.size)})`;
+  // Ratchet sous verrou — load→encrypt→save en séquence
+  const { drResult, fileKey, placeholder, ts } = await _withRatchetLock(convId, async () => {
+    const stateJson   = await loadRatchetState(myUid, convId);
+    const _placeholder = `[Fichier] ${file.name} (${_formatSize(file.size)})`;
 
-  const drResult = await doubleRatchetEncrypt(
-    placeholder, stateJson, convId, myKemPrivateKey, myKemPubKey, contactKeys.kemPublicKey,
-  );
-  await saveRatchetState(myUid, convId, drResult.newStateJson);
+    const _drResult = await doubleRatchetEncrypt(
+      _placeholder, stateJson, convId, myKemPrivateKey, myKemPubKey, contactKeys.kemPublicKey,
+    );
+    await saveRatchetState(myUid, convId, _drResult.newStateJson);
 
-  const fileKey = await hkdfDerive(
-    drResult.kemCiphertext,
-    `AegisQuantum-v1-file-key:${convId}:${drResult.messageIndex}`,
-    32,
-  );
+    const _fileKey = await hkdfDerive(
+      _drResult.kemCiphertext,
+      `AegisQuantum-v1-file-key:${convId}:${_drResult.messageIndex}`,
+      32,
+    );
+    return { drResult: _drResult, fileKey: _fileKey, placeholder: _placeholder, ts: Date.now() };
+  });
+
   const fileB64 = toBase64(fileBytes);
   const { ciphertext: fileCiphertext, nonce: fileNonce } = await aesGcmEncrypt(fileB64, fileKey);
 
   const signedPayload = drResult.ciphertext + drResult.nonce + drResult.kemCiphertext;
   const signature     = await dsaSign(signedPayload, myDsaPrivateKey);
-  const ts            = Date.now();
 
-  const msgRef = await addDoc(messagesCol(convId), {
-    conversationId   : convId,
-    senderUid        : myUid,
-    ciphertext       : drResult.ciphertext,
-    nonce            : drResult.nonce,
-    kemCiphertext    : drResult.kemCiphertext,
-    senderEphPub     : drResult.senderEphPub, // <-- ADD THIS
-    signature,
-    messageIndex     : drResult.messageIndex,
-    timestamp        : ts,
-    hasFile          : true,
-    fileCiphertext,
-    fileNonce,
-    fileName         : file.name,
-    fileSize         : file.size,
-    fileType         : file.type || "application/octet-stream",
-    ...(drResult.initKemCiphertext ? { initKemCiphertext: drResult.initKemCiphertext } : {}),
-  } as Omit<EncryptedMessage, "id">);
+  // setDoc idempotent — meme logique que sendMessage
+  const msgId  = await _deterministicMsgId(convId, myUid, drResult.messageIndex, drResult.nonce);
+  const msgRef = doc(messagesCol(convId), msgId);
 
-  // Preload avec le VRAI ID — le snapshot ne fera rien de plus
+  try {
+    await setDoc(msgRef, {
+      conversationId   : convId,
+      senderUid        : myUid,
+      ciphertext       : drResult.ciphertext,
+      nonce            : drResult.nonce,
+      kemCiphertext    : drResult.kemCiphertext,
+      senderEphPub     : drResult.senderEphPub,
+      signature,
+      messageIndex     : drResult.messageIndex,
+      timestamp        : ts,
+      hasFile          : true,
+      fileCiphertext,
+      fileNonce,
+      fileName         : file.name,
+      fileSize         : file.size,
+      fileType         : file.type || "application/octet-stream",
+      ...(drResult.initKemCiphertext ? { initKemCiphertext: drResult.initKemCiphertext } : {}),
+    } as Omit<EncryptedMessage, "id">);
+  } catch (err: unknown) {
+    const code = (err as { code?: string })?.code ?? '';
+    if (code !== 'already-exists') throw err;
+  }
+
   _preloadSentMessage(convId, {
-    id: msgRef.id, senderUid: myUid, plaintext: placeholder,
+    id: msgId, senderUid: myUid, plaintext: placeholder,
     timestamp: ts, verified: true, readBy: [],
   });
   _notifyConvPreviewUpdate(convId, placeholder, ts);
@@ -240,7 +298,10 @@ export async function sendMessage(
   contactUid: string,
   plaintext : string,
 ): Promise<void> {
-  const convId = getConversationId(myUid, contactUid);
+  // S'assurer que le doc conversation existe avant d'ecrire un message.
+  // La regle Firestore messages/create fait un get() sur conversations/{convId}
+  // — si le doc est absent la regle crashe -> permission-denied.
+  const convId = await getOrCreateConversation(myUid, contactUid);
 
   const myKeys      = await getPublicKeys(myUid);
   const myKemPubKey = myKeys?.kemPublicKey ?? "";
@@ -250,36 +311,51 @@ export async function sendMessage(
   const myDsaPrivateKey = getDsaPrivateKey(myUid);
   const myKemPrivateKey = getKemPrivateKey(myUid);
 
-  const stateJson = await loadRatchetState(myUid, convId);
-
-  const drResult = await doubleRatchetEncrypt(
-    plaintext, stateJson, convId, myKemPrivateKey, myKemPubKey, contactKeys.kemPublicKey,
-  );
-
-  await saveRatchetState(myUid, convId, drResult.newStateJson);
+  // Ratchet sous verrou — load→encrypt→save en séquence
+  const { drResult, ts } = await _withRatchetLock(convId, async () => {
+    const stateJson  = await loadRatchetState(myUid, convId);
+    const _drResult  = await doubleRatchetEncrypt(
+      plaintext, stateJson, convId, myKemPrivateKey, myKemPubKey, contactKeys.kemPublicKey,
+    );
+    await saveRatchetState(myUid, convId, _drResult.newStateJson);
+    return { drResult: _drResult, ts: Date.now() };
+  });
 
   const signedPayload = drResult.ciphertext + drResult.nonce + drResult.kemCiphertext;
   const signature     = await dsaSign(signedPayload, myDsaPrivateKey);
-  const ts            = Date.now();
 
-  // addDoc d'abord — on obtient le realId avant de notifier le cache
-  const msgRef = await addDoc(messagesCol(convId), {
-    conversationId    : convId,
-    senderUid         : myUid,
-    ciphertext        : drResult.ciphertext,
-    nonce             : drResult.nonce,
-    kemCiphertext     : drResult.kemCiphertext,
-    senderEphPub      : drResult.senderEphPub, // <-- ADD THIS
-    signature,
-    messageIndex      : drResult.messageIndex,
-    timestamp         : ts,
-    ...(drResult.initKemCiphertext ? { initKemCiphertext: drResult.initKemCiphertext } : {}),
-  } as Omit<EncryptedMessage, "id">);
+  // setDoc avec ID deterministe = idempotent.
+  // Si le SDK Firestore rejoue la requete apres un timeout reseau (webchannel retry),
+  // le document existe deja cote serveur avec le meme ID -> l'erreur already-exists
+  // est interceptee et ignoree silencieusement : le message est deja envoye.
+  //
+  // ID = hash SHA-256 tronque de (convId + myUid + messageIndex + nonce)
+  // Garantit l'unicite par conversation et par ratchet step.
+  const msgId  = await _deterministicMsgId(convId, myUid, drResult.messageIndex, drResult.nonce);
+  const msgRef = doc(messagesCol(convId), msgId);
 
-  // Injecter dans decryptedCache de tous les subscribers AVEC LE VRAI ID
-  // -> quand le snapshot Firestore arrive, decryptedCache.has(realId) == true -> SKIP -> zero flash
+  try {
+    await setDoc(msgRef, {
+      conversationId    : convId,
+      senderUid         : myUid,
+      ciphertext        : drResult.ciphertext,
+      nonce             : drResult.nonce,
+      kemCiphertext     : drResult.kemCiphertext,
+      senderEphPub      : drResult.senderEphPub,
+      signature,
+      messageIndex      : drResult.messageIndex,
+      timestamp         : ts,
+      ...(drResult.initKemCiphertext ? { initKemCiphertext: drResult.initKemCiphertext } : {}),
+    } as Omit<EncryptedMessage, "id">);
+  } catch (err: unknown) {
+    // already-exists = le SDK a rejoue apres un timeout, message deja arrive -> OK
+    const code = (err as { code?: string })?.code ?? '';
+    if (code !== 'already-exists') throw err;
+    // Le message est deja dans Firestore — on continue pour preload/preview
+  }
+
   _preloadSentMessage(convId, {
-    id: msgRef.id, senderUid: myUid, plaintext,
+    id: msgId, senderUid: myUid, plaintext,
     timestamp: ts, verified: true, readBy: [],
   });
 
@@ -295,9 +371,6 @@ export async function decryptMessage(
   msg  : EncryptedMessage,
 ): Promise<DecryptedMessage> {
   // ── Anciens messages (pre-Double Ratchet) ──────────────────────────────────
-  // Les messages envoyes avant l'implementation du Double Ratchet n'ont pas de
-  // kemCiphertext ni de messageIndex. On les detecte et on renvoie un placeholder
-  // informatif plutot que de crasher.
   const isLegacyMessage = !msg.kemCiphertext || msg.messageIndex === undefined || msg.messageIndex === null;
   if (isLegacyMessage) {
     return {
@@ -320,16 +393,21 @@ export async function decryptMessage(
   const myKeys       = await getPublicKeys(myUid);
   const myKemPubKey  = myKeys?.kemPublicKey ?? "";
   const myKemPrivKey = getKemPrivateKey(myUid);
-  const stateJson    = await loadRatchetState(myUid, msg.conversationId);
 
-  const drResult = await doubleRatchetDecrypt(
-    msg.ciphertext, msg.nonce, msg.messageIndex, msg.kemCiphertext,
-    msg.senderEphPub,    // <-- ADD THIS
-    stateJson, msg.conversationId, myKemPrivKey, myKemPubKey,
-    senderKeys?.kemPublicKey ?? "", msg.initKemCiphertext,
-  );
+  // Ratchet sous verrou — load→decrypt→save en séquence
+  const { drResult } = await _withRatchetLock(msg.conversationId, async () => {
+    const stateJson = await loadRatchetState(myUid, msg.conversationId);
 
-  await saveRatchetState(myUid, msg.conversationId, drResult.newStateJson);
+    const _drResult = await doubleRatchetDecrypt(
+      msg.ciphertext, msg.nonce, msg.messageIndex, msg.kemCiphertext,
+      msg.senderEphPub,
+      stateJson, msg.conversationId, myKemPrivKey, myKemPubKey,
+      senderKeys?.kemPublicKey ?? "", msg.initKemCiphertext,
+    );
+
+    await saveRatchetState(myUid, msg.conversationId, _drResult.newStateJson);
+    return { drResult: _drResult };
+  });
 
   let fileAttachment: DecryptedMessage["file"] | undefined;
   if (msg.hasFile && msg.fileCiphertext && msg.fileNonce && msg.fileName) {
@@ -376,14 +454,11 @@ export function subscribeToMessages(
   const allDocs        = new Map<string, QueryDocumentSnapshot<DocumentData>>();
 
   function emitResult(): void {
-    // Messages Firestore confirmes, tries par timestamp
     const result = [...allDocs.values()]
       .sort((a, b) => ((a.data().timestamp ?? 0) as number) - ((b.data().timestamp ?? 0) as number))
       .map(d => decryptedCache.get(d.id))
       .filter((m): m is DecryptedMessage => m !== undefined);
 
-    // Ajouter les messages preloades pas encore dans allDocs
-    // (entre _preloadSentMessage et le snapshot Firestore, peut-etre quelques ms)
     const preloaded = [...decryptedCache.values()]
       .filter(m => !allDocs.has(m.id))
       .sort((a, b) => a.timestamp - b.timestamp);
@@ -391,11 +466,8 @@ export function subscribeToMessages(
     callback([...result, ...preloaded]);
   }
 
-  // Preload : injecte un message envoye (avec realId) avant le snapshot
   const unregisterPreload = _registerPreloadListener(conversationId, (msg) => {
     decryptedCache.set(msg.id, msg);
-    // allDocs ne contient pas encore ce msg (snapshot pas encore arrive)
-    // On emet avec la liste Firestore + preloaded
     emitResult();
   });
 
@@ -417,6 +489,7 @@ export function subscribeToMessages(
           timestamp: msgData.timestamp, verified: false, readBy: [],
         });
         _retrySet.delete(msgData.id);
+        _retryFailed.add(msgData.id); // blacklist : aucun retry supplementaire
         emitResult();
       }
     }, 80);
@@ -425,7 +498,6 @@ export function subscribeToMessages(
   const unsubFirestore = onSnapshot(q, async snap => {
     const changes = snap.docChanges();
 
-    // Capturer quels IDs sont nouveaux AVANT de mettre a jour allDocs.
     const newlyConfirmedPreloads = new Set<string>();
     for (const change of changes) {
       if (change.type === "added" && decryptedCache.has(change.doc.id) && !allDocs.has(change.doc.id)) {
@@ -433,7 +505,6 @@ export function subscribeToMessages(
       }
     }
 
-    // Mettre a jour allDocs
     for (const change of changes) {
       if (change.type === "added" || change.type === "modified") {
         allDocs.set(change.doc.id, change.doc);
@@ -464,28 +535,35 @@ export function subscribeToMessages(
     // ── Confirmations de preload ──────────────────────────────────────────
     if (newlyConfirmedPreloads.size > 0) hasNewWork = true;
 
-    // ── Nouveaux messages a dechiffrer — PARALLELE ────────────────────────
-    // On collecte d'abord tous les messages necessitant un dechiffrement,
-    // puis on les dechiffre tous en parallele (Promise.all).
-    // Avant : boucle sequentielle -> N * ~5ms = lent au chargement initial.
-    // Apres : dechiffrement simultane -> ~max(5ms) quelle que soit la quantite.
-    const toDecrypt: Array<{ msg: EncryptedMessage; isRetry: boolean }> = [];
+    // ── Nouveaux messages a dechiffrer — SÉQUENTIEL par messageIndex ──────
+    //
+    // CRITIQUE : le Double Ratchet est séquentiel. Les messages DOIVENT être
+    // déchiffrés dans l'ordre croissant de messageIndex. Un traitement parallèle
+    // corromprait l'état ratchet (deux lectures du même état → deux sauvegardes
+    // divergentes → le dernier écrase le premier → OperationError).
+    //
+    // On filtre, trie par messageIndex, puis on déchiffre un par un.
+    const toDecrypt: EncryptedMessage[] = [];
 
     for (const change of changes) {
       if (change.type === "removed" || change.type === "modified") continue;
       const d   = change.doc;
       const msg = { id: d.id, ...d.data() } as EncryptedMessage;
 
-      // Deja dans le cache (preloade ou dechiffre) et pas en retry -> SKIP
+      // Deja dans le cache, en retry actif, ou definitvement echoue -> SKIP
+      if (_retryFailed.has(d.id)) continue;
       if (decryptedCache.has(d.id) && !_retrySet.has(d.id)) continue;
 
-      toDecrypt.push({ msg, isRetry: _retrySet.has(msg.id) });
+      toDecrypt.push(msg);
     }
 
     if (toDecrypt.length > 0) {
-      // Inserer les placeholders immediatement pour un affichage rapide
-      for (const { msg, isRetry } of toDecrypt) {
-        if (!isRetry && !decryptedCache.has(msg.id)) {
+      // Trier par messageIndex croissant — ordre obligatoire pour le ratchet
+      toDecrypt.sort((a, b) => (a.messageIndex ?? 0) - (b.messageIndex ?? 0));
+
+      // Insérer les placeholders immédiatement pour un affichage rapide
+      for (const msg of toDecrypt) {
+        if (!decryptedCache.has(msg.id)) {
           decryptedCache.set(msg.id, {
             id: msg.id, senderUid: msg.senderUid,
             plaintext: "[\uD83D\uDD12 Dechiffrement\u2026]",
@@ -493,27 +571,25 @@ export function subscribeToMessages(
           });
         }
       }
-      // Emettre avec les placeholders pendant que le dechiffrement tourne
       emitResult();
 
-      // Dechiffrer tous les messages en parallele
-      const results = await Promise.allSettled(
-        toDecrypt.map(({ msg }) => decryptMessage(myUid, msg).then(d => ({ msg, decrypted: d })))
-      );
+      // Déchiffrer SÉQUENTIELLEMENT (le mutex _withRatchetLock dans decryptMessage
+      // garantit l'ordre même si d'autres appels arrivent entre-temps)
+      //
+      // updateConversationPreview : 1 seul write pour tout le batch (le dernier msg
+      // par timestamp), pas 1 write par message. Economise N-1 writes au chargement.
+      const lastMsgInBatch = toDecrypt.reduce((a, b) => b.timestamp > a.timestamp ? b : a);
 
-      for (const result of results) {
-        if (result.status === "fulfilled") {
-          const { msg, decrypted } = result.value;
+      for (const msg of toDecrypt) {
+        try {
+          const decrypted = await decryptMessage(myUid, msg);
           decryptedCache.set(msg.id, decrypted);
           _retrySet.delete(msg.id);
-          const { isRetry } = toDecrypt.find(t => t.msg.id === msg.id)!;
-          if (!isRetry) {
+          if (msg.id === lastMsgInBatch.id) {
             updateConversationPreview(msg.conversationId, decrypted.plaintext).catch(() => {});
           }
-        } else {
-          // Trouver le message en echec
-          const idx     = results.indexOf(result);
-          const { msg, isRetry } = toDecrypt[idx];
+        } catch (err) {
+          const isRetry = _retrySet.has(msg.id);
           if (!isRetry) {
             console.warn(`[AQ] Dechiffrement differe pour ${msg.id}`);
             _retrySet.add(msg.id);
@@ -531,9 +607,13 @@ export function subscribeToMessages(
               timestamp: msg.timestamp, verified: false, readBy: [],
             });
             _retrySet.delete(msg.id);
+            _retryFailed.add(msg.id); // plus jamais retente, meme si le snapshot repasse
           }
         }
+        // Émettre après chaque message pour un affichage progressif
+        emitResult();
       }
+
       hasNewWork = true;
     }
 

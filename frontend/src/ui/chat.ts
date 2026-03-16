@@ -51,6 +51,9 @@ const _allDecryptedMessages = new Map<string, DecryptedMessage[]>();
 // État de la recherche dans les messages
 let _msgSearchQuery = '';
 
+// Guard anti-double-submit — empêche deux envois simultanés (double-clic, Enter + clic)
+let _sendInProgress = false;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // LocalStorage — noms locaux des conversations + avatar
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1116,6 +1119,8 @@ function _fmtSize(bytes: number): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSendMessage(): Promise<void> {
+  // Guard anti-double-submit : double-clic ou Enter+clic simultané
+  if (_sendInProgress) return;
   if (!_currentConvId || !_currentContactUid) return;
 
   const input = document.getElementById('message-input') as HTMLTextAreaElement | null;
@@ -1126,6 +1131,10 @@ async function handleSendMessage(): Promise<void> {
 
   const convId     = _currentConvId;
   const contactUid = _currentContactUid;
+
+  _sendInProgress = true;
+  const btn = document.getElementById('btn-send') as HTMLButtonElement | null;
+  if (btn) btn.disabled = true;
 
   input.value    = '';
   input.disabled = true;
@@ -1144,6 +1153,8 @@ async function handleSendMessage(): Promise<void> {
     clearCryptoBox();
     setCryptoStatus('idle');
   } finally {
+    _sendInProgress = false;
+    if (btn) btn.disabled = false;
     input.disabled = false;
     input.focus();
     if (_currentConvId !== convId) {
