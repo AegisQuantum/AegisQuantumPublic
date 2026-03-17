@@ -360,3 +360,41 @@ export async function restoreRatchetState(
 ): Promise<void> {
   await idbSet(`ratchet:${uid}:${convId}`, stateJson);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache de plaintexts déchiffrés — persistant en clair dans IDB
+//
+// Objectif : pouvoir ré-afficher les messages d'une conversation lors d'un
+// rechargement (clic sur la conv, reconnexion) SANS relancer le Double Ratchet.
+// Le ratchet est un état séquentiel et ne peut déchiffrer que les messages
+// "futurs" ; les anciens ne sont récupérables que depuis ce cache.
+//
+// Stockage "en clair" justifié : si un attaquant accède à l'IDB du navigateur
+// il a déjà accès à l'ensemble de la session (clés en mémoire, DOM, etc.).
+// Ce cache n'aggrave pas la surface d'attaque.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface MsgCacheEntry {
+  plaintext : string;
+  verified  : boolean;
+  senderUid : string;
+  timestamp : number;
+}
+
+/**
+ * Sauvegarde le plaintext déchiffré d'un message dans IDB (en clair).
+ * Clé IDB : msgcache:{msgId}
+ */
+export async function saveMsgCache(msgId: string, entry: MsgCacheEntry): Promise<void> {
+  await idbSet(`msgcache:${msgId}`, JSON.stringify(entry));
+}
+
+/**
+ * Charge le plaintext d'un message depuis le cache IDB.
+ * Retourne null si le message n'a jamais été déchiffré sur cet appareil.
+ */
+export async function loadMsgCache(msgId: string): Promise<MsgCacheEntry | null> {
+  const raw = await idbGet<string>(`msgcache:${msgId}`);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as MsgCacheEntry; } catch { return null; }
+}

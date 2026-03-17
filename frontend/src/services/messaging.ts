@@ -42,7 +42,7 @@ import {
 import { toBase64 as _toB64 } from "../crypto/kem";
 import { db }            from "./firebase";
 import { getPublicKeys } from "./key-registry";
-import { getKemPrivateKey, getDsaPrivateKey, saveRatchetState, loadRatchetState } from "./key-store";
+import { getKemPrivateKey, getDsaPrivateKey, saveRatchetState, loadRatchetState, saveMsgCache, loadMsgCache } from "./key-store";
 import { dsaSign, dsaVerify } from "../crypto";
 import { doubleRatchetEncrypt, doubleRatchetDecrypt } from "../crypto/double-ratchet";
 import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto/aes-gcm";
@@ -74,6 +74,28 @@ function _notifyConvPreviewUpdate(convId: string, plaintext: string, ts: number)
 // ---------------------------------------------------------------------------
 const _retrySet    = new Set<string>();
 const _retryFailed = new Set<string>();
+
+/**
+ * Réinitialise tout l'état module-level de messaging.
+ *
+ * DOIT être appelé à chaque nouvelle connexion (signIn) ET déconnexion
+ * (signOut), car ces sets/maps sont des singletons JS qui survivent à un
+ * simple changement de compte sans rechargement de page.
+ *
+ * Sans ça :
+ *  - _retryFailed contient les IDs d'une session précédente → messages
+ *    invisibles lors de la reconnexion (ni cache IDB ni rendu [🔒])
+ *  - _ratchetLocks peuvent pointer vers des promises obsolètes
+ */
+export function resetMessagingState(): void {
+  _retrySet.clear();
+  _retryFailed.clear();
+  _ratchetLocks.clear();
+  _preloadListeners.clear();
+  // _convPreviewListeners intentionnellement préservé : les listeners UI
+  // sont enregistrés une seule fois au montage du chat et ne doivent pas
+  // être perdus. Ils sont nettoyés par leur propre unsubscribe().
+}
 
 // ---------------------------------------------------------------------------
 // Pre-load envoye — injecte APRES addDoc (realId connu) dans decryptedCache
@@ -280,6 +302,7 @@ export async function sendFile(
     id: msgId, senderUid: myUid, plaintext: placeholder,
     timestamp: ts, verified: true, readBy: [],
   });
+  saveMsgCache(msgId, { plaintext: placeholder, verified: true, senderUid: myUid, timestamp: ts }).catch(() => {});
   _notifyConvPreviewUpdate(convId, placeholder, ts);
 }
 
@@ -358,6 +381,10 @@ export async function sendMessage(
     id: msgId, senderUid: myUid, plaintext,
     timestamp: ts, verified: true, readBy: [],
   });
+
+  // Persistance IDB — permet de ré-afficher ce message après rechargement de
+  // la conversation sans passer par le ratchet (qui serait déjà à N+1).
+  saveMsgCache(msgId, { plaintext, verified: true, senderUid: myUid, timestamp: ts }).catch(() => {});
 
   _notifyConvPreviewUpdate(convId, plaintext, ts);
 }
@@ -460,8 +487,17 @@ export function subscribeToMessages(
   function emitResult(): void {
     const result = [...allDocs.values()]
       .sort((a, b) => ((a.data().timestamp ?? 0) as number) - ((b.data().timestamp ?? 0) as number))
-      .map(d => decryptedCache.get(d.id))
-      .filter((m): m is DecryptedMessage => m !== undefined);
+      .map(d => decryptedCache.get(d.id) ?? {
+        // Fallback pour les messages présents dans Firestore mais pas encore
+        // (ou jamais) dans le cache — garantit qu'ils sont toujours visibles,
+        // même s'ils ont échoué au déchiffrement ou sont en attente.
+        id       : d.id,
+        senderUid: (d.data().senderUid as string) ?? '',
+        plaintext: '[\uD83D\uDD12 Message chiffr\u00e9]',
+        timestamp: (d.data().timestamp as number) ?? 0,
+        verified : false,
+        readBy   : [],
+      });
 
     const preloaded = [...decryptedCache.values()]
       .filter(m => !allDocs.has(m.id))
@@ -539,6 +575,29 @@ export function subscribeToMessages(
     // ── Confirmations de preload ──────────────────────────────────────────
     if (newlyConfirmedPreloads.size > 0) hasNewWork = true;
 
+    // ── Pré-remplissage depuis cache IDB (re-ouverture conversation) ─────
+    //
+    // Charge les plaintexts déjà déchiffrés lors d'une session précédente.
+    // Évite de relancer le Double Ratchet sur des messages anciens (ce qui
+    // échouerait car le ratchet est déjà avancé au-delà de ces messages).
+    for (const change of changes) {
+      if (change.type !== "added") continue;
+      const d = change.doc;
+      if (decryptedCache.has(d.id)) continue;
+      const cached = await loadMsgCache(d.id);
+      if (cached) {
+        decryptedCache.set(d.id, {
+          id       : d.id,
+          senderUid: cached.senderUid,
+          plaintext: cached.plaintext,
+          timestamp: cached.timestamp,
+          verified : cached.verified,
+          readBy   : [],
+        });
+        hasNewWork = true;
+      }
+    }
+
     // ── Nouveaux messages a dechiffrer — SÉQUENTIEL par messageIndex ──────
     //
     // CRITIQUE : le Double Ratchet est séquentiel. Les messages DOIVENT être
@@ -594,6 +653,11 @@ export function subscribeToMessages(
           const decrypted = await decryptMessage(myUid, msg);
           decryptedCache.set(msg.id, decrypted);
           _retrySet.delete(msg.id);
+          // Persistance IDB — ré-affichage sans ratchet lors des rechargements
+          saveMsgCache(msg.id, {
+            plaintext: decrypted.plaintext, verified: decrypted.verified,
+            senderUid: decrypted.senderUid, timestamp: decrypted.timestamp,
+          }).catch(() => {});
           if (msg.id === lastMsgInBatch.id) {
             updateConversationPreview(msg.conversationId, decrypted.plaintext).catch(() => {});
           }

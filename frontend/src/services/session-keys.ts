@@ -30,6 +30,8 @@ import {
   getAllRatchetStates,
   restoreRatchetState,
 }                                                             from "./key-store";
+import { db }                                                 from "./firebase";
+import { doc, setDoc }                                        from "firebase/firestore";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -184,6 +186,17 @@ export async function importSessionKeys(
   // Restaurer tous les états ratchet
   for (const { convId, stateJson } of payload.ratchetStates) {
     await restoreRatchetState(payload.uid, convId, stateJson);
+  }
+
+  // Mettre à jour le salt Argon2id dans Firestore avec le nouveau vaultSalt.
+  // Sans cette mise à jour, la prochaine connexion sur ce navigateur lirait
+  // l'ancien salt de Firestore → déchiffrement du vault IDB (nouveau salt) échoue.
+  try {
+    await setDoc(doc(db, "users", payload.uid), { argon2Salt: vaultSalt }, { merge: true });
+  } catch (e) {
+    // Non-bloquant : les clés sont en mémoire pour la session courante.
+    // La prochaine connexion sur ce navigateur nécessitera un nouvel import.
+    console.warn("[AQ:session] Impossible de mettre à jour argon2Salt dans Firestore:", e);
   }
 
   onProgress?.("done");

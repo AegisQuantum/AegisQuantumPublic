@@ -13,6 +13,7 @@ import {
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
 import { clearPrivateKeys, storePrivateKeys, unlockPrivateKeys, getKemPrivateKey, getDsaPrivateKey} from "./key-store";
+import { resetMessagingState } from "./messaging";
 import { publishPublicKeys, getPublicKeys } from "./key-registry";
 import { kemGenerateKeyPair, dsaGenerateKeyPair, argon2Derive } from "../crypto";
 import type { AQUser } from "../types/user";
@@ -84,6 +85,19 @@ async function _generateAndPublishKeys(uid: string, password: string): Promise<v
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Erreur typée : vault IDB absent alors que des clés publiques existent
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Lancée par signIn() quand Firebase Auth réussit mais le vault IDB est vide.
+ *  L'UI doit proposer l'import .aqsession (ou la régénération des clés).  */
+export class VaultMissingError extends Error {
+  constructor(public readonly uid: string) {
+    super("VAULT_MISSING");
+    this.name = "VaultMissingError";
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Pipeline crypto principal
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -147,12 +161,37 @@ export async function loadCryptoKeys(uid: string, password: string): Promise<voi
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function signIn(username: string, password: string): Promise<AQUser> {
+  // Nettoie l'état de la session précédente (retry sets, ratchet locks…)
+  // indispensable pour les changements de compte sans rechargement de page.
+  resetMessagingState();
+  clearPrivateKeys();
+
   const fakeEmail  = toFakeEmail(username);
   const credential = await signInWithEmailAndPassword(auth, fakeEmail, password);
   const uid        = credential.user.uid;
-  await loadCryptoKeys(uid, password);
+  try {
+    await loadCryptoKeys(uid, password);
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith("VAULT_MISSING")) {
+      // Firebase Auth a réussi mais le vault IDB est absent sur cet appareil.
+      // On propage un VaultMissingError typé pour que l'UI propose la récupération.
+      throw new VaultMissingError(uid);
+    }
+    throw e;
+  }
   _currentUser = { uid };
   return _currentUser;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Régénération des clés (utilisé par l'écran de récupération "repartir de zéro")
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Génère et publie une nouvelle paire de clés. DÉTRUIT l'accès aux conversations
+ *  existantes (les contacts ont toujours l'ancienne clé publique en cache).
+ *  À n'utiliser que si l'utilisateur accepte de tout perdre. */
+export async function generateFreshKeys(uid: string, password: string): Promise<void> {
+  await _generateAndPublishKeys(uid, password);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -213,6 +252,7 @@ export async function mustChangePassword(uid: string): Promise<boolean> {
 
 export async function signOut(): Promise<void> {
   clearPrivateKeys();
+  resetMessagingState();
   await firebaseSignOut(auth);
   _currentUser = null;
 }
