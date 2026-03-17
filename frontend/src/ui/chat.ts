@@ -14,6 +14,7 @@ import {
   sendFile,
   getOrCreateConversation,
   onConvPreviewUpdate,
+  sendRatchetResetSignal,
 }                                           from '../services/messaging';
 import {
   subscribeToTyping,
@@ -303,6 +304,33 @@ export async function initChat(uid: string): Promise<void> {
   document.getElementById('modal-uid-input')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter')  confirmNewConv();
     if (e.key === 'Escape') closeNewConvModal();
+  });
+
+  // ── Resync ratchet ──
+  document.getElementById('btn-resync-ratchet')?.addEventListener('click', async () => {
+    if (!_currentConvId || !_currentContactUid) return;
+    const confirmed = window.confirm(
+      '↺ Resynchroniser le Double Ratchet ?\n\n' +
+      'À utiliser si les messages ne s\'envoient plus ou restent [🔒] après une régénération de clés.\n\n' +
+      'Les messages existants ne seront pas affectés. ' +
+      'Les deux parties pourront s\'envoyer de nouveaux messages déchiffrables après la resync.'
+    );
+    if (!confirmed) return;
+
+    const btn = document.getElementById('btn-resync-ratchet') as HTMLButtonElement | null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Resync…'; }
+
+    try {
+      await sendRatchetResetSignal(_myUid, _currentContactUid);
+      showToast('Resynchronisation envoyée — le ratchet repart de zéro.');
+    } catch (e) {
+      showToast('Erreur lors de la resync : ' + ((e as Error).message ?? String(e)));
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><path d="M13.5 8A5.5 5.5 0 1 1 8 2.5"/><path d="M10 2.5h3.5V6"/></svg> Resync`;
+      }
+    }
   });
 
   // ── Renommer conversation ──
@@ -1014,6 +1042,17 @@ function renderMessages(messages: DecryptedMessage[]): void {
   if (newMessages.length === 0) return;
 
   for (const msg of newMessages) {
+    // ── Bulle système (resync ratchet, etc.) ──────────────────────────────
+    if (msg.type === 'system') {
+      const sysBubble = document.createElement('div');
+      sysBubble.className     = 'message-bubble system-msg';
+      sysBubble.dataset.msgId = msg.id;
+      sysBubble.innerHTML = `<span class="system-msg-text">${escapeHtml(msg.plaintext)}</span>`;
+      container.appendChild(sysBubble);
+      _renderedMsgIds.add(msg.id);
+      continue;
+    }
+
     const isMine = msg.senderUid === _myUid;
     const isRead = isMine && (msg.readBy ?? []).includes(_currentContactUid ?? '');
     const bubble = document.createElement('div');

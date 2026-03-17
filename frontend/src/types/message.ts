@@ -79,6 +79,14 @@ export interface EncryptedMessage {
   fileSize?: number;
   /** MIME type du fichier (non chiffré — métadonnée acceptée) */
   fileType?: string;
+
+  /**
+   * Type spécial de message système.
+   * "ratchet-reset" : signal de resynchronisation du Double Ratchet.
+   * Pas de ciphertext — pas de déchiffrement. Les deux clients effacent
+   * leur état ratchet local et repartent d'un bootstrap propre.
+   */
+  type?: "ratchet-reset";
 }
 
 /** Metadata d'une conversation (sans messages). */
@@ -102,6 +110,11 @@ export interface DecryptedMessage {
   verified: boolean;
   /** UIDs des utilisateurs qui ont lu ce message (depuis Firestore readBy). */
   readBy?: string[];
+  /**
+   * "system" : bulle système centrée (resync ratchet, etc.)
+   * Absent pour les messages normaux.
+   */
+  type?: "system";
   /** Pièce jointe déchiffrée — présente uniquement pour les messages fichier */
   file?: {
     /** Blob déchiffré du fichier (jamais transmis, reconstruit en mémoire) */

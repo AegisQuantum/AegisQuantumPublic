@@ -361,6 +361,16 @@ export async function restoreRatchetState(
   await idbSet(`ratchet:${uid}:${convId}`, stateJson);
 }
 
+/**
+ * Supprime l'état ratchet d'une conversation dans IndexedDB.
+ * Après suppression, le prochain envoi/réception repartira d'un bootstrap
+ * complet (stateJson === null → initKemCiphertext).
+ * Appelé lors d'une resynchronisation manuelle du ratchet.
+ */
+export async function deleteRatchetState(uid: string, convId: string): Promise<void> {
+  await idbDelete(`ratchet:${uid}:${convId}`);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Cache de plaintexts déchiffrés — persistant en clair dans IDB
 //

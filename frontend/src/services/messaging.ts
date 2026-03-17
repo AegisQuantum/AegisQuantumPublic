@@ -42,7 +42,7 @@ import {
 import { toBase64 as _toB64 } from "../crypto/kem";
 import { db }            from "./firebase";
 import { getPublicKeys } from "./key-registry";
-import { getKemPrivateKey, getDsaPrivateKey, saveRatchetState, loadRatchetState, saveMsgCache, loadMsgCache } from "./key-store";
+import { getKemPrivateKey, getDsaPrivateKey, saveRatchetState, loadRatchetState, deleteRatchetState, saveMsgCache, loadMsgCache } from "./key-store";
 import { dsaSign, dsaVerify } from "../crypto";
 import { doubleRatchetEncrypt, doubleRatchetDecrypt } from "../crypto/double-ratchet";
 import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto/aes-gcm";
@@ -471,6 +471,67 @@ export async function decryptMessage(
 }
 
 // ---------------------------------------------------------------------------
+// Resynchronisation du Double Ratchet
+// ---------------------------------------------------------------------------
+
+/**
+ * Envoie un signal de resynchronisation ratchet à l'autre participant.
+ *
+ * Étapes :
+ *  1. Supprime l'état ratchet local de cette conversation dans IDB.
+ *  2. Écrit un document Firestore de type "ratchet-reset" dans la collection
+ *     messages de la conversation.
+ *  3. Quand l'autre client reçoit ce signal via onSnapshot, il efface aussi
+ *     son état ratchet local.
+ *  4. Le prochain vrai message envoyé par n'importe quel côté repartira d'un
+ *     bootstrap complet (stateJson === null → initKemCiphertext générée).
+ *
+ * À utiliser après une régénération de clés (generateFreshKeys) ou quand les
+ * deux ratchets sont désynchronisés (erreur "replay detected" ou RAT_EMPTY_CHAIN_KEY).
+ */
+export async function sendRatchetResetSignal(
+  myUid     : string,
+  contactUid: string,
+): Promise<void> {
+  const convId = getConversationId(myUid, contactUid);
+
+  // 1. Effacer l'état ratchet local
+  await deleteRatchetState(myUid, convId);
+
+  // 2. Signer le signal avec notre clé privée ML-DSA-65
+  //    Payload : "ratchet-reset:{convId}:{myUid}:{ts}"
+  //    Cela empêche un tiers (MitM, participant malveillant) de forger un
+  //    faux signal et de forcer une resync — seul le détenteur de la clé
+  //    privée DSA peut émettre un reset valide pour son propre compte.
+  const ts             = Date.now();
+  const signedPayload  = `ratchet-reset:${convId}:${myUid}:${ts}`;
+  const myDsaPrivKey   = getDsaPrivateKey(myUid);
+  const signature      = await dsaSign(signedPayload, myDsaPrivKey);
+
+  // 3. Écrire le signal dans Firestore (ID déterministe pour l'idempotence)
+  const raw   = new TextEncoder().encode(signedPayload);
+  const hash  = await crypto.subtle.digest('SHA-256', raw);
+  const { toBase64: _b64 } = await import('../crypto/kem');
+  const sigId = _b64(new Uint8Array(hash)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'').slice(0, 20);
+
+  const msgRef = doc(messagesCol(convId), `rr_${sigId}`);
+  await setDoc(msgRef, {
+    conversationId: convId,
+    senderUid     : myUid,
+    type          : "ratchet-reset",
+    timestamp     : ts,
+    // Signature DSA du payload — vérifiée par le destinataire avant d'effacer son ratchet
+    signature     : signature,
+    // Champs crypto vides (pas de contenu chiffré dans un signal de resync)
+    ciphertext    : "",
+    nonce         : "",
+    kemCiphertext : "",
+    senderEphPub  : "",
+    messageIndex  : -1,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // subscribeToMessages
 // ---------------------------------------------------------------------------
 
@@ -537,6 +598,51 @@ export function subscribeToMessages(
 
   const unsubFirestore = onSnapshot(q, async snap => {
     const changes = snap.docChanges();
+
+    // ── Signaux de resynchronisation ratchet ─────────────────────────────
+    // Traités EN PREMIER, avant tout le reste, pour que l'état ratchet soit
+    // effacé avant qu'on tente de déchiffrer d'éventuels nouveaux messages
+    // qui arrivent dans le même snapshot.
+    for (const change of changes) {
+      if (change.type !== "added") continue;
+      const data = change.doc.data();
+      if ((data.type as string | undefined) !== "ratchet-reset") continue;
+
+      const senderUid     = data.senderUid as string;
+      const signedPayload = `ratchet-reset:${conversationId}:${senderUid}:${data.timestamp as number}`;
+
+      // Vérifier la signature ML-DSA-65 AVANT d'effacer le ratchet.
+      // Un attaquant (MitM, participant malveillant) ne peut pas forger
+      // un faux signal : sans la clé privée DSA de l'expéditeur, la
+      // signature ne passe pas → le ratchet local est préservé.
+      const senderKeys = await getPublicKeys(senderUid);
+      if (!senderKeys) {
+        console.warn(`[AQ] Signal ratchet-reset ignoré : clés publiques introuvables pour ${senderUid}`);
+        continue;
+      }
+      const sigValid = await dsaVerify(signedPayload, data.signature as string, senderKeys.dsaPublicKey);
+      if (!sigValid) {
+        console.warn(`[AQ] Signal ratchet-reset REJETÉ (signature invalide) depuis ${senderUid}`);
+        continue;
+      }
+
+      console.log(`[AQ] Signal ratchet-reset vérifié ✓ depuis ${senderUid} — effacement de l'état local`);
+
+      // Effacer notre propre état ratchet pour cette conversation
+      await deleteRatchetState(myUid, conversationId);
+
+      // Afficher une bulle système (signature vérifiée ✓ donc on peut afficher "vérifié")
+      decryptedCache.set(change.doc.id, {
+        id       : change.doc.id,
+        senderUid: senderUid,
+        plaintext: "\uD83D\uDD04 Resynchronisation ratchet sign\u00e9e \u2713 — les nouveaux messages seront d\u00e9chiffrables",
+        timestamp: (data.timestamp as number) ?? Date.now(),
+        verified : true,
+        readBy   : [],
+        type     : "system",
+      });
+      allDocs.set(change.doc.id, change.doc);
+    }
 
     const newlyConfirmedPreloads = new Set<string>();
     for (const change of changes) {
@@ -617,6 +723,9 @@ export function subscribeToMessages(
       if (_retryFailed.has(d.id)) continue;
       if (decryptedCache.has(d.id) && !_retrySet.has(d.id)) continue;
 
+      // Signaux système (ratchet-reset, etc.) — déjà traités plus haut → SKIP
+      if ((msg as unknown as { type?: string }).type === "ratchet-reset") continue;
+
       // Messages envoyés par soi-même — déjà dans le cache via _preloadSentMessage.
       // Tenter de les déchiffrer avec le ratchet (état N+1 après l'envoi) échoue
       // systématiquement. On les ignore ici ; le preload les affiche correctement.
@@ -666,9 +775,9 @@ export function subscribeToMessages(
         console.warn(`[AQ] Désynchronisation détectée sur le message ${msg.id}. L'état local est corrompu.`);
         // On affiche un message spécial à l'utilisateur au lieu de "Déchiffrement..."
         decryptedCache.set(msg.id, {
-            ...msg,
-            plaintext: "[⚠️ Erreur de synchronisation : Clé manquante]",
-            verified: false
+            id: msg.id, senderUid: msg.senderUid,
+            plaintext: "[\u26A0\uFE0F Erreur de synchronisation : Cl\u00e9 manquante]",
+            timestamp: msg.timestamp, verified: false, readBy: [],
         });
     } else {
         // Autre erreur (réseau, signature, etc.)
