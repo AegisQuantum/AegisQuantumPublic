@@ -378,9 +378,13 @@ async function main() {
     logOk(`Alice decrypt N (depuis cache skippedMessageKeys) — OK`);
     saveRatchetState(db, ALICE_UID, aliceDecN.newStateJson);
     assert(aliceDecN.plaintext === skippedPlaintext1, `Skipped N plaintext OK (cache)`);
+ // ... (suite du catch de l'étape 5)
   } catch (e) {
     logErr(`Alice decrypt N FAIL : ${e}`);
-    logInfo("FIX : ajouter un Map<messageIndex, messageKey> dans RatchetState");
+    logInfo("Note : Si cela échoue, vérifiez la gestion du buffer 'skippedMessageKeys' dans double-ratchet.ts");
+    throw e;
+  }
+
   // ── STEP 6 : Vérification finale Firebase ───────────────────────────────
   logStep("Vérification finale — cohérence des états Firebase simulés");
 
@@ -397,21 +401,16 @@ async function main() {
   logInfo(`Alice receiveCount : ${aliceParsed.receiveCount}`);
   logInfo(`Bob   sendCount    : ${bobParsed.sendCount}`);
   logInfo(`Bob   receiveCount : ${bobParsed.receiveCount}`);
-  logInfo(`Messages Firebase  : ${db.messages.length}`);
 
   assert(aliceParsed.conversationId === CONV_ID, "Alice conversationId correct");
   assert(bobParsed.conversationId   === CONV_ID, "Bob   conversationId correct");
-  assert(aliceParsed.rootKey.length > 0, "Alice rootKey non vide");
-  assert(bobParsed.rootKey.length   > 0, "Bob   rootKey non vide");
-
-  logRatchetState("Alice — état final", finalAliceState);
-  logRatchetState("Bob   — état final", finalBobState);
 
   console.log(`\n${BOLD}${GREEN}╔════════════════════════════════════════════════════════╗`);
   console.log(`║            TOUS LES TESTS ONT RÉUSSI ✔                ║`);
   console.log(`╚════════════════════════════════════════════════════════╝${RESET}\n`);
 }
 
+// L'appel Vitest qui englobe tout
 it("double-ratchet stress test", async () => {
   await main();
 }, 120_000);

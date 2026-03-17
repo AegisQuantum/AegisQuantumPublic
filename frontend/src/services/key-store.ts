@@ -230,9 +230,14 @@ export async function unlockPrivateKeys(uid: string, masterKey: string): Promise
  *
  * @throws Error si l'utilisateur n'est pas connecté
  */
-export function getKemPrivateKey(uid: string): string {
+export function getKemPrivateKey(uid: string): string | null {
   const keys = _memoryStore.get(uid);
-  if (!keys) throw new Error(`Private keys not loaded for uid ${uid} — is the user signed in?`);
+  
+  // Au lieu de throw une Error, on renvoie null proprement
+  if (!keys) {
+    return null; 
+  }
+  
   return keys.kemPrivateKey;
 }
 
@@ -309,4 +314,49 @@ export function clearPrivateKeys(): void {
 export async function deleteVault(uid: string): Promise<void> {
   _memoryStore.delete(uid);
   await idbDelete(`vault:${uid}`);
+}
+
+/**
+ * Retourne tous les états ratchet stockés pour un utilisateur.
+ * Utilisé par l'export de clés de session.
+ */
+export async function getAllRatchetStates(
+  uid: string
+): Promise<Array<{ convId: string; stateJson: string }>> {
+  const prefix = `ratchet:${uid}:`;
+  const db     = await openDB();
+  const tx     = db.transaction(IDB_STORE, "readonly");
+  const str    = tx.objectStore(IDB_STORE);
+
+  return new Promise((resolve, reject) => {
+    const results: Array<{ convId: string; stateJson: string }> = [];
+    const range  = IDBKeyRange.bound(prefix, prefix + "\uffff");
+    const req    = str.openCursor(range);
+
+    req.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+      if (cursor) {
+        const key     = cursor.key as string;
+        const convId  = key.slice(prefix.length);
+        const val     = cursor.value as string;
+        results.push({ convId, stateJson: val });
+        cursor.continue();
+      } else {
+        db.close();
+        resolve(results);
+      }
+    };
+    req.onerror = () => { db.close(); reject(req.error); };
+  });
+}
+
+/**
+ * Restaure un état ratchet dans IndexedDB (import de session).
+ */
+export async function restoreRatchetState(
+  uid    : string,
+  convId : string,
+  stateJson: string,
+): Promise<void> {
+  await idbSet(`ratchet:${uid}:${convId}`, stateJson);
 }

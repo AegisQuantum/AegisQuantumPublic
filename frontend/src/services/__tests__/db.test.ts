@@ -582,15 +582,17 @@ describe("GET/POST /users — Profils", () => {
 describe("HNDL — Zéro plaintext en base (specs §2.2 KPI)", () => {
   it("[HNDL] sendMessage ne stocke jamais le plaintext directement accessible", async () => {
     const plaintext = "HNDL sensitive payload";
-    await sendMessage(UID_ALICE, UID_BOB, plaintext);
 
     const { getConversationId } = await import("../messaging");
     const convId  = getConversationId(UID_ALICE, UID_BOB);
     const captured: string[] = [];
 
+    // Subscribe BEFORE sending so the preload listener is registered
     const unsub = subscribeToMessages(UID_ALICE, convId, (msgs) => {
       for (const m of msgs) captured.push(m.plaintext);
     });
+
+    await sendMessage(UID_ALICE, UID_BOB, plaintext);
     await new Promise((r) => setTimeout(r, 300));
     unsub();
 

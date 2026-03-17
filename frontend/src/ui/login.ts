@@ -35,7 +35,11 @@ export function initAuth(): void {
   // ── Submit ───────────────────────────────────────────────────────────────
   submitBtn.addEventListener('click', handleSubmit);
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') handleSubmit();
+    if (e.key !== 'Enter') return;
+    // Ne déclencher le submit que si l'écran d'auth est visible
+    const authScreen = document.getElementById('auth-screen');
+    if (!authScreen || authScreen.classList.contains('hidden')) return;
+    handleSubmit();
   });
 
   async function handleSubmit(): Promise<void> {

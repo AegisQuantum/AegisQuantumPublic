@@ -230,7 +230,7 @@ export async function sendFile(
     const _placeholder = `[Fichier] ${file.name} (${_formatSize(file.size)})`;
 
     const _drResult = await doubleRatchetEncrypt(
-      _placeholder, stateJson, convId, myKemPrivateKey, myKemPubKey, contactKeys.kemPublicKey,
+      _placeholder, stateJson, convId, myKemPrivateKey ?? "", myKemPubKey, contactKeys.kemPublicKey,
     );
     await saveRatchetState(myUid, convId, _drResult.newStateJson);
 
@@ -315,7 +315,7 @@ export async function sendMessage(
   const { drResult, ts } = await _withRatchetLock(convId, async () => {
     const stateJson  = await loadRatchetState(myUid, convId);
     const _drResult  = await doubleRatchetEncrypt(
-      plaintext, stateJson, convId, myKemPrivateKey, myKemPubKey, contactKeys.kemPublicKey,
+      plaintext, stateJson, convId, myKemPrivateKey ?? "", myKemPubKey, contactKeys.kemPublicKey,
     );
     await saveRatchetState(myUid, convId, _drResult.newStateJson);
     return { drResult: _drResult, ts: Date.now() };
@@ -371,7 +371,11 @@ export async function decryptMessage(
   msg  : EncryptedMessage,
 ): Promise<DecryptedMessage> {
   // ── Anciens messages (pre-Double Ratchet) ──────────────────────────────────
-  const isLegacyMessage = !msg.kemCiphertext || msg.messageIndex === undefined || msg.messageIndex === null;
+  // Un message est "legacy" si et seulement si messageIndex est absent.
+  // Bootstrap messages ont kemCiphertext="" (vide, pas absent) et initKemCiphertext défini.
+  // Les messages en epoch symétrique ont aussi kemCiphertext="" mais messageIndex défini.
+  // Seuls les messages pré-ratchet n'ont pas messageIndex.
+  const isLegacyMessage = msg.messageIndex === undefined || msg.messageIndex === null;
   if (isLegacyMessage) {
     return {
       id        : msg.id,
@@ -401,7 +405,7 @@ export async function decryptMessage(
     const _drResult = await doubleRatchetDecrypt(
       msg.ciphertext, msg.nonce, msg.messageIndex, msg.kemCiphertext,
       msg.senderEphPub,
-      stateJson, msg.conversationId, myKemPrivKey, myKemPubKey,
+      stateJson, msg.conversationId, myKemPrivKey ?? "", myKemPubKey,
       senderKeys?.kemPublicKey ?? "", msg.initKemCiphertext,
     );
 
@@ -554,6 +558,11 @@ export function subscribeToMessages(
       if (_retryFailed.has(d.id)) continue;
       if (decryptedCache.has(d.id) && !_retrySet.has(d.id)) continue;
 
+      // Messages envoyés par soi-même — déjà dans le cache via _preloadSentMessage.
+      // Tenter de les déchiffrer avec le ratchet (état N+1 après l'envoi) échoue
+      // systématiquement. On les ignore ici ; le preload les affiche correctement.
+      if (msg.senderUid === myUid) continue;
+
       toDecrypt.push(msg);
     }
 
@@ -588,28 +597,21 @@ export function subscribeToMessages(
           if (msg.id === lastMsgInBatch.id) {
             updateConversationPreview(msg.conversationId, decrypted.plaintext).catch(() => {});
           }
-        } catch (err) {
-          const isRetry = _retrySet.has(msg.id);
-          if (!isRetry) {
-            console.warn(`[AQ] Dechiffrement differe pour ${msg.id}`);
-            _retrySet.add(msg.id);
-            decryptedCache.set(msg.id, {
-              id: msg.id, senderUid: msg.senderUid,
-              plaintext: "[\uD83D\uDD12 Dechiffrement en cours\u2026]",
-              timestamp: msg.timestamp, verified: false, readBy: [],
-            });
-            scheduleRetry(msg);
-          } else {
-            console.error(`[AQ] Echec definitif dechiffrement ${msg.id}`);
-            decryptedCache.set(msg.id, {
-              id: msg.id, senderUid: msg.senderUid,
-              plaintext: "[\uD83D\uDD12 Message non dechiffrable]",
-              timestamp: msg.timestamp, verified: false, readBy: [],
-            });
-            _retrySet.delete(msg.id);
-            _retryFailed.add(msg.id); // plus jamais retente, meme si le snapshot repasse
-          }
-        }
+        } catch (err: any) {
+    if (err.message === "RAT_EMPTY_CHAIN_KEY") {
+        console.warn(`[AQ] Désynchronisation détectée sur le message ${msg.id}. L'état local est corrompu.`);
+        // On affiche un message spécial à l'utilisateur au lieu de "Déchiffrement..."
+        decryptedCache.set(msg.id, {
+            ...msg,
+            plaintext: "[⚠️ Erreur de synchronisation : Clé manquante]",
+            verified: false
+        });
+    } else {
+        // Autre erreur (réseau, signature, etc.)
+        _retrySet.add(msg.id);
+        scheduleRetry(msg);
+    }
+}
         // Émettre après chaque message pour un affichage progressif
         emitResult();
       }

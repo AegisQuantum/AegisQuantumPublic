@@ -2,6 +2,7 @@
  * auth.ts — Authentification AegisQuantum
  */
 
+
 import {
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
@@ -11,7 +12,7 @@ import {
 } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
-import { clearPrivateKeys, storePrivateKeys, unlockPrivateKeys, getKemPrivateKey, getDsaPrivateKey } from "./key-store";
+import { clearPrivateKeys, storePrivateKeys, unlockPrivateKeys, getKemPrivateKey, getDsaPrivateKey} from "./key-store";
 import { publishPublicKeys, getPublicKeys } from "./key-registry";
 import { kemGenerateKeyPair, dsaGenerateKeyPair, argon2Derive } from "../crypto";
 import type { AQUser } from "../types/user";
@@ -87,6 +88,14 @@ async function _generateAndPublishKeys(uid: string, password: string): Promise<v
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function loadCryptoKeys(uid: string, password: string): Promise<void> {
+
+  // --- AJOUT DE CETTE SÉCURITÉ ---
+  if (getKemPrivateKey(uid)) {
+    console.log("[AQ:crypto] Clés déjà en mémoire, on ignore le re-déchiffrement.");
+    return;
+  }
+  // -------------------------------
+
   const existingPublicKeys = await getPublicKeys(uid);
 
   if (!existingPublicKeys) {
@@ -157,16 +166,21 @@ export async function changePassword(uid: string, newPassword: string): Promise<
   // 1. Changer le mot de passe Firebase Auth
   await updatePassword(firebaseUser, newPassword);
 
-  // 2. Récupérer les clés privées déjà en mémoire (chargées lors du signIn)
+  // 2. Récupérer les clés privées déjà en mémoire
   const kemPrivateKey = getKemPrivateKey(uid);
   const dsaPrivateKey = getDsaPrivateKey(uid);
 
-  // 3. Re-chiffrer le vault avec le nouveau mot de passe (nouveau salt Argon2)
+  // --- FIX TS: On vérifie que les clés sont présentes ---
+  if (!kemPrivateKey || !dsaPrivateKey) {
+    throw new Error("Clés privées introuvables en mémoire. Reconnexion requise.");
+  }
+
+  // 3. Re-chiffrer le vault avec le nouveau mot de passe
   const { key: newMasterKey, salt: newArgon2Salt } = await argon2Derive(newPassword);
 
   await storePrivateKeys(uid, {
-    kemPrivateKey,
-    dsaPrivateKey,
+    kemPrivateKey, // Maintenant garanti string
+    dsaPrivateKey, 
     masterKey:  newMasterKey,
     argon2Salt: newArgon2Salt,
   });

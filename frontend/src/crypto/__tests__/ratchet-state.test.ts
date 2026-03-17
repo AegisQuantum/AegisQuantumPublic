@@ -41,6 +41,7 @@ function makeState(overrides: Partial<RatchetState> = {}): RatchetState {
     sendCount       : 0,
     receiveCount    : 0,
     updatedAt       : 1700000000000,
+    skippedMessageKeys : {}, // empty by default
     ...overrides,
   };
 }

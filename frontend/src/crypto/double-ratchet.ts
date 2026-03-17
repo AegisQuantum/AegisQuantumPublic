@@ -163,7 +163,8 @@ export async function doubleRatchetEncrypt(
       sendCount          : 0,
       receiveCount       : 0,
       updatedAt          : Date.now(),
-      skippedMessageKeys : {},   // ← nouveau champ
+      skippedMessageKeys : {},
+      kemRatchetPending  : false,   // bootstrap sender already did KEM step
     };
 
     const { nextChainKey, messageKey } = await symmetricRatchetStep(state.sendingChainKey);
@@ -190,21 +191,45 @@ export async function doubleRatchetEncrypt(
   // ── Subsequent messages ───────────────────────────────────────────────────
   const state = deserializeRatchetState(stateJson);
 
-  // Ensure skippedMessageKeys exists on states serialized before this fix
+  // Backwards-compatibility: default missing fields
   if (!state.skippedMessageKeys) state.skippedMessageKeys = {};
+  const kemRatchetPending = state.kemRatchetPending ?? false;
 
-  const { sharedSecret: kemSecret, ciphertext: kemCiphertext } =
-    await kemEncapsulate(state.theirPublicKey);
+  // ── Epoch-based KEM ratchet step ─────────────────────────────────────────
+  //
+  // A new KEM epoch is started only when kemRatchetPending = true (i.e., we
+  // received a message with a new senderEphPub since our last KEM step).
+  // Within the same epoch, consecutive messages advance the symmetric chain
+  // only, keeping kemCiphertext = "". This matches Signal's design intent and
+  // makes skipped-key recovery possible: if messages N and N+1 share the same
+  // epoch their message keys can be derived from the same symmetric chain,
+  // allowing _advanceReceivingChain to cache N's key when N+1 arrives first.
 
-  const ikm = concatSecrets(state.rootKey, kemSecret);
-  const { rootKey: newRootKey, chainKey: newSendingChainKey } = await hkdfDerivePair(ikm);
-  state.rootKey = newRootKey;
+  let kemCiphertext = "";
+  let senderEphPub  = state.ourPublicKey;
 
-  const { publicKey: newEphPub, privateKey: newEphPriv } = await kemGenerateKeyPair();
-  state.ourPrivateKey = newEphPriv;
-  state.ourPublicKey  = newEphPub;
+  if (kemRatchetPending) {
+    // New epoch: encapsulate to their latest ephemeral public key, derive
+    // fresh root key + sending chain key, rotate our ephemeral keypair.
+    const { sharedSecret: kemSecret, ciphertext: newKemCiphertext } =
+      await kemEncapsulate(state.theirPublicKey);
 
-  const { nextChainKey, messageKey } = await symmetricRatchetStep(newSendingChainKey);
+    const ikm = concatSecrets(state.rootKey, kemSecret);
+    const { rootKey: newRootKey, chainKey: newSendingChainKey } = await hkdfDerivePair(ikm);
+    state.rootKey         = newRootKey;
+    state.sendingChainKey = newSendingChainKey;
+
+    const { publicKey: newEphPub, privateKey: newEphPriv } = await kemGenerateKeyPair();
+    state.ourPrivateKey = newEphPriv;
+    state.ourPublicKey  = newEphPub;
+
+    state.kemRatchetPending = false;
+    kemCiphertext           = newKemCiphertext;
+    senderEphPub            = newEphPub;
+  }
+  // else: same epoch, kemCiphertext stays "" and senderEphPub stays ourPublicKey
+
+  const { nextChainKey, messageKey } = await symmetricRatchetStep(state.sendingChainKey);
   state.sendingChainKey = nextChainKey;
   const messageIndex    = state.sendCount++;
 
@@ -217,7 +242,7 @@ export async function doubleRatchetEncrypt(
     ciphertext,
     nonce,
     kemCiphertext,
-    senderEphPub : newEphPub,
+    senderEphPub,
     messageIndex,
     newStateJson : serializeRatchetState(state),
     fileSecret,
@@ -244,6 +269,7 @@ export async function doubleRatchetDecrypt(
 
   // ── Bootstrap : first message received ───────────────────────────────────
   if (stateJson === null) {
+    console.log("[AQ-Debug] Initialisation du Ratchet (Bootstrap Receiver)");
     if (!initKemCiphertext) {
       throw new Error(
         "doubleRatchetDecrypt: first message (stateJson=null) but initKemCiphertext is missing. " +
@@ -265,7 +291,8 @@ export async function doubleRatchetDecrypt(
       sendCount          : 0,
       receiveCount       : 0,
       updatedAt          : Date.now(),
-      skippedMessageKeys : {},   // ← nouveau champ
+      skippedMessageKeys : {},
+      kemRatchetPending  : true,   // bootstrap receiver must KEM-respond on first send
     };
 
     const { messageKey } = await _advanceReceivingChain(state, messageIndex);
@@ -280,15 +307,14 @@ export async function doubleRatchetDecrypt(
   // ── Subsequent messages ───────────────────────────────────────────────────
   const state = deserializeRatchetState(stateJson);
 
-  // Ensure skippedMessageKeys exists on states serialized before this fix
+  // Backwards-compatibility: default missing fields
   if (!state.skippedMessageKeys) state.skippedMessageKeys = {};
 
   // ── Skipped key path : message arrived out of order ──────────────────────
   //
   // If messageIndex is in the skippedMessageKeys buffer, we already derived
-  // this messageKey when a later message arrived first. Use the cached key
-  // directly — do NOT perform another KEM ratchet step (state.ourPrivateKey
-  // has already advanced past this message).
+  // this messageKey when a later message arrived first (within the same epoch).
+  // Use the cached key directly — no KEM step or chain advancement needed.
   const cachedMessageKey = state.skippedMessageKeys[String(messageIndex)];
 
   if (cachedMessageKey !== undefined) {
@@ -302,19 +328,28 @@ export async function doubleRatchetDecrypt(
     return { plaintext, newStateJson: serializeRatchetState(state), fileSecret };
   }
 
-  // ── Normal path : message arrived in order ────────────────────────────────
+  // ── Normal path : message arrived in order ───────────────────────────────
   //
-  // Perform KEM ratchet step: decapsulate with our current ephemeral private key.
-  // The sender encapsulated to state.ourPublicKey, so ourPrivateKey matches.
-  const kemSecret = await kemDecapsulate(kemCiphertext, state.ourPrivateKey);
-  const ikm       = concatSecrets(state.rootKey, kemSecret);
-  const { rootKey: newRootKey, chainKey: newReceivingChainKey } = await hkdfDerivePair(ikm);
+  // Epoch-based KEM: a new receiving epoch starts only when kemCiphertext !== "".
+  // If kemCiphertext === "", the sender is in the same epoch → use the existing
+  // receivingChainKey and advance the symmetric chain only.
 
-  state.rootKey           = newRootKey;
-  state.receivingChainKey = newReceivingChainKey;
+  if (kemCiphertext !== "") {
+    // New epoch: decapsulate with our current ephemeral private key.
+    // The sender encapsulated to state.ourPublicKey, so ourPrivateKey matches.
+    const kemSecret = await kemDecapsulate(kemCiphertext, state.ourPrivateKey);
+    const ikm       = concatSecrets(state.rootKey, kemSecret);
+    const { rootKey: newRootKey, chainKey: newReceivingChainKey } = await hkdfDerivePair(ikm);
 
-  // Update theirPublicKey to sender's new ephemeral key for next send step.
-  state.theirPublicKey = senderEphPub;
+    state.rootKey           = newRootKey;
+    state.receivingChainKey = newReceivingChainKey;
+  }
+
+  // Always update theirPublicKey to sender's latest ephemeral key.
+  // Within an epoch senderEphPub may be the same as before (no change), but
+  // when a new epoch starts it carries the sender's fresh ephemeral key.
+  state.theirPublicKey    = senderEphPub;
+  state.kemRatchetPending = true; // we received → must KEM-respond on next send
 
   // Advance the symmetric chain, caching any skipped messageKeys along the way.
   const { messageKey } = await _advanceReceivingChain(state, messageIndex);
@@ -395,6 +430,12 @@ async function symmetricRatchetStep(chainKey: string): Promise<{
   nextChainKey: string;
   messageKey  : string;
 }> {
+  // AJOUT DE CETTE SÉCURITÉ
+  if (!chainKey || chainKey === "" || chainKey.length < 10) {
+    console.error("[AQ-Ratchet] Tentative de dérivation avec une ChainKey vide ou invalide.");
+    throw new Error("RAT_EMPTY_CHAIN_KEY"); 
+  }
+
   const { rootKey: nextChainKey, chainKey: messageKey } = await hkdfDerivePair(chainKey);
   return { nextChainKey, messageKey };
 }

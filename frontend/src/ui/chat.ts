@@ -25,6 +25,12 @@ import {
   type BackupConversation,
   type BackupPayload,
 }                                           from '../services/backup';
+import {
+  exportSessionKeys,
+  importSessionKeys,
+  downloadSessionFile,
+}                                           from '../services/session-keys';
+import { validateMnemonic, normalizeMnemonic } from '../crypto/mnemonic';
 import type { Conversation, DecryptedMessage } from '../types/message';
 
 let _unsubConvs:        (() => void) | null = null;
@@ -138,7 +144,7 @@ export async function initChat(uid: string): Promise<void> {
   document.getElementById('btn-send')?.addEventListener('click', handleSendMessage);
   const msgInput = document.getElementById('message-input') as HTMLTextAreaElement | null;
   msgInput?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); handleSendMessage(); }
   });
   msgInput?.addEventListener('input',  () => _typingDebouncer?.onInput());
   msgInput?.addEventListener('blur',   () => _typingDebouncer?.onBlur());
@@ -256,6 +262,24 @@ export async function initChat(uid: string): Promise<void> {
   });
   document.getElementById('backup-export-modal')?.addEventListener('click', (e) => {
     if ((e.target as HTMLElement).id === 'backup-export-modal') closeBackupExportModal();
+  });
+
+  // ── Export clés de session ──
+  document.getElementById('btn-export-session')?.addEventListener('click', openSessionExportModal);
+  document.getElementById('session-export-close')?.addEventListener('click', closeSessionExportModal);
+  document.getElementById('session-export-cancel')?.addEventListener('click', closeSessionExportModal);
+  document.getElementById('session-export-confirm')?.addEventListener('click', confirmSessionExport);
+  document.getElementById('session-export-modal')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'session-export-modal') closeSessionExportModal();
+  });
+
+  // ── Import clés de session ──
+  document.getElementById('btn-import-session')?.addEventListener('click', openSessionImportModal);
+  document.getElementById('session-import-close')?.addEventListener('click', closeSessionImportModal);
+  document.getElementById('session-import-cancel')?.addEventListener('click', closeSessionImportModal);
+  document.getElementById('session-import-confirm')?.addEventListener('click', confirmSessionImport);
+  document.getElementById('session-import-modal')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'session-import-modal') closeSessionImportModal();
   });
 
   // ── Safety Numbers ──
@@ -968,14 +992,16 @@ function renderMessages(messages: DecryptedMessage[]): void {
       if (textEl) {
         const current = textEl.textContent ?? '';
         const isPlaceholder = current.startsWith('[\uD83D\uDD12');
-        if (isPlaceholder && !msg.plaintext.startsWith('[\uD83D\uDD12')) {
+        if (isPlaceholder && msg.plaintext !== current) {
           textEl.textContent = msg.plaintext;
           // Réappliquer la recherche si active
           if (_msgSearchQuery) {
             textEl.dataset.plaintext = msg.plaintext;
             applyMsgSearch(_msgSearchQuery);
           }
-          bubble.classList.remove('decryption-pending');
+          if (!msg.plaintext.startsWith('[\uD83D\uDD12')) {
+            bubble.classList.remove('decryption-pending');
+          }
         }
       }
     }
@@ -1415,6 +1441,174 @@ async function confirmBackupExport(): Promise<void> {
     showToast(`Export échoué : ${err instanceof Error ? err.message : String(err)}`);
     if (confirmBtn) { confirmBtn.disabled = false; }
     setProgress(0, '');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Export clés de session
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Stocker le fileJson généré entre step1 et step2
+let _sessionExportFileJson: string | null = null;
+
+function openSessionExportModal(): void {
+  _sessionExportFileJson = null;
+  const modal = document.getElementById('session-export-modal');
+  if (modal) modal.style.display = 'flex';
+  const step1 = document.getElementById('session-export-step1');
+  const step2 = document.getElementById('session-export-step2');
+  if (step1) step1.style.display = 'flex';
+  if (step2) step2.style.display = 'none';
+  const confirmBtn = document.getElementById('session-export-confirm') as HTMLButtonElement | null;
+  if (confirmBtn) {
+    confirmBtn.disabled = false;
+    confirmBtn.innerHTML = `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px"><path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/></svg>Générer &amp; Télécharger`;
+    // Reset onclick to default handler
+    confirmBtn.onclick = null;
+  }
+  const prog = document.getElementById('session-export-progress');
+  if (prog) prog.style.display = 'none';
+}
+
+function closeSessionExportModal(): void {
+  const modal = document.getElementById('session-export-modal');
+  if (modal) modal.style.display = 'none';
+  _sessionExportFileJson = null;
+}
+
+async function confirmSessionExport(): Promise<void> {
+  const confirmBtn = document.getElementById('session-export-confirm') as HTMLButtonElement | null;
+  const prog  = document.getElementById('session-export-progress');
+  const fill  = document.getElementById('session-export-progress-fill');
+  const label = document.getElementById('session-export-progress-label');
+  const step1 = document.getElementById('session-export-step1');
+  const step2 = document.getElementById('session-export-step2');
+  const grid  = document.getElementById('session-mnemonic-grid');
+
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (prog) prog.style.display = '';
+
+  const setProgress = (pct: number, text: string): void => {
+    if (fill)  fill.style.width  = `${pct}%`;
+    if (label) label.textContent = text;
+  };
+
+  try {
+    const { fileJson, mnemonic } = await exportSessionKeys(_myUid, (phase) => {
+      if (phase === 'generating') setProgress(10, 'Génération de la phrase mnémotechnique…');
+      if (phase === 'collecting') setProgress(25, 'Collecte des clés et états ratchet…');
+      if (phase === 'deriving')   setProgress(50, 'Dérivation Argon2id… (quelques secondes)');
+      if (phase === 'encrypting') setProgress(85, 'Chiffrement AES-256-GCM…');
+      if (phase === 'done')       setProgress(100, 'Terminé !');
+    });
+
+    _sessionExportFileJson = fileJson;
+
+    // Afficher les mots mnémotechniques dans la grille
+    if (grid) {
+      grid.innerHTML = '';
+      mnemonic.forEach((word, i) => {
+        const cell = document.createElement('div');
+        cell.style.cssText = 'background:rgba(107,143,245,0.1);border:1px solid rgba(107,143,245,0.2);border-radius:5px;padding:6px 8px;text-align:center;font-family:monospace;font-size:12px;color:#c4c9e8';
+        cell.innerHTML = `<span style="color:#5a6080;font-size:9px;display:block">${i + 1}.</span>${escapeHtml(word)}`;
+        grid.appendChild(cell);
+      });
+    }
+
+    if (step1) step1.style.display = 'none';
+    if (prog)  prog.style.display  = 'none';
+    if (step2) step2.style.display = 'flex';
+
+    // Le bouton "Confirmer" déclenche maintenant le téléchargement
+    if (confirmBtn) {
+      confirmBtn.disabled = false;
+      confirmBtn.innerHTML = `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px"><path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/></svg>Télécharger le fichier`;
+      confirmBtn.onclick = () => {
+        if (_sessionExportFileJson) downloadSessionFile(_sessionExportFileJson);
+        closeSessionExportModal();
+        showToast('Clés exportées avec succès. Gardez vos 10 mots en sécurité !');
+      };
+    }
+  } catch (err) {
+    console.error('[AQ] Session export failed:', err);
+    showToast(`Export échoué : ${err instanceof Error ? err.message : String(err)}`);
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (prog) prog.style.display = 'none';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Import clés de session
+// ─────────────────────────────────────────────────────────────────────────────
+
+function openSessionImportModal(): void {
+  const modal = document.getElementById('session-import-modal');
+  if (modal) modal.style.display = 'flex';
+  const fileInput  = document.getElementById('session-import-file') as HTMLInputElement | null;
+  const passInput  = document.getElementById('session-import-password') as HTMLInputElement | null;
+  const mnemoInput = document.getElementById('session-import-mnemonic') as HTMLTextAreaElement | null;
+  if (fileInput)  fileInput.value  = '';
+  if (passInput)  passInput.value  = '';
+  if (mnemoInput) mnemoInput.value = '';
+  const prog = document.getElementById('session-import-progress');
+  if (prog) prog.style.display = 'none';
+  const confirmBtn = document.getElementById('session-import-confirm') as HTMLButtonElement | null;
+  if (confirmBtn) confirmBtn.disabled = false;
+  setTimeout(() => fileInput?.focus(), 60);
+}
+
+function closeSessionImportModal(): void {
+  const modal = document.getElementById('session-import-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function confirmSessionImport(): Promise<void> {
+  const fileInput  = document.getElementById('session-import-file') as HTMLInputElement | null;
+  const passInput  = document.getElementById('session-import-password') as HTMLInputElement | null;
+  const mnemoInput = document.getElementById('session-import-mnemonic') as HTMLTextAreaElement | null;
+  const confirmBtn = document.getElementById('session-import-confirm') as HTMLButtonElement | null;
+  const prog  = document.getElementById('session-import-progress');
+  const fill  = document.getElementById('session-import-progress-fill');
+  const label = document.getElementById('session-import-progress-label');
+
+  const file     = fileInput?.files?.[0];
+  const password = passInput?.value ?? '';
+  const phrase   = mnemoInput?.value ?? '';
+
+  if (!file)     { showToast('Sélectionnez un fichier .aqsession.'); return; }
+  if (!password) { showToast('Entrez votre mot de passe AegisQuantum actuel.'); return; }
+
+  const words = normalizeMnemonic(phrase);
+  if (!validateMnemonic(words)) {
+    showToast('Phrase invalide — 10 mots de la liste requis, séparés par des espaces.');
+    return;
+  }
+
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (prog) prog.style.display = '';
+
+  const setProgress = (pct: number, text: string): void => {
+    if (fill)  fill.style.width  = `${pct}%`;
+    if (label) label.textContent = text;
+  };
+
+  try {
+    const fileContent = await file.text();
+    const importedUid = await importSessionKeys(fileContent, words, password, (phase) => {
+      if (phase === 'parsing')    setProgress(10, 'Lecture du fichier…');
+      if (phase === 'deriving')   setProgress(30, 'Dérivation Argon2id… (quelques secondes)');
+      if (phase === 'decrypting') setProgress(65, 'Déchiffrement AES-256-GCM…');
+      if (phase === 'restoring')  setProgress(85, 'Restauration des clés et états ratchet…');
+      if (phase === 'done')       setProgress(100, 'Terminé !');
+    });
+
+    closeSessionImportModal();
+    showToast(`Session restaurée (UID: ${importedUid.slice(0, 8)}…). Reconnectez-vous pour appliquer.`);
+  } catch (err) {
+    console.error('[AQ] Session import failed:', err);
+    showToast(`Import échoué : ${err instanceof Error ? err.message : String(err)}`);
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (prog) prog.style.display = 'none';
   }
 }
 

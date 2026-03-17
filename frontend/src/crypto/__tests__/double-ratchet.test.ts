@@ -236,20 +236,44 @@ describe("Round-trip Alice → Bob", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("Forward Secrecy", () => {
-  it("N messages consécutifs → N kemCiphertexts tous distincts", async () => {
-    const N = 10;
-    let state: string | null = null;
-    const kemCTs = new Set<string>();
+  it("epoch-based KEM : kemCiphertext vide si pas de réception, non-vide après réception", async () => {
+    // Bootstrap (stateJson=null) always produces kemCiphertext="" + initKemCiphertext.
+    const enc0 = await doubleRatchetEncrypt(
+      "bootstrap", null, alice.convId,
+      alice.privKey, alice.pubKey, bob.pubKey,
+    );
+    expect(enc0.kemCiphertext).toBe("");
 
-    for (let i = 0; i < N; i++) {
+    // Alice sends several more messages without receiving anything from Bob →
+    // kemRatchetPending stays false → kemCiphertext stays "" (same epoch).
+    let aliceState = enc0.newStateJson;
+    for (let i = 1; i < 5; i++) {
       const enc = await doubleRatchetEncrypt(
-        `message ${i}`, state, alice.convId,
+        `msg ${i}`, aliceState, alice.convId,
         alice.privKey, alice.pubKey, bob.pubKey,
       );
-      kemCTs.add(enc.kemCiphertext);
-      state = enc.newStateJson;
+      expect(enc.kemCiphertext).toBe(""); // same epoch, no KEM step
+      aliceState = enc.newStateJson;
     }
-    expect(kemCTs.size).toBe(N);
+
+    // Bob receives bootstrap → kemRatchetPending = true.
+    const dec0 = await doubleRatchetDecrypt(
+      enc0.ciphertext, enc0.nonce, enc0.messageIndex, enc0.kemCiphertext,
+      enc0.senderEphPub, null, bob.convId,
+      bob.privKey, bob.pubKey, alice.pubKey, enc0.initKemCiphertext,
+    );
+    // Bob replies → KEM step happens, kemCiphertext is non-empty.
+    const bobReply = await doubleRatchetEncrypt(
+      "hello Alice", dec0.newStateJson, bob.convId,
+      bob.privKey, bob.pubKey, alice.pubKey,
+    );
+    expect(bobReply.kemCiphertext.length).toBeGreaterThan(100); // non-empty KEM CT
+    // Bob's second message without receiving → same epoch, kemCiphertext = "".
+    const bobReply2 = await doubleRatchetEncrypt(
+      "still me", bobReply.newStateJson, bob.convId,
+      bob.privKey, bob.pubKey, alice.pubKey,
+    );
+    expect(bobReply2.kemCiphertext).toBe(""); // same epoch
   });
 
   it("N messages → N ciphertexts tous distincts (même plaintext)", async () => {
@@ -268,20 +292,51 @@ describe("Forward Secrecy", () => {
     expect(ciphertexts.size).toBe(N);
   });
 
-  it("les ourPrivateKey dans state changent à chaque ratchet step", async () => {
-    let state: string | null = null;
-    const privKeys = new Set<string>();
+  it("ourPrivateKey change uniquement lors d'un KEM ratchet step (après réception)", async () => {
+    // Bootstrap: generates first ephemeral key.
+    const enc0 = await doubleRatchetEncrypt(
+      "bootstrap", null, alice.convId,
+      alice.privKey, alice.pubKey, bob.pubKey,
+    );
+    const s0 = deserializeRatchetState(enc0.newStateJson);
+    const privKey0 = s0.ourPrivateKey;
 
-    for (let i = 0; i < 5; i++) {
+    // Alice sends 3 more messages without receiving anything → same epoch,
+    // no KEM step → ourPrivateKey stays the same.
+    let aliceState = enc0.newStateJson;
+    for (let i = 1; i <= 3; i++) {
       const enc = await doubleRatchetEncrypt(
-        `msg ${i}`, state, alice.convId,
+        `msg ${i}`, aliceState, alice.convId,
         alice.privKey, alice.pubKey, bob.pubKey,
       );
       const s = deserializeRatchetState(enc.newStateJson);
-      privKeys.add(s.ourPrivateKey);
-      state = enc.newStateJson;
+      expect(s.ourPrivateKey).toBe(privKey0); // unchanged within epoch
+      aliceState = enc.newStateJson;
     }
-    expect(privKeys.size).toBe(5);
+
+    // Bob decrypts bootstrap → kemRatchetPending=true → Bob replies with KEM step.
+    const dec0 = await doubleRatchetDecrypt(
+      enc0.ciphertext, enc0.nonce, enc0.messageIndex, enc0.kemCiphertext,
+      enc0.senderEphPub, null, bob.convId,
+      bob.privKey, bob.pubKey, alice.pubKey, enc0.initKemCiphertext,
+    );
+    const bobReply = await doubleRatchetEncrypt(
+      "reply", dec0.newStateJson, bob.convId,
+      bob.privKey, bob.pubKey, alice.pubKey,
+    );
+
+    // Alice receives Bob's reply → kemRatchetPending=true → next send rotates private key.
+    const aliceDec = await doubleRatchetDecrypt(
+      bobReply.ciphertext, bobReply.nonce, bobReply.messageIndex, bobReply.kemCiphertext,
+      bobReply.senderEphPub, aliceState, alice.convId,
+      alice.privKey, alice.pubKey, bob.pubKey,
+    );
+    const aliceReply = await doubleRatchetEncrypt(
+      "back to alice", aliceDec.newStateJson, alice.convId,
+      alice.privKey, alice.pubKey, bob.pubKey,
+    );
+    const sAfterReply = deserializeRatchetState(aliceReply.newStateJson);
+    expect(sAfterReply.ourPrivateKey).not.toBe(privKey0); // rotated after KEM step
   });
 });
 
