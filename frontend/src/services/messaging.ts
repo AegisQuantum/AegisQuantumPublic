@@ -49,6 +49,8 @@ import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto/aes-gcm";
 import { hkdfDerive }                   from "../crypto/hkdf";
 import { toBase64, fromBase64 }         from "../crypto/kem";
 import type { EncryptedMessage, Conversation, DecryptedMessage } from "../types/message";
+import { loadCachedConversations, saveCachedConversations, loadCachedMessages, saveCachedMessages, getLastCachedMessageTs } from "./idb-cache";
+import { emitCryptoEvent, previewB64, shortUid, shortConvId } from "./crypto-events";
 
 // ---------------------------------------------------------------------------
 // Preview sidebar locale (zero Firestore cote emetteur)
@@ -767,7 +769,7 @@ export function subscribeToMessages(
           verified : cached.verified,
           readBy   : [],
         });
-        hasNewWork = true;
+        hasImmediateWork = true;
       }
     }
 
@@ -858,7 +860,7 @@ export function subscribeToMessages(
         emitResult();
       }
 
-      hasNewWork = true;
+      hasImmediateWork = true;
     }
   });
 
