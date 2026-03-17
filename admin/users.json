@@ -1,0 +1,34 @@
+{"users": [
+{
+  "localId": "N6iHBFbLwEXwxlFzWm6XfZBz0no2",
+  "email": "alice@aq.local",
+  "emailVerified": true,
+  "passwordHash": "sAq7x06VM6neKJaZLPTLhu3szpz0z4eNwRZizfJrJm3LpQv/NQv1aAdFsjnA/7Z9KJOlE3q5NpuuSsgnES1Clg==",
+  "salt": "2qLE9XJxz91+cA==",
+  "lastSignedInAt": "1773670123854",
+  "createdAt": "1773052312392",
+  "disabled": false,
+  "providerUserInfo": []
+},
+{
+  "localId": "SGojsBzmCVQgHszIY5VpA2ymICB2",
+  "email": "bob@aq.local",
+  "emailVerified": true,
+  "passwordHash": "zyKE5aQkYWQ6gGlUAF/cckTp3fyyUyR0qHmXOVmHOliOhJQR6YYYbcGGcjAzR0/OSxuvndX+xg7ugqAJCqTl7w==",
+  "salt": "W/bSXblNMIopvg==",
+  "lastSignedInAt": "1773670197548",
+  "createdAt": "1773063141970",
+  "disabled": false,
+  "providerUserInfo": []
+},
+{
+  "localId": "t3pCVIEOeab7X0xqXlFozP1kz253",
+  "email": "lina@aq.local",
+  "emailVerified": true,
+  "passwordHash": "vc5mKPL8iLYbobLduLQudl1PK57dczbtxUiH42RQU6LlvIBUEG08qOs9WY7G+2s+48gBHqOdEH8zuWy6bElJXA==",
+  "salt": "2B15xTaca6b+Wg==",
+  "lastSignedInAt": "1773238114123",
+  "createdAt": "1773237984981",
+  "disabled": false,
+  "providerUserInfo": []
+}]}

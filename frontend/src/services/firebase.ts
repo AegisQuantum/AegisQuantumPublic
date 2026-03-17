@@ -1,6 +1,6 @@
 import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import { initializeFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyC_KVfLSD2jFo7kSUYQz30p4ZE7P_gAv7w",
@@ -14,6 +14,10 @@ const firebaseConfig = {
 
 export const app  = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db   = getFirestore(app);
 
-console.log('[AQ:firebase] connecté à', firebaseConfig.projectId);
+// initializeFirestore avec experimentalAutoDetectLongPolling :
+// corrige l'erreur CORS Safari (WebChannel bloque par la politique CORS stricte de Safari).
+// Long-polling est utilise automatiquement quand WebSockets/fetch echouent.
+export const db = initializeFirestore(app, {
+  experimentalAutoDetectLongPolling: true,
+});

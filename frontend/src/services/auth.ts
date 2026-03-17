@@ -2,6 +2,7 @@
  * auth.ts — Authentification AegisQuantum
  */
 
+
 import {
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
@@ -11,8 +12,9 @@ import {
 } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
-import { clearPrivateKeys, storePrivateKeys, unlockPrivateKeys, getKemPrivateKey, getDsaPrivateKey } from "./key-store";
-import { publishPublicKeys, getPublicKeys, clearPublicKeysCache } from "./key-registry";
+import { clearPrivateKeys, storePrivateKeys, unlockPrivateKeys, getKemPrivateKey, getDsaPrivateKey} from "./key-store";
+import { resetMessagingState } from "./messaging";
+import { publishPublicKeys, getPublicKeys } from "./key-registry";
 import { kemGenerateKeyPair, dsaGenerateKeyPair, argon2Derive } from "../crypto";
 import type { AQUser } from "../types/user";
 
@@ -83,10 +85,31 @@ async function _generateAndPublishKeys(uid: string, password: string): Promise<v
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Erreur typée : vault IDB absent alors que des clés publiques existent
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Lancée par signIn() quand Firebase Auth réussit mais le vault IDB est vide.
+ *  L'UI doit proposer l'import .aqsession (ou la régénération des clés).  */
+export class VaultMissingError extends Error {
+  constructor(public readonly uid: string) {
+    super("VAULT_MISSING");
+    this.name = "VaultMissingError";
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Pipeline crypto principal
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function loadCryptoKeys(uid: string, password: string): Promise<void> {
+
+  // --- AJOUT DE CETTE SÉCURITÉ ---
+  if (getKemPrivateKey(uid)) {
+    console.log("[AQ:crypto] Clés déjà en mémoire, on ignore le re-déchiffrement.");
+    return;
+  }
+  // -------------------------------
+
   const existingPublicKeys = await getPublicKeys(uid);
 
   if (!existingPublicKeys) {
@@ -113,10 +136,23 @@ export async function loadCryptoKeys(uid: string, password: string): Promise<voi
   try {
     await unlockPrivateKeys(uid, masterKey);
     console.log("[AQ:crypto] Vault déchiffré ✓");
-  } catch {
-    // Vault IDB absent (effacé manuellement) ou corrompu → régénérer
-    console.warn("[AQ:crypto] Vault IDB introuvable — régénération des clés…");
-    await _generateAndPublishKeys(uid, password);
+  } catch (e) {
+    // Vault IDB absent ou corrompu.
+    //
+    // CRITIQUE : des clés publiques existent déjà dans Firestore, ce qui signifie
+    // que des messages ont été échangés avec ces clés. Régénérer ici écraserait
+    // les clés publiques → tous les anciens messages deviendraient indéchiffrables
+    // et la communication avec les contacts serait rompue silencieusement.
+    //
+    // On leve une erreur explicite pour que l'UI puisse avertir l'utilisateur
+    // ("Vos clés locales sont introuvables. Effacez vos données et recréez un compte.").
+    // Ne jamais régénérer silencieusement quand des clés publiques existent déjà.
+    console.error("[AQ:crypto] Vault IDB introuvable alors que des clés publiques existent dans Firestore.");
+    throw new Error(
+      "VAULT_MISSING: Vos cl\u00e9s priv\u00e9es locales sont introuvables (IDB vid\u00e9 ?). " +
+      "Impossible de se connecter sans elles — r\u00e9g\u00e9n\u00e9rer casserait toutes vos conversations. " +
+      "Pour repartir de z\u00e9ro : supprimez votre compte et recr\u00e9ez-en un."
+    );
   }
 }
 
@@ -125,12 +161,37 @@ export async function loadCryptoKeys(uid: string, password: string): Promise<voi
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function signIn(username: string, password: string): Promise<AQUser> {
+  // Nettoie l'état de la session précédente (retry sets, ratchet locks…)
+  // indispensable pour les changements de compte sans rechargement de page.
+  resetMessagingState();
+  clearPrivateKeys();
+
   const fakeEmail  = toFakeEmail(username);
   const credential = await signInWithEmailAndPassword(auth, fakeEmail, password);
   const uid        = credential.user.uid;
-  await loadCryptoKeys(uid, password);
+  try {
+    await loadCryptoKeys(uid, password);
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith("VAULT_MISSING")) {
+      // Firebase Auth a réussi mais le vault IDB est absent sur cet appareil.
+      // On propage un VaultMissingError typé pour que l'UI propose la récupération.
+      throw new VaultMissingError(uid);
+    }
+    throw e;
+  }
   _currentUser = { uid };
   return _currentUser;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Régénération des clés (utilisé par l'écran de récupération "repartir de zéro")
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Génère et publie une nouvelle paire de clés. DÉTRUIT l'accès aux conversations
+ *  existantes (les contacts ont toujours l'ancienne clé publique en cache).
+ *  À n'utiliser que si l'utilisateur accepte de tout perdre. */
+export async function generateFreshKeys(uid: string, password: string): Promise<void> {
+  await _generateAndPublishKeys(uid, password);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,16 +205,21 @@ export async function changePassword(uid: string, newPassword: string): Promise<
   // 1. Changer le mot de passe Firebase Auth
   await updatePassword(firebaseUser, newPassword);
 
-  // 2. Récupérer les clés privées déjà en mémoire (chargées lors du signIn)
+  // 2. Récupérer les clés privées déjà en mémoire
   const kemPrivateKey = getKemPrivateKey(uid);
   const dsaPrivateKey = getDsaPrivateKey(uid);
 
-  // 3. Re-chiffrer le vault avec le nouveau mot de passe (nouveau salt Argon2)
+  // --- FIX TS: On vérifie que les clés sont présentes ---
+  if (!kemPrivateKey || !dsaPrivateKey) {
+    throw new Error("Clés privées introuvables en mémoire. Reconnexion requise.");
+  }
+
+  // 3. Re-chiffrer le vault avec le nouveau mot de passe
   const { key: newMasterKey, salt: newArgon2Salt } = await argon2Derive(newPassword);
 
   await storePrivateKeys(uid, {
-    kemPrivateKey,
-    dsaPrivateKey,
+    kemPrivateKey, // Maintenant garanti string
+    dsaPrivateKey, 
     masterKey:  newMasterKey,
     argon2Salt: newArgon2Salt,
   });
@@ -186,7 +252,7 @@ export async function mustChangePassword(uid: string): Promise<boolean> {
 
 export async function signOut(): Promise<void> {
   clearPrivateKeys();
-  clearPublicKeysCache();
+  resetMessagingState();
   await firebaseSignOut(auth);
   _currentUser = null;
 }

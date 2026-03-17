@@ -56,4 +56,36 @@ export interface RatchetState {
 
   /** Timestamp de dernière mise à jour (ms) */
   updatedAt: number;
+
+  /**
+   * Buffer des messageKeys pour les messages reçus hors-ordre (skipped keys).
+   *
+   * Clé   : messageIndex (stringifié pour JSON)
+   * Valeur : Base64 — messageKey dérivée lors du passage de la chaîne
+   *
+   * Peuplé dans _advanceReceivingChain() quand on saute des indices.
+   * Consulté dans doubleRatchetDecrypt() AVANT de tenter le KEM ratchet step.
+   * Purgé dès qu'une clé est consommée.
+   *
+   * ⚠ Limité à MAX_SKIPPED_STORED entrées pour éviter les fuites mémoire/stockage.
+   */
+  skippedMessageKeys: Record<string, string>;
+
+  /**
+   * Signal de ratchet KEM en attente.
+   *
+   * true  = nous avons reçu un nouveau senderEphPub depuis notre dernier KEM step
+   *         → le prochain envoi doit effectuer un KEM step (encapsulate + nouvelle paire éphémère)
+   * false = nous sommes dans la même époque KEM → le prochain envoi utilise
+   *         simplement la chaîne symétrique existante (kemCiphertext = "")
+   *
+   * Initialisé à false côté émetteur bootstrap (initKemCiphertext déjà fait),
+   * à true côté récepteur bootstrap (il a reçu la clé éphémère d'Alice).
+   * Remis à false après chaque KEM step à l'envoi.
+   * Remis à true après chaque réception.
+   *
+   * Optionnel pour la rétro-compatibilité avec les états sérialisés antérieurs
+   * (absent = false, i.e. pas de KEM step en attente).
+   */
+  kemRatchetPending?: boolean;
 }

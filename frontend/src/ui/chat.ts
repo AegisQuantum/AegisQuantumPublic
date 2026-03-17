@@ -14,6 +14,7 @@ import {
   sendFile,
   getOrCreateConversation,
   onConvPreviewUpdate,
+  sendRatchetResetSignal,
 }                                           from '../services/messaging';
 import {
   subscribeToTyping,
@@ -25,6 +26,12 @@ import {
   type BackupConversation,
   type BackupPayload,
 }                                           from '../services/backup';
+import {
+  exportSessionKeys,
+  importSessionKeys,
+  downloadSessionFile,
+}                                           from '../services/session-keys';
+import { validateMnemonic, normalizeMnemonic } from '../crypto/mnemonic';
 import type { Conversation, DecryptedMessage } from '../types/message';
 import { onCryptoEvent, type CryptoEventPayload } from '../services/crypto-events';
 
@@ -59,6 +66,9 @@ let _unsubCryptoEvents: (() => void) | null = null;
 
 // État de la recherche dans les messages
 let _msgSearchQuery = '';
+
+// Guard anti-double-submit — empêche deux envois simultanés (double-clic, Enter + clic)
+let _sendInProgress = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LocalStorage — noms locaux des conversations + avatar
@@ -144,7 +154,7 @@ export async function initChat(uid: string): Promise<void> {
   document.getElementById('btn-send')?.addEventListener('click', handleSendMessage);
   const msgInput = document.getElementById('message-input') as HTMLTextAreaElement | null;
   msgInput?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); handleSendMessage(); }
   });
   msgInput?.addEventListener('input',  () => _typingDebouncer?.onInput());
   msgInput?.addEventListener('blur',   () => _typingDebouncer?.onBlur());
@@ -264,6 +274,24 @@ export async function initChat(uid: string): Promise<void> {
     if ((e.target as HTMLElement).id === 'backup-export-modal') closeBackupExportModal();
   });
 
+  // ── Export clés de session ──
+  document.getElementById('btn-export-session')?.addEventListener('click', openSessionExportModal);
+  document.getElementById('session-export-close')?.addEventListener('click', closeSessionExportModal);
+  document.getElementById('session-export-cancel')?.addEventListener('click', closeSessionExportModal);
+  document.getElementById('session-export-confirm')?.addEventListener('click', confirmSessionExport);
+  document.getElementById('session-export-modal')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'session-export-modal') closeSessionExportModal();
+  });
+
+  // ── Import clés de session ──
+  document.getElementById('btn-import-session')?.addEventListener('click', openSessionImportModal);
+  document.getElementById('session-import-close')?.addEventListener('click', closeSessionImportModal);
+  document.getElementById('session-import-cancel')?.addEventListener('click', closeSessionImportModal);
+  document.getElementById('session-import-confirm')?.addEventListener('click', confirmSessionImport);
+  document.getElementById('session-import-modal')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'session-import-modal') closeSessionImportModal();
+  });
+
   // ── Safety Numbers ──
   document.getElementById('btn-fingerprint')?.addEventListener('click', () => {
     if (_currentContactUid) {
@@ -285,6 +313,33 @@ export async function initChat(uid: string): Promise<void> {
   document.getElementById('modal-uid-input')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter')  confirmNewConv();
     if (e.key === 'Escape') closeNewConvModal();
+  });
+
+  // ── Resync ratchet ──
+  document.getElementById('btn-resync-ratchet')?.addEventListener('click', async () => {
+    if (!_currentConvId || !_currentContactUid) return;
+    const confirmed = window.confirm(
+      '↺ Resynchroniser le Double Ratchet ?\n\n' +
+      'À utiliser si les messages ne s\'envoient plus ou restent [🔒] après une régénération de clés.\n\n' +
+      'Les messages existants ne seront pas affectés. ' +
+      'Les deux parties pourront s\'envoyer de nouveaux messages déchiffrables après la resync.'
+    );
+    if (!confirmed) return;
+
+    const btn = document.getElementById('btn-resync-ratchet') as HTMLButtonElement | null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Resync…'; }
+
+    try {
+      await sendRatchetResetSignal(_myUid, _currentContactUid);
+      showToast('Resynchronisation envoyée — le ratchet repart de zéro.');
+    } catch (e) {
+      showToast('Erreur lors de la resync : ' + ((e as Error).message ?? String(e)));
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><path d="M13.5 8A5.5 5.5 0 1 1 8 2.5"/><path d="M10 2.5h3.5V6"/></svg> Resync`;
+      }
+    }
   });
 
   // ── Renommer conversation ──
@@ -559,36 +614,36 @@ interface CryptoStepDef {
 
 const SEND_STEPS: CryptoStepDef[] = [
   {
-    icon: '🔑', type: 'send', delay: 0,
-    label: 'Génération des clés éphémères',
-    detail: 'ML-KEM-768 keypair',
+    icon: '📡', type: 'send', delay: 0,
+    label: 'Récupération clé publique KEM',
+    detail: 'key-registry.getPublicKeys(contactUid) ← Firestore',
     explain: {
-      what:  'Génération d\'une paire de clés ML-KEM-768 fraîche pour ce message uniquement.',
-      how:   'ML-KEM (Module-LWE) génère une clé publique et une clé privée éphémères aléatoires. La clé publique permet au destinataire d\'encapsuler un secret partagé.',
-      why:   'Les clés éphémères garantissent la forward secrecy : même si une clé long-terme est compromise, les anciens messages restent protégés.',
-      algo:  'ML-KEM-768 (NIST FIPS 203) — Niveau 3, 192-bit post-quantique',
+      what:  'Récupération de la clé publique ML-KEM-768 du destinataire depuis Firestore.',
+      how:   'À l\'inscription, chaque utilisateur publie sa clé KEM publique dans /publicKeys/{uid}. Elle est lue depuis le cache mémoire ou Firestore si absente.',
+      why:   'Sans cette clé publique, impossible d\'encapsuler un secret partagé. Premier message = initialisation du Double Ratchet avec cette clé.',
+      algo:  'key-registry.ts — cache mémoire + Firestore fallback',
     },
   },
   {
-    icon: '🔗', type: 'active', delay: 300,
-    label: 'Encapsulation KEM',
-    detail: 'kemEncapsulate(recipientPubKey) → sharedSecret + kemCiphertext',
+    icon: '🔑', type: 'active', delay: 300,
+    label: 'Double Ratchet — avancement KEM',
+    detail: 'kemEncapsulate(theirKemPubKey) → sharedSecret éphémère; HKDF(rootKey ‖ sharedSecret) → rootKey + sendingChainKey',
     explain: {
-      what:  'Encapsulation d\'un secret partagé avec la clé publique ML-KEM-768 du destinataire.',
-      how:   'La clé publique du contact (Firestore) encapsule un secret aléatoire → kemCiphertext (transmis) + sharedSecret (jamais transmis).',
-      why:   'Seul le destinataire avec sa clé privée peut décapsuler et retrouver le sharedSecret, même face à un ordinateur quantique.',
-      algo:  'ML-KEM-768 encapsulate — IND-CCA2 sécurisé',
+      what:  'Chaque message fait tourner la "machine" du Double Ratchet via un échange KEM éphémère.',
+      how:   'kemEncapsulate génère un secret partagé éphémère avec la clé publique KEM du contact. HKDF combine ce secret avec le rootKey courant pour produire un nouveau rootKey et une sendingChainKey. Le kemCiphertext est transmis avec le message.',
+      why:   'C\'est le cœur du Double Ratchet : à chaque message, les clés changent (forward secrecy + break-in recovery). Un attaquant capturant un message ne peut ni lire les précédents ni forger les suivants.',
+      algo:  'ML-KEM-768 encapsulate (FIPS 203) + HKDF-SHA256 (RFC 5869)',
     },
   },
   {
     icon: '🧩', type: 'send', delay: 600,
-    label: 'Dérivation de clé HKDF',
-    detail: 'HKDF-SHA256(sharedSecret, info) → messageKey 256 bits',
+    label: 'Dérivation clé de message',
+    detail: 'HKDF(sendingChainKey, "AQ-chain-v1") → messageKey 256 bits + nextChainKey',
     explain: {
-      what:  'Dérivation d\'une clé AES-256 à partir du sharedSecret KEM.',
-      how:   'HKDF (HMAC-based Extract-and-Expand KDF) avec SHA-256 transforme le sharedSecret brut en clé uniforme de 256 bits, avec un contexte (info) liant la clé à cet usage.',
-      why:   'Le sharedSecret KEM brut n\'est pas utilisable directement comme clé AES. HKDF le distille et l\'isole de tout autre usage.',
-      algo:  'HKDF-SHA256 (RFC 5869)',
+      what:  'Dérivation d\'une clé AES-256 unique et jetable pour ce message.',
+      how:   'La sendingChainKey est dérivée par HKDF en deux sorties : messageKey (pour AES-GCM) et nextChainKey (qui remplace sendingChainKey pour le prochain message). La chaîne avance sans jamais revenir en arrière.',
+      why:   'Chaque message a une clé de chiffrement différente. Même si une messageKey est compromise, les autres messages restent protégés — c\'est le ratchet symétrique.',
+      algo:  'HKDF-SHA256 (RFC 5869) — contexte "AQ-chain-v1"',
     },
   },
   {
@@ -596,32 +651,32 @@ const SEND_STEPS: CryptoStepDef[] = [
     label: 'Chiffrement AES-256-GCM',
     detail: 'aesGcmEncrypt(plaintext, messageKey, nonce) → ciphertext',
     explain: {
-      what:  'Chiffrement authentifié du message avec AES-256-GCM.',
-      how:   'Un nonce aléatoire de 96 bits est généré. AES-256-GCM chiffre le message et produit un ciphertext + tag d\'authentification GCM 128 bits. Le nonce est stocké avec le message.',
-      why:   'AES-GCM garantit confidentialité et intégrité : toute modification du ciphertext invalide le tag et est détectée avant déchiffrement.',
+      what:  'Chiffrement authentifié du message avec la clé jetable dérivée du ratchet.',
+      how:   'Un nonce aléatoire 96 bits est généré. AES-256-GCM chiffre le message et produit un ciphertext + tag d\'authentification GCM 128 bits. La messageKey est détruite après usage.',
+      why:   'AES-GCM garantit confidentialité et intégrité. Toute modification du ciphertext invalide le tag et est détectée avant de produire un quelconque plaintext.',
       algo:  'AES-256-GCM (NIST SP 800-38D) — nonce 96 bits, tag 128 bits',
     },
   },
   {
     icon: '✍️', type: 'send', delay: 1200,
     label: 'Signature ML-DSA-65',
-    detail: 'dsaSign(ciphertext ‖ nonce ‖ kemCiphertext, myPrivKey)',
+    detail: 'dsaSign(ciphertext ‖ nonce ‖ kemCiphertext, myDsaPrivKey)',
     explain: {
-      what:  'Signature numérique du message chiffré avec votre clé privée ML-DSA-65.',
-      how:   'La concaténation (ciphertext + nonce + kemCiphertext) est signée avec Dilithium. La signature (~3 309 octets) est stockée dans Firestore avec le message.',
-      why:   'Prouve que c\'est bien vous l\'expéditeur et que le message n\'a pas été altéré. Sans signature, un attaquant pourrait substituer le ciphertext.',
+      what:  'Signature numérique du payload chiffré avec votre clé privée ML-DSA-65 (Dilithium).',
+      how:   'La concaténation (ciphertext + nonce + kemCiphertext) est signée avec votre clé DSA long-terme. La signature (~3 309 octets) est stockée avec le message dans Firestore.',
+      why:   'Authentifie l\'expéditeur et garantit l\'intégrité. Sans signature, n\'importe qui pourrait injecter un faux message ou modifier le kemCiphertext pour détourner le ratchet.',
       algo:  'ML-DSA-65 (NIST FIPS 204 / Dilithium3) — résistant quantique',
     },
   },
   {
     icon: '📤', type: 'done', delay: 1500,
     label: 'Message envoyé dans Firestore',
-    detail: '{ ciphertext, nonce, kemCiphertext, signature } → Firestore',
+    detail: '{ kemCiphertext, senderEphPub, ciphertext, nonce, signature, messageIndex }',
     explain: {
-      what:  'Le paquet chiffré et signé est écrit dans Firestore.',
-      how:   'Le document contient : kemCiphertext, ciphertext, nonce, signature. Le plaintext n\'est jamais transmis ni stocké.',
-      why:   'Firebase ne voit que des blobs opaques. Même un accès complet à Firestore ne permet pas de lire les messages sans les clés privées locales.',
-      algo:  'Firestore — stockage chiffré au repos (AES-256 Google)',
+      what:  'Le paquet chiffré, signé et indexé est écrit dans Firestore.',
+      how:   'Le document Firestore contient les blobs cryptographiques nécessaires à la réception (kemCiphertext, ciphertext, nonce, signature, senderEphPub). Le plaintext n\'y figure jamais.',
+      why:   'Firebase ne voit que des blobs opaques. Même un accès root à Firestore ne permet pas de lire les messages sans les clés privées locales du destinataire.',
+      algo:  'Firestore — stockage chiffré au repos (AES-256 Google) + règles de sécurité',
     },
   },
 ];
@@ -634,41 +689,41 @@ const RECV_STEPS: CryptoStepDef[] = [
     explain: {
       what:  'Récupération de la clé publique ML-DSA-65 de l\'expéditeur depuis Firestore.',
       how:   'La clé publique DSA est publiée dans /publicKeys/{uid} lors de l\'inscription. Elle est lue depuis le cache mémoire ou Firestore si absente.',
-      why:   'Vérifier la signature nécessite la clé publique de l\'expéditeur. Cette clé est publiée à l\'inscription et ne peut pas être falsifiée.',
+      why:   'La vérification de signature requiert la clé publique de l\'expéditeur. Sans elle, impossible d\'authentifier le message.',
       algo:  'key-registry.ts — cache mémoire + Firestore fallback',
     },
   },
   {
     icon: '🔍', type: 'active', delay: 350,
     label: 'Vérification signature ML-DSA-65',
-    detail: 'dsaVerify(payload, signature, senderDsaPubKey)',
+    detail: 'dsaVerify(ciphertext ‖ nonce ‖ kemCiphertext, signature, senderDsaPubKey)',
     explain: {
-      what:  'Vérification cryptographique que la signature est valide et provient de l\'expéditeur déclaré.',
-      how:   'ML-DSA-65 vérifie que la signature correspond au payload (ciphertext + nonce + kemCiphertext) et à la clé publique. Un seul octet modifié → échec.',
-      why:   'Garantit authenticité et intégrité : impossible d\'injecter un message forgé ou d\'altérer un message existant sans être détecté.',
+      what:  'Vérification cryptographique que le message provient bien de l\'expéditeur déclaré et n\'a pas été altéré.',
+      how:   'ML-DSA-65 (Dilithium) vérifie que la signature correspond au payload (ciphertext + nonce + kemCiphertext) et à la clé publique DSA. Un seul bit modifié → rejet immédiat.',
+      why:   'Garantit authenticité et intégrité avant tout déchiffrement. Un attaquant ne peut ni forger un message ni modifier le kemCiphertext sans que la vérification échoue.',
       algo:  'ML-DSA-65 verify (NIST FIPS 204) — retourne true/false',
     },
   },
   {
     icon: '🔓', type: 'recv', delay: 700,
-    label: 'Décapsulation KEM',
-    detail: 'kemDecapsulate(kemCiphertext, myPrivKey) → sharedSecret',
+    label: 'Double Ratchet — avancement KEM',
+    detail: 'kemDecapsulate(kemCiphertext, ourPrivKey) → sharedSecret; HKDF(rootKey ‖ sharedSecret) → rootKey + receivingChainKey',
     explain: {
-      what:  'Décapsulation du secret partagé avec votre clé privée ML-KEM-768.',
-      how:   'Votre clé privée ML-KEM-768 (mémoire uniquement, jamais dans Firestore) décapsule le kemCiphertext pour retrouver le même sharedSecret que l\'expéditeur.',
-      why:   'Seul le destinataire légitime a la clé privée. Sans elle, décapsuler le kemCiphertext est impossible même avec un ordinateur quantique.',
-      algo:  'ML-KEM-768 decapsulate (NIST FIPS 203) — IND-CCA2',
+      what:  'Décapsulation du secret éphémère et avancement de la machine Double Ratchet côté récepteur.',
+      how:   'Votre clé privée KEM décapsule le kemCiphertext pour obtenir le même sharedSecret que l\'expéditeur. HKDF le combine avec le rootKey courant → nouveau rootKey + receivingChainKey. Même avancement de machine qu\'à l\'envoi.',
+      why:   'Le ratchet avance de façon symétrique des deux côtés sans jamais transmettre la clé. Chaque message = nouvelle machine, même propriété de forward secrecy.',
+      algo:  'ML-KEM-768 decapsulate (FIPS 203) + HKDF-SHA256 (RFC 5869)',
     },
   },
   {
     icon: '🧩', type: 'recv', delay: 1050,
-    label: 'Re-dérivation clé HKDF',
-    detail: 'HKDF-SHA256(sharedSecret, info) → messageKey',
+    label: 'Dérivation clé de message',
+    detail: 'HKDF(receivingChainKey, "AQ-chain-v1") → messageKey + nextChainKey',
     explain: {
-      what:  'Re-dérivation de la clé AES-256 à partir du sharedSecret décapsulé.',
-      how:   'Même HKDF-SHA256 qu\'à l\'envoi. Le sharedSecret étant identique des deux côtés, la messageKey reconstruite est identique — sans jamais avoir transité.',
-      why:   'La clé de déchiffrement n\'est jamais transmise. Elle est reconstruite indépendamment grâce au mécanisme KEM.',
-      algo:  'HKDF-SHA256 (RFC 5869) — mêmes paramètres que l\'envoi',
+      what:  'Re-dérivation de la clé AES-256 unique de ce message côté récepteur.',
+      how:   'Même dérivation HKDF qu\'à l\'envoi depuis la receivingChainKey. Le sharedSecret KEM étant identique des deux côtés, la messageKey obtenue est exactement la même — sans jamais avoir transité sur le réseau.',
+      why:   'La clé de déchiffrement n\'est jamais transmise. Elle est reconstruite indépendamment, preuve du fonctionnement du Double Ratchet.',
+      algo:  'HKDF-SHA256 (RFC 5869) — contexte "AQ-chain-v1"',
     },
   },
   {
@@ -676,9 +731,9 @@ const RECV_STEPS: CryptoStepDef[] = [
     label: 'Déchiffrement AES-256-GCM',
     detail: 'aesGcmDecrypt(ciphertext, nonce, messageKey) → plaintext',
     explain: {
-      what:  'Déchiffrement authentifié et vérification d\'intégrité du message.',
-      how:   'AES-256-GCM déchiffre le ciphertext avec la messageKey et le nonce. Le tag GCM est vérifié en premier — toute altération lève une exception avant d\'exposer des données.',
-      why:   'GCM garantit un déchiffrement authentifié : impossible d\'obtenir un plaintext corrompu ou forgé sans que ce soit détecté.',
+      what:  'Déchiffrement authentifié et vérification d\'intégrité avec la clé jetable du ratchet.',
+      how:   'AES-256-GCM déchiffre le ciphertext avec la messageKey dérivée et le nonce stocké. Le tag GCM 128 bits est vérifié avant tout — toute altération lève une exception sans exposer de données.',
+      why:   'GCM garantit un déchiffrement authentifié : impossible d\'obtenir un plaintext corrompu ou forgé sans détection. La messageKey est détruite après usage.',
       algo:  'AES-256-GCM (NIST SP 800-38D) — authentification + confidentialité',
     },
   },
@@ -1216,14 +1271,16 @@ function renderMessages(messages: DecryptedMessage[]): void {
       if (textEl) {
         const current = textEl.textContent ?? '';
         const isPlaceholder = current.startsWith('[\uD83D\uDD12');
-        if (isPlaceholder && !msg.plaintext.startsWith('[\uD83D\uDD12')) {
+        if (isPlaceholder && msg.plaintext !== current) {
           textEl.textContent = msg.plaintext;
           // Réappliquer la recherche si active
           if (_msgSearchQuery) {
             textEl.dataset.plaintext = msg.plaintext;
             applyMsgSearch(_msgSearchQuery);
           }
-          bubble.classList.remove('decryption-pending');
+          if (!msg.plaintext.startsWith('[\uD83D\uDD12')) {
+            bubble.classList.remove('decryption-pending');
+          }
         }
       }
     }
@@ -1236,6 +1293,17 @@ function renderMessages(messages: DecryptedMessage[]): void {
   if (newMessages.length === 0) return;
 
   for (const msg of newMessages) {
+    // ── Bulle système (resync ratchet, etc.) ──────────────────────────────
+    if (msg.type === 'system') {
+      const sysBubble = document.createElement('div');
+      sysBubble.className     = 'message-bubble system-msg';
+      sysBubble.dataset.msgId = msg.id;
+      sysBubble.innerHTML = `<span class="system-msg-text">${escapeHtml(msg.plaintext)}</span>`;
+      container.appendChild(sysBubble);
+      _renderedMsgIds.add(msg.id);
+      continue;
+    }
+
     const isMine = msg.senderUid === _myUid;
     const isRead = isMine && (msg.readBy ?? []).includes(_currentContactUid ?? '');
     const bubble = document.createElement('div');
@@ -1367,6 +1435,8 @@ function _fmtSize(bytes: number): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSendMessage(): Promise<void> {
+  // Guard anti-double-submit : double-clic ou Enter+clic simultané
+  if (_sendInProgress) return;
   if (!_currentConvId || !_currentContactUid) return;
 
   const input = document.getElementById('message-input') as HTMLTextAreaElement | null;
@@ -1377,6 +1447,10 @@ async function handleSendMessage(): Promise<void> {
 
   const convId     = _currentConvId;
   const contactUid = _currentContactUid;
+
+  _sendInProgress = true;
+  const btn = document.getElementById('btn-send') as HTMLButtonElement | null;
+  if (btn) btn.disabled = true;
 
   input.value    = '';
   input.disabled = true;
@@ -1396,6 +1470,8 @@ async function handleSendMessage(): Promise<void> {
     clearCryptoBox();
     setCryptoStatus('idle');
   } finally {
+    _sendInProgress = false;
+    if (btn) btn.disabled = false;
     input.disabled = false;
     input.focus();
     if (_currentConvId !== convId) {
@@ -1660,6 +1736,174 @@ async function confirmBackupExport(): Promise<void> {
     showToast(`Export échoué : ${err instanceof Error ? err.message : String(err)}`);
     if (confirmBtn) { confirmBtn.disabled = false; }
     setProgress(0, '');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Export clés de session
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Stocker le fileJson généré entre step1 et step2
+let _sessionExportFileJson: string | null = null;
+
+function openSessionExportModal(): void {
+  _sessionExportFileJson = null;
+  const modal = document.getElementById('session-export-modal');
+  if (modal) modal.style.display = 'flex';
+  const step1 = document.getElementById('session-export-step1');
+  const step2 = document.getElementById('session-export-step2');
+  if (step1) step1.style.display = 'flex';
+  if (step2) step2.style.display = 'none';
+  const confirmBtn = document.getElementById('session-export-confirm') as HTMLButtonElement | null;
+  if (confirmBtn) {
+    confirmBtn.disabled = false;
+    confirmBtn.innerHTML = `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px"><path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/></svg>Générer &amp; Télécharger`;
+    // Reset onclick to default handler
+    confirmBtn.onclick = null;
+  }
+  const prog = document.getElementById('session-export-progress');
+  if (prog) prog.style.display = 'none';
+}
+
+function closeSessionExportModal(): void {
+  const modal = document.getElementById('session-export-modal');
+  if (modal) modal.style.display = 'none';
+  _sessionExportFileJson = null;
+}
+
+async function confirmSessionExport(): Promise<void> {
+  const confirmBtn = document.getElementById('session-export-confirm') as HTMLButtonElement | null;
+  const prog  = document.getElementById('session-export-progress');
+  const fill  = document.getElementById('session-export-progress-fill');
+  const label = document.getElementById('session-export-progress-label');
+  const step1 = document.getElementById('session-export-step1');
+  const step2 = document.getElementById('session-export-step2');
+  const grid  = document.getElementById('session-mnemonic-grid');
+
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (prog) prog.style.display = '';
+
+  const setProgress = (pct: number, text: string): void => {
+    if (fill)  fill.style.width  = `${pct}%`;
+    if (label) label.textContent = text;
+  };
+
+  try {
+    const { fileJson, mnemonic } = await exportSessionKeys(_myUid, (phase) => {
+      if (phase === 'generating') setProgress(10, 'Génération de la phrase mnémotechnique…');
+      if (phase === 'collecting') setProgress(25, 'Collecte des clés et états ratchet…');
+      if (phase === 'deriving')   setProgress(50, 'Dérivation Argon2id… (quelques secondes)');
+      if (phase === 'encrypting') setProgress(85, 'Chiffrement AES-256-GCM…');
+      if (phase === 'done')       setProgress(100, 'Terminé !');
+    });
+
+    _sessionExportFileJson = fileJson;
+
+    // Afficher les mots mnémotechniques dans la grille
+    if (grid) {
+      grid.innerHTML = '';
+      mnemonic.forEach((word, i) => {
+        const cell = document.createElement('div');
+        cell.style.cssText = 'background:rgba(107,143,245,0.1);border:1px solid rgba(107,143,245,0.2);border-radius:5px;padding:6px 8px;text-align:center;font-family:monospace;font-size:12px;color:#c4c9e8';
+        cell.innerHTML = `<span style="color:#5a6080;font-size:9px;display:block">${i + 1}.</span>${escapeHtml(word)}`;
+        grid.appendChild(cell);
+      });
+    }
+
+    if (step1) step1.style.display = 'none';
+    if (prog)  prog.style.display  = 'none';
+    if (step2) step2.style.display = 'flex';
+
+    // Le bouton "Confirmer" déclenche maintenant le téléchargement
+    if (confirmBtn) {
+      confirmBtn.disabled = false;
+      confirmBtn.innerHTML = `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px"><path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/></svg>Télécharger le fichier`;
+      confirmBtn.onclick = () => {
+        if (_sessionExportFileJson) downloadSessionFile(_sessionExportFileJson);
+        closeSessionExportModal();
+        showToast('Clés exportées avec succès. Gardez vos 10 mots en sécurité !');
+      };
+    }
+  } catch (err) {
+    console.error('[AQ] Session export failed:', err);
+    showToast(`Export échoué : ${err instanceof Error ? err.message : String(err)}`);
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (prog) prog.style.display = 'none';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Import clés de session
+// ─────────────────────────────────────────────────────────────────────────────
+
+function openSessionImportModal(): void {
+  const modal = document.getElementById('session-import-modal');
+  if (modal) modal.style.display = 'flex';
+  const fileInput  = document.getElementById('session-import-file') as HTMLInputElement | null;
+  const passInput  = document.getElementById('session-import-password') as HTMLInputElement | null;
+  const mnemoInput = document.getElementById('session-import-mnemonic') as HTMLTextAreaElement | null;
+  if (fileInput)  fileInput.value  = '';
+  if (passInput)  passInput.value  = '';
+  if (mnemoInput) mnemoInput.value = '';
+  const prog = document.getElementById('session-import-progress');
+  if (prog) prog.style.display = 'none';
+  const confirmBtn = document.getElementById('session-import-confirm') as HTMLButtonElement | null;
+  if (confirmBtn) confirmBtn.disabled = false;
+  setTimeout(() => fileInput?.focus(), 60);
+}
+
+function closeSessionImportModal(): void {
+  const modal = document.getElementById('session-import-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function confirmSessionImport(): Promise<void> {
+  const fileInput  = document.getElementById('session-import-file') as HTMLInputElement | null;
+  const passInput  = document.getElementById('session-import-password') as HTMLInputElement | null;
+  const mnemoInput = document.getElementById('session-import-mnemonic') as HTMLTextAreaElement | null;
+  const confirmBtn = document.getElementById('session-import-confirm') as HTMLButtonElement | null;
+  const prog  = document.getElementById('session-import-progress');
+  const fill  = document.getElementById('session-import-progress-fill');
+  const label = document.getElementById('session-import-progress-label');
+
+  const file     = fileInput?.files?.[0];
+  const password = passInput?.value ?? '';
+  const phrase   = mnemoInput?.value ?? '';
+
+  if (!file)     { showToast('Sélectionnez un fichier .aqsession.'); return; }
+  if (!password) { showToast('Entrez votre mot de passe AegisQuantum actuel.'); return; }
+
+  const words = normalizeMnemonic(phrase);
+  if (!validateMnemonic(words)) {
+    showToast('Phrase invalide — 10 mots de la liste requis, séparés par des espaces.');
+    return;
+  }
+
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (prog) prog.style.display = '';
+
+  const setProgress = (pct: number, text: string): void => {
+    if (fill)  fill.style.width  = `${pct}%`;
+    if (label) label.textContent = text;
+  };
+
+  try {
+    const fileContent = await file.text();
+    const importedUid = await importSessionKeys(fileContent, words, password, (phase) => {
+      if (phase === 'parsing')    setProgress(10, 'Lecture du fichier…');
+      if (phase === 'deriving')   setProgress(30, 'Dérivation Argon2id… (quelques secondes)');
+      if (phase === 'decrypting') setProgress(65, 'Déchiffrement AES-256-GCM…');
+      if (phase === 'restoring')  setProgress(85, 'Restauration des clés et états ratchet…');
+      if (phase === 'done')       setProgress(100, 'Terminé !');
+    });
+
+    closeSessionImportModal();
+    showToast(`Session restaurée (UID: ${importedUid.slice(0, 8)}…). Reconnectez-vous pour appliquer.`);
+  } catch (err) {
+    console.error('[AQ] Session import failed:', err);
+    showToast(`Import échoué : ${err instanceof Error ? err.message : String(err)}`);
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (prog) prog.style.display = 'none';
   }
 }
 

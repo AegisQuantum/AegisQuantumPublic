@@ -31,8 +31,8 @@ export const argon2Derive = vi.fn(async (password: string, saltB64?: string) => 
     "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]
   );
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt: saltBytes, iterations: 1 }, km, 256
-  );
+    { name: "PBKDF2", hash: "SHA-256", salt: saltBytes as unknown as BufferSource, iterations: 1 }, km, 256
+  ); //HERE FIX 
   return { key: _b64(new Uint8Array(bits)), salt: _b64(saltBytes) };
 });
 
@@ -81,9 +81,9 @@ export const aesGcmDecrypt = vi.fn(async (ciphertextB64: string, nonceB64: strin
   );
   const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
   const dec = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: _fromb64(nonceB64), tagLength: 128 },
-    key, _fromb64(ciphertextB64)
-  );
+    { name: "AES-GCM", iv: _fromb64(nonceB64) as unknown as BufferSource, tagLength: 128 },
+    key, _fromb64(ciphertextB64) as unknown as BufferSource
+  ); //HERE FIX
   return new TextDecoder().decode(dec);
 });
 

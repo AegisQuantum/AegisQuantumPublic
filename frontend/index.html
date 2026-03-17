@@ -171,6 +171,98 @@
       </div>
     </div>
 
+    <!-- VAULT RECOVERY SCREEN — Affiché quand Firebase Auth réussit mais le vault IDB est absent -->
+    <div id="vault-recovery-screen" class="screen hidden">
+      <div class="cp-wrap">
+        <div class="cp-card" style="max-width:480px">
+          <div class="cp-logo">
+            <img src="/BIGLOGO.png" alt="AQ" />
+          </div>
+          <h2 class="cp-title">Clés privées introuvables</h2>
+          <p class="cp-subtitle">
+            Ce navigateur ne possède pas vos clés cryptographiques.
+            Importez votre fichier <code style="font-size:11px;background:rgba(255,255,255,0.08);padding:2px 6px;border-radius:4px;font-family:'IBM Plex Mono',monospace">.aqsession</code>
+            pour retrouver l'accès à vos conversations.
+          </p>
+
+          <div id="vr-form" style="display:flex;flex-direction:column;gap:14px">
+
+            <div class="cp-field">
+              <label for="vr-file" style="font-size:12px">Fichier .aqsession</label>
+              <input type="file" id="vr-file" accept=".aqsession,.json"
+                style="color:rgba(255,255,255,0.65);font-size:12px;font-family:inherit;cursor:pointer" />
+            </div>
+
+            <div class="cp-field">
+              <label for="vr-mnemonic" style="font-size:12px">Phrase de 10 mots</label>
+              <div style="position:relative">
+                <textarea id="vr-mnemonic" rows="2" autocomplete="off" spellcheck="false"
+                  autocorrect="off" autocapitalize="off"
+                  placeholder="mot1 mot2 mot3 mot4 mot5 mot6 mot7 mot8 mot9 mot10"
+                  style="width:100%;box-sizing:border-box;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:10px 36px 10px 12px;color:inherit;font-family:'IBM Plex Mono',monospace;font-size:12px;resize:vertical;outline:none;line-height:1.5;-webkit-text-security:disc;text-security:disc"></textarea>
+                <button id="vr-mnemonic-toggle" type="button" aria-label="Afficher/masquer la phrase"
+                  style="position:absolute;top:9px;right:9px;background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.35);padding:2px;line-height:0;transition:color 0.15s"
+                  onmouseover="this.style.color='rgba(255,255,255,0.7)'"
+                  onmouseout="this.style.color='rgba(255,255,255,0.35)'">
+                  <svg id="vr-mnemonic-eye" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14">
+                    <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z"/>
+                    <line x1="2" y1="2" x2="14" y2="14"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <div id="vr-status" class="status-msg"></div>
+
+            <div id="vr-progress" style="display:none;flex-direction:column;gap:6px">
+              <div style="background:rgba(255,255,255,0.1);border-radius:4px;height:3px;overflow:hidden">
+                <div id="vr-progress-fill" style="height:100%;background:#6b8ff5;width:0%;transition:width 0.3s ease"></div>
+              </div>
+              <span id="vr-progress-label" style="font-size:11px;color:rgba(255,255,255,0.45)"></span>
+            </div>
+
+            <button id="vr-import-btn" class="btn-primary">
+              <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:5px;vertical-align:-1px">
+                <path d="M7 9V2M4 6l3-3 3 3"/><path d="M2 11h10"/>
+              </svg>
+              Importer les clés
+            </button>
+
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="flex:1;height:1px;background:rgba(255,255,255,0.1)"></div>
+              <span style="font-size:11px;color:rgba(255,255,255,0.3)">ou</span>
+              <div style="flex:1;height:1px;background:rgba(255,255,255,0.1)"></div>
+            </div>
+
+            <button id="vr-readonly-btn"
+              style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:8px;color:rgba(255,255,255,0.5);font-family:inherit;font-size:12px;padding:9px 14px;cursor:pointer;transition:background 0.15s;width:100%"
+              onmouseover="this.style.background='rgba(255,255,255,0.05)'"
+              onmouseout="this.style.background='none'">
+              Continuer sans clés — les messages resteront chiffrés
+            </button>
+
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="flex:1;height:1px;background:rgba(255,255,255,0.1)"></div>
+              <span style="font-size:11px;color:rgba(255,255,255,0.3)">ou</span>
+              <div style="flex:1;height:1px;background:rgba(255,255,255,0.1)"></div>
+            </div>
+
+            <button id="vr-fresh-btn"
+              style="background:none;border:1px solid rgba(252,129,129,0.3);border-radius:8px;color:#fc8181;font-family:inherit;font-size:12px;padding:9px 14px;cursor:pointer;transition:background 0.15s;width:100%"
+              onmouseover="this.style.background='rgba(252,129,129,0.07)'"
+              onmouseout="this.style.background='none'">
+              Démarrer de zéro — générer de nouvelles clés
+            </button>
+
+          </div>
+
+          <p class="cp-hint" style="margin-top:18px">
+            Exportez vos clés via <strong>Paramètres → Clés de session</strong> sur votre appareil d'origine.
+          </p>
+        </div>
+      </div>
+    </div>
+
     <!-- CHAT SCREEN -->
     <div id="chat-screen" class="screen hidden"></div>
 
