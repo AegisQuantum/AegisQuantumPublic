@@ -341,14 +341,12 @@ export function initAuth(): void {
 
     try {
       // 1. Firebase auth (peut lever VaultMissingError — attendu)
-      let uid: string;
+      // On tente la connexion pour déclencher le chargement du vault.
+      // VaultMissingError est attendu ici (vault absent avant import).
       try {
-        const user = await aqSignIn(username, password);
-        uid = user.uid;
+        await aqSignIn(username, password);
       } catch (err) {
-        if (err instanceof VaultMissingError) {
-          uid = err.uid;
-        } else {
+        if (!(err instanceof VaultMissingError)) {
           throw err;
         }
       }

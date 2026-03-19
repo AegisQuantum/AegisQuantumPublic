@@ -68,7 +68,6 @@ let _sendInProgress = false;
 // Context menu — message ciblé par le clic droit courant
 let _ctxMsgId:             string | null = null;
 let _ctxConvId:            string | null = null;
-let _ctxIsMine:            boolean       = false;
 let _ctxKemCiphertext:     string        = "";
 let _ctxInitKemCiphertext: string | undefined;
 let _ctxMessageIndex:      number        = 0;
@@ -175,13 +174,20 @@ export async function initChat(uid: string): Promise<void> {
     await handleSendFile(file);
   });
 
-  // ── Envoi image ──
+  // ── Envoi image — pending : attendre confirmation via btn-send ──
   const imageInput = document.getElementById('image-input') as HTMLInputElement | null;
-  imageInput?.addEventListener('change', async (e) => {
+  imageInput?.addEventListener('change', (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file || !_currentContactUid) return;
     (e.target as HTMLInputElement).value = '';
-    await handleSendFile(file);
+    _pendingImageFile = file;
+    _setPendingImageUI(file);
+  });
+
+  // ── Bouton × — annule le pending (audio ou image) ──
+  document.getElementById('btn-cancel-pending')?.addEventListener('click', () => {
+    if (_pendingAudioFile)  cancelPendingAudio();
+    else if (_pendingImageFile) cancelPendingImage();
   });
 
   // ── Navigation settings ──
@@ -1404,6 +1410,14 @@ async function handleSendMessage(): Promise<void> {
   if (_sendInProgress) return;
   if (!_currentConvId || !_currentContactUid) return;
 
+  // ── Image en attente de confirmation ──────────────────────────────────────
+  if (_pendingImageFile) {
+    const file = _pendingImageFile;
+    cancelPendingImage();
+    await handleSendFile(file);
+    return;
+  }
+
   const input = document.getElementById('message-input') as HTMLTextAreaElement | null;
   if (!input) return;
 
@@ -2123,7 +2137,6 @@ function showMessageContextMenu(e: MouseEvent, msgId: string, isMine: boolean, m
 
   _ctxMsgId              = msgId;
   _ctxConvId             = _currentConvId;
-  _ctxIsMine             = isMine;
   _ctxKemCiphertext      = msg.kemCiphertext      ?? "";
   _ctxInitKemCiphertext  = msg.initKemCiphertext;
   _ctxMessageIndex       = msg.messageIndex       ?? 0;
@@ -2207,8 +2220,12 @@ function _setRecordingUI(active: boolean): void {
     if (input) input.style.display = '';
     if (micIdle) micIdle.style.display = '';
     if (micStop) micStop.style.display = 'none';
-    const timer = document.getElementById('recording-timer');
-    if (timer) timer.textContent = '0:00';
+    const timer     = document.getElementById('recording-timer');
+    const hint      = document.getElementById('recording-hint');
+    const cancelBtn = document.getElementById('btn-cancel-pending');
+    if (timer)     timer.textContent         = '0:00';
+    if (hint)      hint.textContent          = 'Relâcher pour envoyer';
+    if (cancelBtn) cancelBtn.style.display   = 'none';
   }
 }
 
@@ -2260,8 +2277,9 @@ async function startVoiceRecording(): Promise<void> {
   }, 200);
 }
 
-let _pendingAudioFile: File | null = null;
-let _pendingAudioDuration = 0;
+let _pendingAudioFile:    File | null = null;
+let _pendingAudioDuration             = 0;
+let _pendingImageFile:    File | null = null;
 
 function stopVoiceRecording(): void {
   if (!_mediaRecorder || _mediaRecorder.state === 'inactive') return;
@@ -2273,18 +2291,20 @@ function stopVoiceRecording(): void {
 }
 
 function _setPendingUI(file: File, duration: number): void {
-  const bar      = document.getElementById('recording-bar');
-  const input    = document.getElementById('message-input') as HTMLTextAreaElement | null;
-  const timer    = document.getElementById('recording-timer');
-  const hint     = bar?.querySelector<HTMLElement>('span:last-child');
-  const dot      = bar?.querySelector<HTMLElement>('.recording-dot');
-  const level    = document.getElementById('recording-level');
-  if (bar)   bar.style.display   = 'flex';
-  if (input) input.style.display = 'none';
-  if (timer) timer.textContent   = _fmtDuration(duration);
-  if (hint)  hint.textContent    = 'Appuyer sur Envoyer — ou × pour annuler';
-  if (dot)   dot.style.animation = 'none';
-  if (level) { level.style.width = '100%'; level.style.background = 'rgba(123,159,249,0.5)'; }
+  const bar       = document.getElementById('recording-bar');
+  const input     = document.getElementById('message-input') as HTMLTextAreaElement | null;
+  const timer     = document.getElementById('recording-timer');
+  const hint      = document.getElementById('recording-hint');
+  const dot       = bar?.querySelector<HTMLElement>('.recording-dot');
+  const level     = document.getElementById('recording-level');
+  const cancelBtn = document.getElementById('btn-cancel-pending');
+  if (bar)       bar.style.display          = 'flex';
+  if (input)     input.style.display        = 'none';
+  if (timer)     timer.textContent          = _fmtDuration(duration);
+  if (hint)      hint.textContent           = 'Appuyer sur Envoyer — ou × pour annuler';
+  if (dot)       dot.style.animation        = 'none';
+  if (level)     { level.style.width = '100%'; level.style.background = 'rgba(123,159,249,0.5)'; }
+  if (cancelBtn) cancelBtn.style.display    = 'flex';
   const micIdle = document.getElementById('icon-mic-idle');
   const micStop = document.getElementById('icon-mic-stop');
   if (micIdle) micIdle.style.display = '';
@@ -2294,9 +2314,31 @@ function _setPendingUI(file: File, duration: number): void {
   void file; // suppress unused warning
 }
 
+function _setPendingImageUI(file: File): void {
+  const bar       = document.getElementById('recording-bar');
+  const input     = document.getElementById('message-input') as HTMLTextAreaElement | null;
+  const timer     = document.getElementById('recording-timer');
+  const hint      = document.getElementById('recording-hint');
+  const dot       = bar?.querySelector<HTMLElement>('.recording-dot');
+  const level     = document.getElementById('recording-level');
+  const cancelBtn = document.getElementById('btn-cancel-pending');
+  if (bar)       bar.style.display          = 'flex';
+  if (input)     input.style.display        = 'none';
+  if (timer)     timer.textContent          = file.name;
+  if (hint)      hint.textContent           = 'Appuyer sur Envoyer — ou × pour annuler';
+  if (dot)       dot.style.animation        = 'none';
+  if (level)     { level.style.width = '100%'; level.style.background = 'rgba(107,143,245,0.45)'; }
+  if (cancelBtn) cancelBtn.style.display    = 'flex';
+}
+
 function cancelPendingAudio(): void {
   _pendingAudioFile     = null;
   _pendingAudioDuration = 0;
+  _setRecordingUI(false);
+}
+
+function cancelPendingImage(): void {
+  _pendingImageFile = null;
   _setRecordingUI(false);
 }
 

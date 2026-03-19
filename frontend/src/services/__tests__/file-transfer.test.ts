@@ -27,7 +27,7 @@ import { storePrivateKeys, clearPrivateKeys } from "../key-store";
 import { publishPublicKeys }                 from "../key-registry";
 import { kemGenerateKeyPair }                from "../../crypto/kem";
 import { dsaGenerateKeyPair }                from "../../crypto/dsa";
-import { collection, doc, getDoc, getDocs } from "firebase/firestore";
+import { collection, getDocs } from "firebase/firestore";
 import { db }                                from "../firebase";
 import type { EncryptedMessage }             from "../../types/message";
 

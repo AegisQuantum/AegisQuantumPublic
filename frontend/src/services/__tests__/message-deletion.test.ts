@@ -26,7 +26,7 @@ import { publishPublicKeys }       from "../key-registry";
 import { hideMessageLocally, getHiddenMessages } from "../idb-cache";
 import { kemGenerateKeyPair }      from "../../crypto/kem";
 import { dsaGenerateKeyPair }      from "../../crypto/dsa";
-import { doc, getDoc, getDocs, collection } from "firebase/firestore";
+import { doc, getDoc } from "firebase/firestore";
 import { db }                      from "../firebase";
 import type { DecryptedMessage }   from "../../types/message";
 import type { EncryptedMessage }   from "../../types/message";

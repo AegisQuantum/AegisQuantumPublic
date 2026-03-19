@@ -29,6 +29,7 @@ import {
   storePrivateKeys,
   getAllRatchetStates,
   restoreRatchetState,
+  saveMsgCache,
 }                                                             from "./key-store";
 import { loadCachedMessages, saveCachedMessages }             from "./idb-cache";
 import { db }                                                 from "./firebase";
@@ -208,6 +209,20 @@ export async function importSessionKeys(
     for (const { convId, msgs, lastTs } of payload.messageCaches) {
       await saveCachedMessages(convId, msgs);
       void lastTs; // lastTs est recalculé par saveCachedMessages
+
+      // Peupler aussi le cache per-message (key-store.ts → msgcache:{id})
+      // utilisé par subscribeToMessages. Sans ça, loadMsgCache() retourne null
+      // et tous les anciens messages restent affichés comme [🔒 Message chiffré]
+      // même après un import réussi.
+      for (const msg of msgs) {
+        if (msg.isDeleted) continue; // les tombstones n'ont pas de plaintext utile
+        await saveMsgCache(msg.id, {
+          plaintext: msg.plaintext,
+          verified:  msg.verified,
+          senderUid: msg.senderUid,
+          timestamp: msg.timestamp,
+        });
+      }
     }
   }
 

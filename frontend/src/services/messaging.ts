@@ -33,7 +33,7 @@
  */
 
 import {
-  collection, doc, setDoc, getDoc, getDocs, updateDoc, deleteDoc,
+  collection, doc, setDoc, getDoc, getDocs, updateDoc,
   query, where, orderBy, onSnapshot, serverTimestamp,
   type Unsubscribe,
   type QueryDocumentSnapshot,
@@ -299,7 +299,7 @@ export async function sendFile(
       ciphertext       : drResult.ciphertext,
       nonce            : drResult.nonce,
       kemCiphertext    : drResult.kemCiphertext,
-      senderEphPub     : drResult.senderEphPub,
+      senderEphPub     : '',
       signature,
       messageIndex     : drResult.messageIndex,
       timestamp        : ts,
@@ -391,7 +391,7 @@ export async function sendMessage(
       ciphertext        : drResult.ciphertext,
       nonce             : drResult.nonce,
       kemCiphertext     : drResult.kemCiphertext,
-      senderEphPub      : drResult.senderEphPub,
+      senderEphPub      : '',
       signature,
       messageIndex      : drResult.messageIndex,
       timestamp         : ts,
@@ -539,13 +539,12 @@ export async function decryptMessage(
   }
 
   // Ratchet sous verrou — load→decrypt→save en séquence
-  let drResult: import("../crypto/double-ratchet").DoubleRatchetDecryptResult;
+  let drResult!: import("../crypto/double-ratchet").DoubleRatchetDecryptResult;
   try {
     ({ drResult } = await _withRatchetLock(msg.conversationId, async () => {
       const stateJson = await loadRatchetState(myUid, msg.conversationId);
       const _drResult = await doubleRatchetDecrypt(
         msg.ciphertext, msg.nonce, msg.messageIndex, msg.kemCiphertext,
-        msg.senderEphPub,
         stateJson, msg.conversationId, myKemPrivKey, myKemPubKey,
         senderKeys?.kemPublicKey ?? "", msg.initKemCiphertext,
       );
@@ -559,23 +558,53 @@ export async function decryptMessage(
     const isPermanent = /initKemCiphertext|replay detected|too far ahead|RAT_EMPTY_CHAIN_KEY|OperationError/i.test(errMsg);
     if (isPermanent) {
       // Diagnostic : aide à identifier les désynchronisations de clés
-      const stateJson = await loadRatchetState(myUid, msg.conversationId).catch(() => null);
+      const diagState = await loadRatchetState(myUid, msg.conversationId).catch(() => null);
       const myPubKey  = await getPublicKeys(myUid).catch(() => null);
       const senderPub = await getPublicKeys(msg.senderUid).catch(() => null);
       console.error(
         `[AQ:decrypt] Échec permanent msg=${msg.id} index=${msg.messageIndex}`,
         `\n  erreur     : ${errMsg}`,
-        `\n  ratchet    : ${stateJson ? 'présent' : 'NULL (bootstrap attendu)'}`,
+        `\n  ratchet    : ${diagState ? 'présent' : 'NULL (bootstrap attendu)'}`,
         `\n  myKemPub   : ${myPubKey?.kemPublicKey?.slice(0, 20) ?? 'ABSENT'}…`,
         `\n  senderPub  : ${senderPub?.kemPublicKey?.slice(0, 20) ?? 'ABSENT'}…`,
         `\n  initKemCT  : ${msg.initKemCiphertext ? msg.initKemCiphertext.slice(0, 20) + '…' : 'absent'}`,
         `\n  kemCT      : ${msg.kemCiphertext ? msg.kemCiphertext.slice(0, 20) + '…' : 'vide (epoch sym)'}`,
       );
-      return {
-        id: msg.id, senderUid: msg.senderUid,
-        plaintext : "[\uD83D\uDD12 Message non d\u00e9chiffrable]",
-        timestamp : msg.timestamp, verified: false, readBy: msg.readBy ?? [],
-      };
+
+      // Fallback bootstrap : si le message ouvre un epoch (initKemCiphertext présent)
+      // et qu'il n'y a PAS d'état ratchet valide, on tente un bootstrap à froid.
+      // Cela couvre le cas post-import où le ratchet est null mais le message a
+      // un initKemCiphertext valide.
+      if (msg.initKemCiphertext && !diagState) {
+        console.warn(`[AQ:decrypt] Bootstrap fallback pour msg=${msg.id} index=${msg.messageIndex}`);
+        try {
+          ({ drResult } = await _withRatchetLock(msg.conversationId, async () => {
+            const _dr = await doubleRatchetDecrypt(
+              msg.ciphertext, msg.nonce, msg.messageIndex, msg.kemCiphertext,
+              null, // stateJson null → bootstrap à froid
+              msg.conversationId, myKemPrivKey, myKemPubKey,
+              senderKeys?.kemPublicKey ?? "", msg.initKemCiphertext,
+            );
+            await saveRatchetState(myUid, msg.conversationId, _dr.newStateJson);
+            return { drResult: _dr };
+          }));
+          console.log(`[AQ:decrypt] Bootstrap fallback réussi pour msg=${msg.id}`);
+          // drResult est maintenant assigné — on tombe dans la suite normale
+        } catch (bootstrapErr) {
+          console.error(`[AQ:decrypt] Bootstrap fallback échoué msg=${msg.id}:`, bootstrapErr);
+          return {
+            id: msg.id, senderUid: msg.senderUid,
+            plaintext : "[\uD83D\uDD12 Message non d\u00e9chiffrable]",
+            timestamp : msg.timestamp, verified: false, readBy: msg.readBy ?? [],
+          };
+        }
+      } else {
+        return {
+          id: msg.id, senderUid: msg.senderUid,
+          plaintext : "[\uD83D\uDD12 Message non d\u00e9chiffrable]",
+          timestamp : msg.timestamp, verified: false, readBy: msg.readBy ?? [],
+        };
+      }
     }
     throw ratchetErr; // erreur transitoire (réseau, etc.) → retry via subscribeToMessages
   }

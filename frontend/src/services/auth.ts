@@ -12,7 +12,7 @@ import {
   type User,
 } from "firebase/auth";
 import {
-  doc, getDoc, setDoc, collection, getDocs, deleteDoc, writeBatch, query, where,
+  doc, getDoc, setDoc, collection, getDocs, writeBatch, query, where,
 } from "firebase/firestore";
 import { auth, db } from "./firebase";
 import { clearPrivateKeys, storePrivateKeys, unlockPrivateKeys, getKemPrivateKey, getDsaPrivateKey, deleteVault, deleteAllRatchetStatesForUser } from "./key-store";
