@@ -87,6 +87,27 @@ export interface EncryptedMessage {
    * leur état ratchet local et repartent d'un bootstrap propre.
    */
   type?: "ratchet-reset";
+
+  /**
+   * true si le message a été supprimé pour tous (tombstone).
+   * Le ciphertext contient alors AES-GCM("__DELETED__", editKey).
+   */
+  deleted?: boolean;
+
+  /**
+   * true si le message a été modifié.
+   * Le ciphertext contient alors AES-GCM(nouvellePlaintext, editKey).
+   */
+  edited?: boolean;
+
+  /** Timestamp de la dernière modification. */
+  editedAt?: number;
+
+  /**
+   * Type du message — permet un rendu adapté et des règles d'accès cohérentes.
+   * Absent sur les anciens messages (retro-compat).
+   */
+  messageType?: 'text' | 'image' | 'audio' | 'file' | 'system';
 }
 
 /** Metadata d'une conversation (sans messages). */
@@ -115,6 +136,8 @@ export interface DecryptedMessage {
    * Absent pour les messages normaux.
    */
   type?: "system";
+  /** Type du message pour le rendu et les contrôles d'accès */
+  messageType?: 'text' | 'image' | 'audio' | 'file' | 'system';
   /** Pièce jointe déchiffrée — présente uniquement pour les messages fichier */
   file?: {
     /** Blob déchiffré du fichier (jamais transmis, reconstruit en mémoire) */
@@ -123,6 +146,22 @@ export interface DecryptedMessage {
     size : number;
     type : string;
   };
+
+  /** true si le message a été supprimé pour tous (affiche le tombstone). */
+  isDeleted?: boolean;
+
+  /** true si le message a été modifié par l'expéditeur. */
+  isEdited?: boolean;
+
+  /** Timestamp de la dernière modification (ms). */
+  editedAt?: number;
+
+  // ── Champs nécessaires pour delete/edit depuis l'UI ─────────────────────
+  // Stockés lors du déchiffrement pour permettre de dériver editKey
+  // sans re-lire Firestore.
+  kemCiphertext?    : string;
+  initKemCiphertext?: string;
+  messageIndex?     : number;
 }
 
 /** Document Firestore dans /conversations/{convId}/typing/{uid}. */

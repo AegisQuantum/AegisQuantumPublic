@@ -17,23 +17,33 @@ import {
   getDocs,
 } from "firebase/firestore";
 import { db } from "./firebase";
-import { loadCachedPubKey, saveCachedPubKey } from "./idb-cache";
-import { emitCryptoEvent, shortUid } from "./crypto-events";
 import type { PublicKeyBundle } from "../types/user";
 
 const publicKeysCol = () => collection(db, "publicKeys");
 const publicKeyDoc  = (uid: string) => doc(db, "publicKeys", uid);
 
-// Cache mémoire — les clés publiques ne changent jamais après l'inscription.
-// Evite de refaire un read Firestore à chaque sendMessage/decryptMessage.
-const _publicKeysCache = new Map<string, PublicKeyBundle>();
+// Cache mémoire avec TTL de 5 minutes.
+// Sans TTL, une régénération de clés (generateFreshKeys) ne serait jamais
+// détectée par les contacts pendant toute la durée de la session.
+const PUBKEY_TTL_MS = 5 * 60 * 1000; // 5 min
+
+interface CachedEntry { bundle: PublicKeyBundle; cachedAt: number; }
+const _publicKeysCache = new Map<string, CachedEntry>();
 
 /**
  * Publie les clés publiques d'un utilisateur dans Firestore.
  */
 export async function publishPublicKeys(uid: string, bundle: PublicKeyBundle): Promise<void> {
   await setDoc(publicKeyDoc(uid), bundle);
-  _publicKeysCache.set(uid, bundle);
+  _publicKeysCache.set(uid, { bundle, cachedAt: Date.now() });
+}
+
+/**
+ * Invalide le cache mémoire d'un uid (ex. après generateFreshKeys).
+ */
+export function clearPublicKeysCache(uid?: string): void {
+  if (uid) _publicKeysCache.delete(uid);
+  else     _publicKeysCache.clear();
 }
 
 /**
@@ -42,12 +52,13 @@ export async function publishPublicKeys(uid: string, bundle: PublicKeyBundle): P
  * Les clés sont mises en cache mémoire — 1 seul read Firestore par uid par session.
  */
 export async function getPublicKeys(uid: string): Promise<PublicKeyBundle | null> {
-  const cached = _publicKeysCache.get(uid);
-  if (cached) return cached;
+  const entry = _publicKeysCache.get(uid);
+  if (entry && Date.now() - entry.cachedAt < PUBKEY_TTL_MS) return entry.bundle;
+
   const snap = await getDoc(publicKeyDoc(uid));
   if (!snap.exists()) return null;
   const bundle = snap.data() as PublicKeyBundle;
-  _publicKeysCache.set(uid, bundle);
+  _publicKeysCache.set(uid, { bundle, cachedAt: Date.now() });
   return bundle;
 }
 

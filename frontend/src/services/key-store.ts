@@ -13,7 +13,7 @@
  *  - La master key elle-même n'est jamais stockée — seulement en mémoire.
  */
 
-import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto"; // utilisé dans saveRatchetState/loadRatchetState uniquement
+import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types internes
@@ -195,13 +195,11 @@ export async function storePrivateKeys(uid: string, bundle: PrivateKeyBundle): P
     dsaPrivateKey: bundle.dsaPrivateKey,
   };
 
-  // Normaliser la masterKey → 32 bytes SHA-256 (robuste aux strings arbitraires)
   const keyBytes = await _normalizeKey(bundle.masterKey);
   const { ciphertext, nonce } = await _aesEncryptWithKey(JSON.stringify(payload), keyBytes);
   const vault: EncryptedVault = { ciphertext, nonce };
   await idbSet(`vault:${uid}`, JSON.stringify(vault));
 
-  // Charger en mémoire pour la session courante
   _memoryStore.set(uid, payload);
 }
 
@@ -287,7 +285,6 @@ export async function loadRatchetState(
   if (masterKey) {
     try {
       const vault: EncryptedVault = JSON.parse(raw);
-      // Si c'est un vault chiffré (a ciphertext + nonce)
       if (vault.ciphertext && vault.nonce) {
         return await aesGcmDecrypt(vault.ciphertext, vault.nonce, masterKey);
       }
@@ -369,6 +366,35 @@ export async function restoreRatchetState(
  */
 export async function deleteRatchetState(uid: string, convId: string): Promise<void> {
   await idbDelete(`ratchet:${uid}:${convId}`);
+}
+
+/**
+ * Supprime tous les états ratchet d'un utilisateur depuis IndexedDB.
+ * Appelé lors de la suppression de compte.
+ */
+export async function deleteAllRatchetStatesForUser(uid: string): Promise<void> {
+  const prefix = `ratchet:${uid}:`;
+  const db     = await openDB();
+  const tx     = db.transaction(IDB_STORE, "readwrite");
+  const str    = tx.objectStore(IDB_STORE);
+  return new Promise((resolve, reject) => {
+    const range = IDBKeyRange.bound(prefix, prefix + "\uffff");
+    const req   = str.openCursor(range);
+    req.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+      if (cursor) { cursor.delete(); cursor.continue(); }
+      else { db.close(); resolve(); }
+    };
+    req.onerror = () => { db.close(); reject(req.error); };
+  });
+}
+
+/**
+ * Supprime le plaintext mis en cache d'un message spécifique.
+ * Appelé lors de la suppression d'un message.
+ */
+export async function deleteMsgCache(msgId: string): Promise<void> {
+  await idbDelete(`msgcache:${msgId}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

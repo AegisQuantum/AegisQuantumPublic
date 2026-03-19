@@ -17,8 +17,8 @@ import { vi } from "vitest";
 function _b64(b: Uint8Array): string {
   let s = ""; for (const x of b) s += String.fromCharCode(x); return btoa(s);
 }
-function _fromb64(s: string): Uint8Array {
-  return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+function _fromb64(s: string): Uint8Array<ArrayBuffer> {
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0)) as unknown as Uint8Array<ArrayBuffer>;
 }
 
 // ── compteur de clés ───────────────────────────────────────────────────────
@@ -31,8 +31,8 @@ export const argon2Derive = vi.fn(async (password: string, saltB64?: string) => 
     "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]
   );
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt: saltBytes as unknown as BufferSource, iterations: 1 }, km, 256
-  ); //HERE FIX 
+    { name: "PBKDF2", hash: "SHA-256", salt: saltBytes as BufferSource, iterations: 1 }, km, 256
+  );
   return { key: _b64(new Uint8Array(bits)), salt: _b64(saltBytes) };
 });
 

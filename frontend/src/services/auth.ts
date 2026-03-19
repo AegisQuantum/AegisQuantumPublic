@@ -8,14 +8,18 @@ import {
   signOut as firebaseSignOut,
   onAuthStateChanged,
   updatePassword,
+  deleteUser,
   type User,
 } from "firebase/auth";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import {
+  doc, getDoc, setDoc, collection, getDocs, writeBatch, query, where,
+} from "firebase/firestore";
 import { auth, db } from "./firebase";
-import { clearPrivateKeys, storePrivateKeys, unlockPrivateKeys, getKemPrivateKey, getDsaPrivateKey} from "./key-store";
+import { clearPrivateKeys, storePrivateKeys, unlockPrivateKeys, getKemPrivateKey, getDsaPrivateKey, deleteVault, deleteAllRatchetStatesForUser } from "./key-store";
 import { resetMessagingState } from "./messaging";
-import { publishPublicKeys, getPublicKeys } from "./key-registry";
+import { publishPublicKeys, getPublicKeys, clearPublicKeysCache } from "./key-registry";
 import { kemGenerateKeyPair, dsaGenerateKeyPair, argon2Derive } from "../crypto";
+import { clearAllCachesForAccount } from "./idb-cache";
 import type { AQUser } from "../types/user";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,12 +107,7 @@ export class VaultMissingError extends Error {
 
 export async function loadCryptoKeys(uid: string, password: string): Promise<void> {
 
-  // --- AJOUT DE CETTE SÉCURITÉ ---
-  if (getKemPrivateKey(uid)) {
-    console.log("[AQ:crypto] Clés déjà en mémoire, on ignore le re-déchiffrement.");
-    return;
-  }
-  // -------------------------------
+  try { getKemPrivateKey(uid); return; } catch { /* not in memory, proceed */ }
 
   const existingPublicKeys = await getPublicKeys(uid);
 
@@ -148,11 +147,7 @@ export async function loadCryptoKeys(uid: string, password: string): Promise<voi
     // ("Vos clés locales sont introuvables. Effacez vos données et recréez un compte.").
     // Ne jamais régénérer silencieusement quand des clés publiques existent déjà.
     console.error("[AQ:crypto] Vault IDB introuvable alors que des clés publiques existent dans Firestore.");
-    throw new Error(
-      "VAULT_MISSING: Vos cl\u00e9s priv\u00e9es locales sont introuvables (IDB vid\u00e9 ?). " +
-      "Impossible de se connecter sans elles — r\u00e9g\u00e9n\u00e9rer casserait toutes vos conversations. " +
-      "Pour repartir de z\u00e9ro : supprimez votre compte et recr\u00e9ez-en un."
-    );
+    throw new VaultMissingError(uid);
   }
 }
 
@@ -165,20 +160,12 @@ export async function signIn(username: string, password: string): Promise<AQUser
   // indispensable pour les changements de compte sans rechargement de page.
   resetMessagingState();
   clearPrivateKeys();
+  clearPublicKeysCache();
 
   const fakeEmail  = toFakeEmail(username);
   const credential = await signInWithEmailAndPassword(auth, fakeEmail, password);
   const uid        = credential.user.uid;
-  try {
-    await loadCryptoKeys(uid, password);
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith("VAULT_MISSING")) {
-      // Firebase Auth a réussi mais le vault IDB est absent sur cet appareil.
-      // On propage un VaultMissingError typé pour que l'UI propose la récupération.
-      throw new VaultMissingError(uid);
-    }
-    throw e;
-  }
+  await loadCryptoKeys(uid, password); // peut lever VaultMissingError → propagée telle quelle
   _currentUser = { uid };
   return _currentUser;
 }
@@ -255,6 +242,86 @@ export async function signOut(): Promise<void> {
   resetMessagingState();
   await firebaseSignOut(auth);
   _currentUser = null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Suppression de compte
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Supprime définitivement le compte de l'utilisateur.
+ *
+ * Séquence :
+ *  1. Récupère toutes les conversations de l'utilisateur.
+ *  2. Pour chaque conversation : si l'autre participant n'a plus de clés publiques
+ *     (compte supprimé), supprime la conversation et tous ses messages.
+ *  3. Supprime les documents Firestore personnels (users, publicKeys, provisioned).
+ *  4. Purge le vault IDB, les états ratchet et tous les caches locaux.
+ *  5. Nettoie le localStorage.
+ *  6. Supprime le compte Firebase Auth (doit être en dernier — révoque le token).
+ */
+export async function deleteAccount(uid: string): Promise<void> {
+  const firebaseUser = auth.currentUser;
+  if (!firebaseUser) throw new Error("Not authenticated");
+
+  const batch = writeBatch(db);
+
+  // 1. Conversations — supprimer celles dont l'autre participant est aussi parti
+  const convsSnap = await getDocs(
+    query(collection(db, "conversations"), where("participants", "array-contains", uid))
+  );
+
+  for (const convDoc of convsSnap.docs) {
+    const data = convDoc.data() as { participants: string[] };
+    const otherUid = data.participants.find(p => p !== uid);
+
+    if (otherUid) {
+      const otherKeys = await getPublicKeys(otherUid);
+      if (!otherKeys) {
+        // Autre participant aussi supprimé → purger la conversation
+        const msgsSnap = await getDocs(
+          collection(db, "conversations", convDoc.id, "messages")
+        );
+        for (const msgDoc of msgsSnap.docs) batch.delete(msgDoc.ref);
+        batch.delete(convDoc.ref);
+      }
+    }
+  }
+
+  // 2. Documents personnels Firestore
+  batch.delete(doc(db, "users",      uid));
+  batch.delete(doc(db, "publicKeys", uid));
+
+  const provSnap = await getDoc(doc(db, "provisioned", uid));
+  if (provSnap.exists()) batch.delete(doc(db, "provisioned", uid));
+
+  await batch.commit();
+
+  // 2b. Invalider le cache mémoire des clés publiques (key-registry garde un cache
+  //     en mémoire pour éviter des reads Firestore répétés ; il faut le vider
+  //     pour que getPublicKeys renvoie null après la suppression Firestore).
+  clearPublicKeysCache(uid);
+
+  // 3. Purge IDB
+  await deleteVault(uid);
+  await deleteAllRatchetStatesForUser(uid);
+  await clearAllCachesForAccount(uid);
+
+  // 4. Purge localStorage
+  // localStorage.key(i) fonctionne dans tous les environnements (jsdom/happy-dom/browser).
+  // Object.keys(localStorage) renvoie [] dans certains runtimes de test.
+  const _lsKeys: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k?.startsWith("aq:")) _lsKeys.push(k);
+  }
+  _lsKeys.forEach(k => localStorage.removeItem(k));
+
+  // 5. Suppression Firebase Auth (révoque le token — doit être en dernier)
+  resetMessagingState();
+  clearPrivateKeys();
+  _currentUser = null;
+  await deleteUser(firebaseUser);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

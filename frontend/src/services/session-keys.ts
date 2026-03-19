@@ -29,9 +29,12 @@ import {
   storePrivateKeys,
   getAllRatchetStates,
   restoreRatchetState,
+  saveMsgCache,
 }                                                             from "./key-store";
+import { loadCachedMessages, saveCachedMessages }             from "./idb-cache";
 import { db }                                                 from "./firebase";
 import { doc, setDoc }                                        from "firebase/firestore";
+import type { DecryptedMessage }                              from "../types/message";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -43,7 +46,8 @@ interface SessionExportPayload {
   exportedAt  : number;
   kemPrivateKey: string;  // Base64 — ML-KEM-768
   dsaPrivateKey: string;  // Base64 — ML-DSA-65
-  ratchetStates: Array<{ convId: string; stateJson: string }>;
+  ratchetStates  : Array<{ convId: string; stateJson: string }>;
+  messageCaches ?: Array<{ convId: string; msgs: DecryptedMessage[]; lastTs: number }>;
 }
 
 export interface SessionFile {
@@ -83,13 +87,25 @@ export async function exportSessionKeys(
   const dsaPrivateKey  = getDsaPrivateKey(uid);
   const ratchetStates  = await getAllRatchetStates(uid);
 
+  // Collecter les plaintexts mis en cache pour chaque conversation connue.
+  // Indispensable pour lire les anciens messages sur un nouvel appareil :
+  // le ratchet ne peut pas redéchiffrer le passé (forward secrecy).
+  const messageCaches: Array<{ convId: string; msgs: DecryptedMessage[]; lastTs: number }> = [];
+  for (const { convId } of ratchetStates) {
+    const cached = await loadCachedMessages(convId);
+    if (cached && cached.msgs.length > 0) {
+      messageCaches.push({ convId, msgs: cached.msgs, lastTs: cached.lastTs });
+    }
+  }
+
   const payload: SessionExportPayload = {
     v           : 2,
     uid,
     exportedAt  : Date.now(),
-    kemPrivateKey: kemPrivateKey ?? "",
+    kemPrivateKey,
     dsaPrivateKey,
     ratchetStates,
+    messageCaches,
   };
 
   onProgress?.("deriving");
@@ -186,6 +202,28 @@ export async function importSessionKeys(
   // Restaurer tous les états ratchet
   for (const { convId, stateJson } of payload.ratchetStates) {
     await restoreRatchetState(payload.uid, convId, stateJson);
+  }
+
+  // Restaurer les caches de messages déchiffrés (optionnel selon version du fichier)
+  if (payload.messageCaches) {
+    for (const { convId, msgs, lastTs } of payload.messageCaches) {
+      await saveCachedMessages(convId, msgs);
+      void lastTs; // lastTs est recalculé par saveCachedMessages
+
+      // Peupler aussi le cache per-message (key-store.ts → msgcache:{id})
+      // utilisé par subscribeToMessages. Sans ça, loadMsgCache() retourne null
+      // et tous les anciens messages restent affichés comme [🔒 Message chiffré]
+      // même après un import réussi.
+      for (const msg of msgs) {
+        if (msg.isDeleted) continue; // les tombstones n'ont pas de plaintext utile
+        await saveMsgCache(msg.id, {
+          plaintext: msg.plaintext,
+          verified:  msg.verified,
+          senderUid: msg.senderUid,
+          timestamp: msg.timestamp,
+        });
+      }
+    }
   }
 
   // Mettre à jour le salt Argon2id dans Firestore avec le nouveau vaultSalt.

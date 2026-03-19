@@ -5,6 +5,8 @@
  *  1. `indexedDB is not defined`     → fake-indexeddb injecté dans globalThis
  *  2. `auth/configuration-not-found` → mock offline de firebase/auth + firebase/firestore
  *  3. `argon2/liboqs not loaded`     → mock de src/crypto (PBKDF2 + clés fictives)
+ *  4. `file.arrayBuffer is not a function` → polyfill Blob/File.prototype.arrayBuffer
+ *  5. `localStorage.setItem is not a function` → polyfill localStorage
  *
  * Note sur vi.mock et les chemins :
  *  - vi.mock() dans un setupFile résout les chemins relativement à ce fichier.
@@ -24,6 +26,49 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 
 (globalThis as Record<string, unknown>).indexedDB   = new IDBFactory();
 (globalThis as Record<string, unknown>).IDBKeyRange = IDBKeyRange;
+
+// ── 1b. Polyfill File/Blob.prototype.arrayBuffer ──────────────────────────
+// jsdom (used by vitest services environment) may not implement arrayBuffer()
+// on Blob/File. This polyfill uses FileReader which IS available in jsdom.
+if (typeof Blob !== "undefined" && typeof (Blob.prototype as unknown as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
+  Object.defineProperty(Blob.prototype, "arrayBuffer", {
+    value: function (this: Blob): Promise<ArrayBuffer> {
+      return new Promise<ArrayBuffer>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload  = () => resolve(reader.result as ArrayBuffer);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsArrayBuffer(this);
+      });
+    },
+    writable: true,
+    configurable: true,
+  });
+}
+if (typeof File !== "undefined" && typeof (File.prototype as unknown as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
+  File.prototype.arrayBuffer = Blob.prototype.arrayBuffer as () => Promise<ArrayBuffer>;
+}
+
+// ── 1c. Polyfill localStorage ─────────────────────────────────────────────
+// jsdom should provide localStorage, but some versions have it broken.
+(function ensureLocalStorage() {
+  try {
+    globalThis.localStorage.setItem("__aq_probe__", "1");
+    globalThis.localStorage.removeItem("__aq_probe__");
+  } catch {
+    const _data: Record<string, string> = {};
+    const _mock = {
+      getItem   : (k: string) => _data[k] ?? null,
+      setItem   : (k: string, v: string) => { _data[k] = String(v); },
+      removeItem: (k: string) => { delete _data[k]; },
+      clear     : () => { for (const k of Object.keys(_data)) delete _data[k]; },
+      get length() { return Object.keys(_data).length; },
+      key       : (i: number) => Object.keys(_data)[i] ?? null,
+    } as Storage;
+    Object.defineProperty(globalThis, "localStorage", {
+      value: _mock, writable: false, configurable: true,
+    });
+  }
+})();
 
 // ── 2. Mock src/crypto ────────────────────────────────────────────────────
 // Doit être déclaré AVANT les imports qui en dépendent.
@@ -143,7 +188,11 @@ vi.mock("firebase/auth", async () => {
   const actual = await vi.importActual<typeof import("firebase/auth")>("firebase/auth");
   return {
     ...actual,
-    getAuth: vi.fn(() => ({ _mock: true })),
+    // auth object with currentUser getter so auth.currentUser works in deleteAccount, etc.
+    getAuth: vi.fn(() => ({
+      _mock: true,
+      get currentUser() { return _currentFirebaseUser; },
+    })),
 
     createUserWithEmailAndPassword: vi.fn(async (_auth: unknown, fakeEmail: string, password: string) => {
       if (!fakeEmail?.includes("@"))
@@ -182,6 +231,14 @@ vi.mock("firebase/auth", async () => {
     }),
 
     updatePassword: vi.fn(async () => {}),
+
+    // deleteUser — supprime le compte du mock et notifie les listeners
+    deleteUser: vi.fn(async (user: { uid: string }) => {
+      for (const [email, acct] of _accounts.entries()) {
+        if (acct.uid === user.uid) { _accounts.delete(email); break; }
+      }
+      _notifyAuth(null);
+    }),
   };
 });
 
@@ -193,7 +250,12 @@ const _listenerSeenIds = new Map<(snap: unknown) => void, Set<string>>();
 function _buildSnap(colPath: string, seenIds?: Set<string>) {
   const docs = [..._store.entries()]
     .filter(([k]) => k.startsWith(colPath + "/") && !k.slice(colPath.length + 1).includes("/"))
-    .map(([k, v]) => ({ id: k.split("/").pop()!, data: () => v, ...(v as object) }));
+    .map(([k, v]) => ({
+      id  : k.split("/").pop()!,
+      ref : { _path: k, _type: "doc" },    // ← ref needed for batch.delete(doc.ref)
+      data: () => v,
+      ...(v as object),
+    }));
   const changes = seenIds
     ? docs.map(d => ({ type: seenIds.has(d.id) ? "modified" : "added", doc: d }))
     : docs.map(d => ({ type: "added", doc: d }));
@@ -214,8 +276,25 @@ vi.mock("firebase/firestore", async () => {
   return {
     ...actual,
     getFirestore: vi.fn(() => ({ _mock: true })),
-    collection: vi.fn((_db: unknown, ...segs: string[]) => ({ _path: segs.join("/"), _type: "collection" })),
-    doc       : vi.fn((_db: unknown, ...segs: string[]) => ({ _path: segs.join("/"), _type: "doc" })),
+
+    // collection(db, "conversations", convId, "messages")
+    //   → { _path: "conversations/convId/messages" }
+    collection: vi.fn((dbOrRef: unknown, ...segs: string[]) => {
+      const base = (dbOrRef as { _path?: string })?._path;
+      const path = base ? [base, ...segs].join("/") : segs.join("/");
+      return { _path: path, _type: "collection" };
+    }),
+
+    // doc(db, "conversations", convId, "messages", msgId)
+    //   → { _path: "conversations/convId/messages/msgId" }
+    // doc(collection(db, ...), msgId)
+    //   → { _path: "conversations/.../msgId" }  (prepends collection path)
+    doc: vi.fn((dbOrRef: unknown, ...segs: string[]) => {
+      const base = (dbOrRef as { _path?: string; _mock?: boolean })?._path;
+      const path = base ? [base, ...segs].join("/") : segs.join("/");
+      return { _path: path, _type: "doc" };
+    }),
+
     setDoc: vi.fn(async (ref: { _path: string }, data: unknown) => {
       _store.set(ref._path, data);
       const parts = ref._path.split("/"); parts.pop(); _fireSnap(parts.join("/"));
@@ -235,6 +314,48 @@ vi.mock("firebase/firestore", async () => {
       _store.set(ref._path, { ...(existing as object), ...(data as object) });
       const parts = ref._path.split("/"); parts.pop(); _fireSnap(parts.join("/"));
     }),
+
+    // deleteDoc — supprime un document de _store et notifie les listeners
+    deleteDoc: vi.fn(async (ref: { _path: string }) => {
+      _store.delete(ref._path);
+      const parts = ref._path.split("/"); parts.pop();
+      _fireSnap(parts.join("/"));
+    }),
+
+    // writeBatch — lot de mutations exécutées atomiquement (simulé séquentiellement)
+    writeBatch: vi.fn((_db: unknown) => {
+      const ops: Array<() => void> = [];
+      const batch = {
+        delete: (ref: { _path: string }) => {
+          ops.push(() => {
+            _store.delete(ref._path);
+            const parts = ref._path.split("/"); parts.pop();
+            _fireSnap(parts.join("/"));
+          });
+          return batch;
+        },
+        set: (ref: { _path: string }, data: unknown, _opts?: unknown) => {
+          ops.push(() => {
+            _store.set(ref._path, data);
+            const parts = ref._path.split("/"); parts.pop();
+            _fireSnap(parts.join("/"));
+          });
+          return batch;
+        },
+        update: (ref: { _path: string }, data: unknown) => {
+          ops.push(() => {
+            const existing = _store.get(ref._path) ?? {};
+            _store.set(ref._path, { ...(existing as object), ...(data as object) });
+            const parts = ref._path.split("/"); parts.pop();
+            _fireSnap(parts.join("/"));
+          });
+          return batch;
+        },
+        commit: async () => { for (const op of ops) op(); },
+      };
+      return batch;
+    }),
+
     arrayUnion: vi.fn((...items: unknown[]) => items),
     getDocs   : vi.fn(async (queryRef: { _path: string }) => _buildSnap(queryRef._path)),
     query     : vi.fn((colRef: { _path: string }, ...constraints: unknown[]) => ({ _path: colRef._path, _constraints: constraints })),

@@ -77,7 +77,9 @@ async function aliceSendsBobDecrypts(text: string): Promise<{
 
   const result = await new Promise<{ plaintext: string; verified: boolean }>((resolve, reject) => {
     const unsub = subscribeToMessages(UID_BOB, convId, msgs => {
-      const m = msgs.find(m => m.senderUid === UID_ALICE && !m.plaintext.startsWith("["));
+      // Cherche exactement le texte attendu — évite de ramasser un message
+      // antérieur depuis le cache IDB quand plusieurs appels s'enchaînent.
+      const m = msgs.find(m => m.senderUid === UID_ALICE && m.plaintext === text);
       if (m) { unsub(); resolve({ plaintext: m.plaintext, verified: m.verified }); }
     });
     sendMessage(UID_ALICE, UID_BOB, text).catch(err => { unsub(); reject(err); });
@@ -240,11 +242,7 @@ describe("decryptMessage [UNIT]", () => {
     });
   }, 18_000);
 
-  it("initKemCiphertext absent + stateJson null -> erreur explicite", async () => {
-    // Pour que doubleRatchetDecrypt lance l'erreur sur initKemCiphertext,
-    // il faut que stateJson soit null (premier message, pas d'état IDB pour Bob)
-    // ET que initKemCiphertext soit absent.
-    // On utilise un uid frais sans état IDB préexistant.
+  it("initKemCiphertext absent + stateJson null -> retourne [🔒] (erreur permanente)", async () => {
     const UID_FRESH = "msg-test-fresh-receiver-" + Date.now();
     const kem = await import("../../crypto/kem").then(m => m.kemGenerateKeyPair());
     const dsa = await import("../../crypto/dsa").then(m => m.dsaGenerateKeyPair());
@@ -264,44 +262,38 @@ describe("decryptMessage [UNIT]", () => {
       ciphertext    : btoa("X"),
       nonce         : btoa("N"),
       kemCiphertext : btoa("C".repeat(1088)),
-      senderEphPub  : btoa("E"),               // <-- ADD THIS
+      senderEphPub  : btoa("E"),
       signature     : "",
       messageIndex  : 0,
       timestamp     : Date.now(),
       // initKemCiphertext intentionnellement absent
     };
-    await expect(decryptMessage(UID_FRESH, msg)).rejects.toThrow(/initKemCiphertext/i);
+    // Les erreurs permanentes (initKemCiphertext manquant) ne lèvent plus d'exception :
+    // decryptMessage retourne un résultat avec plaintext [🔒] pour rester affichable.
+    const result = await decryptMessage(UID_FRESH, msg);
+    expect(result.plaintext).toMatch(/🔒/);
+    expect(result.verified).toBe(false);
   }, 15_000);
 
-  it("verified = false si signature vide (stateJson null + initKemCiphertext present)", async () => {
-    // Construire un message avec un vrai initKemCiphertext (encapsule avec la cle de Bob)
-    // mais une signature vide. decryptMessage doit retourner verified: false sans crash.
-    const { kemEncapsulate } = await import("../../crypto/kem");
-    const bobKeys = await import("../key-registry").then(m => m.getPublicKeys(UID_BOB));
-    const { ciphertext: _initKemCiphertext } = await kemEncapsulate(bobKeys!.kemPublicKey);
-    const UID_FRESH = "msg-test-fresh-receiver-" + Date.now();
-
-    // On ne peut pas construire un ciphertext AES valide facilement sans le vrai ratchet,
-    // donc ce test verifie juste que la signature invalide est bien detectee (verified=false)
-    // quand decryptMessage peut au moins bootstrapper l'etat (initKemCiphertext present).
-    // Le dechiffrement AES echouera ensuite — ce qui est attendu pour un message forge.
+  it("verified = false si signature vide + initKemCiphertext absent -> retourne [🔒]", async () => {
+    // Message forgé : signature vide, initKemCiphertext absent.
+    // decryptMessage doit retourner [🔒] (erreur permanente) sans lever d'exception.
     const msg: EncryptedMessage = {
       id            : "no-init-kem",
-      conversationId: getConversationId(UID_ALICE, UID_FRESH),
+      conversationId: getConversationId(UID_ALICE, UID_BOB),
       senderUid     : UID_ALICE,
       ciphertext    : btoa("X"),
       nonce         : btoa("N"),
       kemCiphertext : btoa("C".repeat(1088)),
-      senderEphPub  : btoa("E"),               // <-- ADD THIS
+      senderEphPub  : btoa("E"),
       signature     : "",
       messageIndex  : 0,
       timestamp     : Date.now(),
       // initKemCiphertext intentionnellement absent
     };
-    // Le dechiffrement AES va echouer (ciphertext/kemCiphertext invalides),
-    // mais verified=false doit etre determine avant ce crash.
-    // On attend une rejection (AES error), pas un panic.
-    await expect(decryptMessage(UID_BOB, msg)).rejects.toThrow();
+    const result = await decryptMessage(UID_BOB, msg);
+    expect(result.plaintext).toMatch(/🔒/);
+    expect(result.verified).toBe(false);
   }, 10_000);
 });
 
@@ -419,8 +411,8 @@ describe("Security invariants [SEC]", () => {
     for (const text of ["sec-msg-1", "sec-msg-2"]) {
       await new Promise<void>((resolve, reject) => {
         const unsub = subscribeToMessages(UID_BOB, convId, msgs => {
-          const last = msgs.filter(m => m.senderUid === UID_ALICE && !m.plaintext.startsWith("[")).pop();
-          if (last) { results.push(last.plaintext); unsub(); resolve(); }
+          const m = msgs.find(m => m.senderUid === UID_ALICE && m.plaintext === text);
+          if (m) { results.push(m.plaintext); unsub(); resolve(); }
         });
         sendMessage(UID_ALICE, UID_BOB, text).catch(reject);
         setTimeout(() => { unsub(); reject(new Error("timeout")); }, 12_000);

@@ -3,6 +3,7 @@
 <!-- NOTE: pas de <link> CSS ici — le CSS est injecté par Vite dans le bundle en prod -->
 
 <div id="chat-root">
+  
 
   <!-- ══ TOP NAV ══ -->
   <header class="topnav">
@@ -64,6 +65,17 @@
     <!-- ══ PANNEAU GAUCHE ══ -->
     <div class="left-panel" id="left-panel">
 
+      <!-- Bandeau d'avertissement export clés — affiché par JS si non exporté -->
+      <div id="export-warning-banner" style="display:none;background:rgba(246,173,85,0.1);border-bottom:1px solid rgba(246,173,85,0.2);padding:8px 12px;font-size:11.5px;color:rgba(246,173,85,0.9);align-items:center;gap:8px;cursor:pointer" title="Cliquer pour exporter vos clés">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13" style="flex-shrink:0">
+          <path d="M8 2L1.5 13.5h13L8 2Z"/><path d="M8 6v4M8 11.5v.5"/>
+        </svg>
+        <span>Clés non sauvegardées — <strong>exporter avant de fermer</strong></span>
+        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10" style="margin-left:auto;flex-shrink:0;opacity:0.5">
+          <path d="M2 6h8M7 3l3 3-3 3"/>
+        </svg>
+      </div>
+
       <aside class="sidebar" id="sidebar-chat">
         <div class="sidebar-header">
           <div class="sidebar-title">Messages</div>
@@ -97,7 +109,6 @@
             Protocole crypto
           </span>
           <span class="crypto-box-status" id="crypto-status-dot"></span>
-          <button class="crypto-glass-btn" id="btn-crypto-glass" title="Machine sous verre — voir les opérations en direct">🔬</button>
         </div>
         <div class="crypto-steps" id="crypto-steps">
           <div class="crypto-idle">
@@ -189,12 +200,42 @@
         </div>
 
         <div class="input-bar">
+          <!-- Bouton pièce jointe (tous types de fichiers) -->
           <label class="btn-attach" id="btn-attach" title="Envoyer un fichier chiffré" for="file-input">
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" width="14" height="14">
               <path d="M16.5 9.5 9 17a5 5 0 0 1-7-7l8-8a3.3 3.3 0 0 1 4.7 4.7L7 14.2a1.7 1.7 0 0 1-2.4-2.4L11 5"/>
             </svg>
           </label>
           <input type="file" id="file-input" style="display:none" />
+          <!-- Bouton image (filtre image/*) -->
+          <label class="btn-attach" id="btn-attach-image" title="Envoyer une image chiffrée" for="image-input" style="margin-left:2px">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" width="14" height="14">
+              <rect x="2" y="4" width="16" height="12" rx="2"/>
+              <circle cx="7" cy="8.5" r="1.5"/>
+              <path d="M2 14l4-4 3 3 3-4 6 5"/>
+            </svg>
+          </label>
+          <input type="file" id="image-input" accept="image/*" style="display:none" />
+          <!-- Bouton micro -->
+          <button class="btn-attach" id="btn-record-voice" title="Message vocal chiffré" style="margin-left:2px">
+            <svg id="icon-mic-idle" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" width="14" height="14">
+              <rect x="7" y="2" width="6" height="10" rx="3"/>
+              <path d="M4 10a6 6 0 0 0 12 0M10 16v2M7 18h6"/>
+            </svg>
+            <svg id="icon-mic-stop" viewBox="0 0 20 20" fill="currentColor" width="14" height="14" style="display:none">
+              <rect x="5" y="5" width="10" height="10" rx="2"/>
+            </svg>
+          </button>
+          <!-- Barre d'enregistrement (cachée par défaut) -->
+          <div id="recording-bar" style="display:none;align-items:center;gap:8px;flex:1;padding:0 8px">
+            <span class="recording-dot"></span>
+            <span id="recording-timer" style="font-size:12px;font-family:var(--mono);color:var(--c-text);min-width:36px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">0:00</span>
+            <div style="flex:1;height:2px;background:rgba(239,68,68,0.3);border-radius:2px">
+              <div id="recording-level" style="height:100%;background:#ef4444;border-radius:2px;width:0%;transition:width 0.1s"></div>
+            </div>
+            <span id="recording-hint" style="font-size:11px;color:var(--c-muted)">Relâcher pour envoyer</span>
+            <button id="btn-cancel-pending" style="display:none;background:none;border:none;color:var(--c-muted);font-size:18px;cursor:pointer;padding:0 2px;line-height:1;flex-shrink:0" title="Annuler">×</button>
+          </div>
           <textarea class="message-input" id="message-input" placeholder="Écrire un message chiffré…" rows="1"></textarea>
           <button class="btn-send" id="btn-send" title="Envoyer">
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" width="15" height="15">
@@ -263,14 +304,14 @@
               <span class="settings-row-label">ML-KEM-768 (FIPS 203)</span>
               <span class="settings-row-desc">Key Encapsulation — résistant quantique</span>
             </div>
-            <span class="settings-badge badge-blue crypto-glass-trigger" id="badge-mlkem" title="Voir les opérations en direct" style="cursor:pointer">FIPS 203 🔬</span>
+            <span class="settings-badge badge-blue">FIPS 203</span>
           </div>
           <div class="settings-row">
             <div class="settings-row-left">
               <span class="settings-row-label">ML-DSA-65 (FIPS 204)</span>
               <span class="settings-row-desc">Signatures numériques post-quantiques</span>
             </div>
-            <span class="settings-badge badge-blue crypto-glass-trigger" id="badge-mldsa" title="Voir les signatures en direct" style="cursor:pointer">FIPS 204 🔬</span>
+            <span class="settings-badge badge-blue">FIPS 204</span>
           </div>
           <div class="settings-row">
             <div class="settings-row-left">
@@ -282,9 +323,9 @@
           <div class="settings-row">
             <div class="settings-row-left">
               <span class="settings-row-label">Double Ratchet (ML-KEM-768)</span>
-              <span class="settings-row-desc">Forward secrecy — clé éphème KEM + ratchet symétrique par message</span>
+              <span class="settings-row-desc">Forward secrecy — clé éphémère KEM + ratchet symétrique par message</span>
             </div>
-            <span class="settings-badge badge-green crypto-glass-trigger" id="badge-ratchet" title="Voir le ratchet en direct" style="cursor:pointer">Actif 🔬</span>
+            <span class="settings-badge badge-green">Actif</span>
           </div>
         </div>
       </div>
@@ -368,8 +409,115 @@
           Se déconnecter
         </button>
       </div>
+
+      <!-- Zone dangereuse -->
+      <div class="settings-section settings-section-danger">
+        <div class="settings-section-title">Zone dangereuse</div>
+        <div class="settings-card danger-card">
+          <div class="settings-row">
+            <div class="settings-row-left">
+              <span class="settings-row-label">Supprimer mon compte</span>
+              <span class="settings-row-desc">Supprime définitivement le compte, les clés et les données locales. Les conversations chiffrées restent si l'autre participant existe encore.</span>
+            </div>
+            <button class="btn-danger" id="btn-delete-account">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="12" height="12">
+                <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 9a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1l1-9"/>
+              </svg>
+              Supprimer
+            </button>
+          </div>
+        </div>
+      </div>
     </section>
 
+  </div>
+</div>
+
+<!-- ══ MODAL — Supprimer compte ══ -->
+<div class="modal-overlay" id="modal-delete-account" style="display:none">
+  <div class="modal modal-danger">
+    <div class="modal-header">
+      <span class="modal-title">Supprimer mon compte</span>
+      <button class="modal-close" id="modal-delete-account-close">×</button>
+    </div>
+    <div>
+      <div class="delete-account-warning">
+        <svg viewBox="0 0 20 20" fill="none" stroke="#fc8181" stroke-width="1.6" width="20" height="20">
+          <path d="M10 2L2 17h16L10 2Z"/><path d="M10 8v4M10 14v.5"/>
+        </svg>
+        <span>Cette action est <strong>irréversible</strong>. Votre compte, vos clés privées et toutes vos données locales seront définitivement supprimés.</span>
+      </div>
+      <div class="modal-label">Tapez <strong>SUPPRIMER</strong> pour confirmer</div>
+      <input type="text" class="modal-input" id="modal-delete-account-confirm-input"
+        placeholder="SUPPRIMER" autocomplete="off" spellcheck="false"/>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" id="modal-delete-account-cancel">Annuler</button>
+      <button class="btn-modal-danger" id="modal-delete-account-confirm" disabled>Supprimer définitivement</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MODAL — Avertissement fermeture ══ -->
+<div class="modal-overlay" id="modal-close-warning" style="display:none">
+  <div class="modal" style="max-width:400px">
+    <div class="modal-header">
+      <span class="modal-title" style="display:flex;align-items:center;gap:8px">
+        <svg viewBox="0 0 20 20" fill="none" stroke="#f6ad55" stroke-width="1.6" width="16" height="16">
+          <path d="M10 2L2 17h16L10 2Z"/><path d="M10 8v4M10 14v.5"/>
+        </svg>
+        Avant de partir…
+      </span>
+    </div>
+    <div style="font-size:13px;color:rgba(255,255,255,0.65);line-height:1.6;padding:4px 0 8px">
+      <p style="margin:0 0 10px">Vos clés cryptographiques sont stockées <strong>uniquement sur cet appareil</strong>.</p>
+      <p style="margin:0">Si vous fermez sans les exporter, vous ne pourrez plus déchiffrer vos messages depuis un autre appareil.</p>
+    </div>
+    <div style="background:rgba(246,173,85,0.08);border:1px solid rgba(246,173,85,0.2);border-radius:8px;padding:10px 12px;font-size:12px;color:rgba(246,173,85,0.85);margin-bottom:14px">
+      Paramètres → Clés de session → <strong>Exporter</strong>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-modal-confirm" id="btn-close-anyway" type="button" tabindex="0">
+        Fermer quand même
+      </button>
+      <button class="btn-modal-cancel" id="btn-close-cancel" type="button" style="order:-1">
+        Rester
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MENU CONTEXTUEL — Message ══ -->
+<div class="msg-context-menu" id="msg-context-menu" style="display:none">
+  <button class="msg-context-item" id="ctx-edit-message" style="display:none">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="12" height="12">
+      <path d="M11.5 2.5l2 2L5 13H3v-2L11.5 2.5z"/>
+    </svg>
+    Modifier
+  </button>
+  <button class="msg-context-item" id="ctx-delete-for-me">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="12" height="12">
+      <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 9a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1l1-9"/>
+    </svg>
+    Supprimer pour moi
+  </button>
+  <button class="msg-context-item msg-context-item-danger" id="ctx-delete-for-both" style="display:none">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="12" height="12">
+      <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 9a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1l1-9"/>
+    </svg>
+    Supprimer pour tous
+  </button>
+</div>
+
+<!-- Modal d'édition de message -->
+<div class="modal-overlay" id="modal-edit-message" style="display:none" role="dialog" aria-modal="true" aria-labelledby="edit-message-title">
+  <div class="modal-box">
+    <h3 id="edit-message-title" class="modal-title">Modifier le message</h3>
+    <textarea id="edit-message-input" class="edit-message-textarea" rows="3" placeholder="Nouveau contenu…"></textarea>
+    <div class="modal-actions">
+      <button class="btn-modal-secondary" id="btn-edit-cancel">Annuler</button>
+      <button class="btn-primary" id="btn-edit-confirm">Enregistrer</button>
+    </div>
   </div>
 </div>
 
@@ -628,5 +776,30 @@
         Importer
       </button>
     </div>
+  </div>
+</div>
+
+<!-- ══ LIGHTBOX IMAGE ══ -->
+<div class="modal-overlay" id="lightbox-overlay" style="display:none" role="dialog" aria-modal="true" aria-label="Visualisation image">
+  <div class="lightbox-container">
+    <div class="lightbox-topbar">
+      <span class="lightbox-filename" id="lightbox-filename"></span>
+      <div class="lightbox-actions">
+        <button class="lightbox-btn" id="lightbox-download" title="Télécharger">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" width="18" height="18">
+            <path d="M10 3v10M6 10l4 4 4-4"/><path d="M3 17h14"/>
+          </svg>
+        </button>
+        <button class="lightbox-btn lightbox-close-btn" id="lightbox-close" title="Fermer">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+            <path d="M5 5l10 10M15 5L5 15"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="lightbox-body">
+      <img id="lightbox-img" src="" alt="" class="lightbox-img" />
+    </div>
+    <div class="lightbox-footer" id="lightbox-footer"></div>
   </div>
 </div>

@@ -5,7 +5,7 @@
 // Import du CSS chat — Vite le bundle en prod, l'injecte via <style> en dev
 import '../styles/chat.css';
 
-import { signOut }                          from '../services/auth';
+import { signOut, deleteAccount }           from '../services/auth';
 import { openFingerprintModal, closeFingerprintModal } from './fingerprint';
 import {
   subscribeToConversations,
@@ -15,7 +15,11 @@ import {
   getOrCreateConversation,
   onConvPreviewUpdate,
   sendRatchetResetSignal,
+  deleteMessageForBoth,
+  deleteMessageForMe,
+  editMessage,
 }                                           from '../services/messaging';
+import { getHiddenMessages }               from '../services/idb-cache';
 import {
   subscribeToTyping,
   markAllRead,
@@ -33,12 +37,11 @@ import {
 }                                           from '../services/session-keys';
 import { validateMnemonic, normalizeMnemonic } from '../crypto/mnemonic';
 import type { Conversation, DecryptedMessage } from '../types/message';
-import { onCryptoEvent, type CryptoEventPayload } from '../services/crypto-events';
 
 let _unsubConvs:        (() => void) | null = null;
 let _unsubMessages:     (() => void) | null = null;
 let _unsubTyping:       (() => void) | null = null;
-let _unsubPreview:      (() => void) | null = null; // listener preview local
+let _unsubPreview:      (() => void) | null = null;
 let _currentConvId:     string | null       = null;
 let _currentContactUid: string | null       = null;
 let _myUid:             string              = '';
@@ -56,19 +59,22 @@ let _typingDebouncer: ReturnType<typeof createTypingDebouncer> | null = null;
 // ─────────────────────────────────────────────────────────────────────────────
 const _allDecryptedMessages = new Map<string, DecryptedMessage[]>();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Crypto Event Log — alimente la "machine sous verre" en temps réel
-// Ring-buffer de 60 events max pour le popup protocoles
-// ─────────────────────────────────────────────────────────────────────────────
-const CRYPTO_LOG_MAX = 60;
-const _cryptoLog: CryptoEventPayload[] = [];
-let _unsubCryptoEvents: (() => void) | null = null;
-
 // État de la recherche dans les messages
 let _msgSearchQuery = '';
 
 // Guard anti-double-submit — empêche deux envois simultanés (double-clic, Enter + clic)
 let _sendInProgress = false;
+
+// Context menu — message ciblé par le clic droit courant
+let _ctxMsgId:             string | null = null;
+let _ctxConvId:            string | null = null;
+let _ctxKemCiphertext:     string        = "";
+let _ctxInitKemCiphertext: string | undefined;
+let _ctxMessageIndex:      number        = 0;
+let _ctxPlaintext:         string        = "";
+
+// Messages cachés localement pour l'utilisateur courant
+let _hiddenMessages = new Set<string>();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LocalStorage — noms locaux des conversations + avatar
@@ -166,6 +172,22 @@ export async function initChat(uid: string): Promise<void> {
     if (!file || !_currentContactUid) return;
     (e.target as HTMLInputElement).value = '';
     await handleSendFile(file);
+  });
+
+  // ── Envoi image — pending : attendre confirmation via btn-send ──
+  const imageInput = document.getElementById('image-input') as HTMLInputElement | null;
+  imageInput?.addEventListener('change', (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file || !_currentContactUid) return;
+    (e.target as HTMLInputElement).value = '';
+    _pendingImageFile = file;
+    _setPendingImageUI(file);
+  });
+
+  // ── Bouton × — annule le pending (audio ou image) ──
+  document.getElementById('btn-cancel-pending')?.addEventListener('click', () => {
+    if (_pendingAudioFile)  cancelPendingAudio();
+    else if (_pendingImageFile) cancelPendingImage();
   });
 
   // ── Navigation settings ──
@@ -342,6 +364,35 @@ export async function initChat(uid: string): Promise<void> {
     }
   });
 
+  // ── Avertissement fermeture + bandeau export clés ──
+  initCloseWarning();
+  initExportWarningBanner();
+  initLightbox();
+  initVoiceRecording();
+
+  // ── Notifications push ──
+  initPushNotifications();
+
+  // ── Supprimer compte ──
+  document.getElementById('btn-delete-account')?.addEventListener('click', openDeleteAccountModal);
+  document.getElementById('modal-delete-account-close')?.addEventListener('click', closeDeleteAccountModal);
+  document.getElementById('modal-delete-account-cancel')?.addEventListener('click', closeDeleteAccountModal);
+  document.getElementById('modal-delete-account')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'modal-delete-account') closeDeleteAccountModal();
+  });
+  document.getElementById('modal-delete-account-confirm-input')?.addEventListener('input', (e) => {
+    const val = (e.target as HTMLInputElement).value;
+    const btn = document.getElementById('modal-delete-account-confirm') as HTMLButtonElement | null;
+    if (btn) btn.disabled = val !== 'SUPPRIMER';
+  });
+  document.getElementById('modal-delete-account-confirm')?.addEventListener('click', confirmDeleteAccount);
+
+  // ── Menu contextuel messages ──
+  initMessageContextMenu();
+
+  // Charger les messages cachés au démarrage
+  getHiddenMessages(_myUid).then(s => { _hiddenMessages = s; });
+
   // ── Renommer conversation ──
   document.getElementById('chat-contact-name')?.addEventListener('dblclick', () => {
     if (_currentConvId) openRenameModal(_currentConvId);
@@ -369,28 +420,6 @@ export async function initChat(uid: string): Promise<void> {
       const name = el.querySelector('.contact-name')?.textContent?.toLowerCase() ?? '';
       el.style.display = name.includes(q) ? '' : 'none';
     });
-  });
-
-  // ── Machine sous verre — bouton dans la crypto-box + badges settings ──
-  const _openGlass = (anchorId: string) => (e: Event) => {
-    e.stopPropagation();
-    if (_cryptoPopupOpen) { closeCryptoPopup(); return; }
-    openCryptoPopup(anchorId);
-  };
-  document.getElementById('btn-crypto-glass')?.addEventListener('click', _openGlass('btn-crypto-glass'));
-  document.getElementById('badge-mlkem')?.addEventListener('click',     _openGlass('badge-mlkem'));
-  document.getElementById('badge-mldsa')?.addEventListener('click',     _openGlass('badge-mldsa'));
-  document.getElementById('badge-ratchet')?.addEventListener('click',   _openGlass('badge-ratchet'));
-
-  // ── Brancher le bus d'événements crypto (machine sous verre) ──
-  _unsubCryptoEvents?.();
-  _unsubCryptoEvents = onCryptoEvent((ev) => {
-    _cryptoLog.push(ev);
-    if (_cryptoLog.length > CRYPTO_LOG_MAX) _cryptoLog.shift();
-    // Mettre à jour le popup si ouvert
-    _refreshCryptoPopupIfOpen();
-    // Mettre à jour les panels dépliant ouverts avec les données live
-    _updateLiveDataInOpenPanels(ev);
   });
 
   // ── S'abonner aux conversations ──
@@ -747,226 +776,6 @@ const ICONS_SVG: Record<CryptoStepType, string> = {
   active: `<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10"><circle cx="6" cy="6" r="4.5"/><path d="M6 3v3l2 1.5"/></svg>`,
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Machine sous verre — Popup crypto live
-// S'ouvre quand on clique sur un badge protocole en bas (ML-KEM, ML-DSA, etc.)
-// Affiche le ring-buffer _cryptoLog en temps réel.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const STEP_LABELS: Record<string, string> = {
-  'kem:encapsulate'      : '🔗 KEM Encapsulate',
-  'kem:decapsulate'      : '🔓 KEM Décapsule',
-  'hkdf:derive'          : '🧩 HKDF Dérivation',
-  'aes:encrypt'          : '🔒 AES-GCM Chiffre',
-  'aes:decrypt'          : '✅ AES-GCM Déchiffre',
-  'dsa:sign'             : '✍️ DSA Signature',
-  'dsa:verify'           : '🔍 DSA Vérification',
-  'ratchet:load'         : '⚙️ Ratchet Chargé',
-  'ratchet:save'         : '💾 Ratchet Sauvé',
-  'firestore:write'      : '📤 Firestore Écriture',
-  'firestore:read-pubkey': '📡 Firestore Clé Pub',
-  'idb:cache-hit'        : '⚡ IDB Cache Hit',
-  'idb:cache-write'      : '💾 IDB Cache Write',
-};
-
-function _formatCryptoEvent(ev: CryptoEventPayload): string {
-  const parts: string[] = [];
-  if (ev.messageIndex !== undefined) parts.push(`#${ev.messageIndex}`);
-  if (ev.peerUid)               parts.push(`peer:${ev.peerUid}`);
-  if (ev.convId)                parts.push(`conv:${ev.convId}`);
-  if (ev.kemCiphertextPreview)  parts.push(`kem:${ev.kemCiphertextPreview}`);
-  if (ev.ciphertextPreview)     parts.push(`ct:${ev.ciphertextPreview}`);
-  if (ev.signaturePreview)      parts.push(`sig:${ev.signaturePreview}`);
-  if (ev.nonce)                 parts.push(`nonce:${ev.nonce.slice(0,12)}…`);
-  if (ev.ciphertextLen)         parts.push(`${ev.ciphertextLen}B`);
-  if (ev.signatureLen)          parts.push(`${ev.signatureLen}B`);
-  if (ev.verified !== undefined) parts.push(ev.verified ? '✓ ok' : '✗ FAIL');
-  if (ev.firestoreDocId)        parts.push(`doc:${ev.firestoreDocId}`);
-  if (ev.cacheKey)              parts.push(`store:${ev.cacheKey}`);
-  if (ev.cacheCount !== undefined) parts.push(`n=${ev.cacheCount}`);
-  return parts.join('  ');
-}
-
-let _cryptoPopupOpen = false;
-
-function openCryptoPopup(anchorId?: string): void {
-  // Supprimer ancien popup s'il existe
-  document.getElementById('crypto-glass-popup')?.remove();
-
-  const popup = document.createElement('div');
-  popup.id        = 'crypto-glass-popup';
-  popup.className = 'crypto-glass-popup';
-  popup.innerHTML = `
-    <div class="cgp-header">
-      <span class="cgp-title">🔬 Machine sous verre</span>
-      <span class="cgp-subtitle">Opérations cryptographiques en temps réel</span>
-      <button class="cgp-close" id="cgp-close-btn" title="Fermer">✕</button>
-    </div>
-    <div class="cgp-legend">
-      <span class="cgp-legend-item"><span style="color:var(--c-accent)">■</span> KEM/HKDF</span>
-      <span class="cgp-legend-item"><span style="color:#6fffb0">■</span> AES/DSA</span>
-      <span class="cgp-legend-item"><span style="color:#ffd06f">■</span> Ratchet/IDB</span>
-      <span class="cgp-legend-item"><span style="color:#c084fc">■</span> Firestore</span>
-    </div>
-    <div class="cgp-log" id="cgp-log-container"></div>
-    <div class="cgp-footer">
-      <span id="cgp-event-count">0 événements</span>
-      <span class="cgp-secure-badge">🔐 Clés privées jamais exposées</span>
-    </div>`;
-
-  // Positionner près de l'ancre si fournie
-  const anchor = anchorId ? document.getElementById(anchorId) : null;
-  if (anchor) {
-    const rect = anchor.getBoundingClientRect();
-    popup.style.bottom = `${window.innerHeight - rect.top + 8}px`;
-    popup.style.left   = `${Math.max(8, rect.left - 20)}px`;
-  }
-
-  document.body.appendChild(popup);
-  _cryptoPopupOpen = true;
-
-  document.getElementById('cgp-close-btn')?.addEventListener('click', closeCryptoPopup);
-
-  // Clic en dehors ferme le popup
-  setTimeout(() => {
-    document.addEventListener('click', _onCryptoPopupOutsideClick);
-  }, 50);
-
-  _renderCryptoLog();
-
-  // Animation d'entrée
-  requestAnimationFrame(() => popup.classList.add('visible'));
-}
-
-function closeCryptoPopup(): void {
-  _cryptoPopupOpen = false;
-  document.removeEventListener('click', _onCryptoPopupOutsideClick);
-  const popup = document.getElementById('crypto-glass-popup');
-  if (popup) {
-    popup.classList.remove('visible');
-    setTimeout(() => popup.remove(), 200);
-  }
-}
-
-function _onCryptoPopupOutsideClick(e: MouseEvent): void {
-  const popup = document.getElementById('crypto-glass-popup');
-  if (popup && !popup.contains(e.target as Node)) closeCryptoPopup();
-}
-
-function _renderCryptoLog(): void {
-  const container = document.getElementById('cgp-log-container');
-  const countEl   = document.getElementById('cgp-event-count');
-  if (!container) return;
-
-  container.innerHTML = '';
-
-  if (_cryptoLog.length === 0) {
-    container.innerHTML = '<div class="cgp-empty">Aucune activité pour l\'instant…<br/>Envoyez ou recevez un message.</div>';
-    if (countEl) countEl.textContent = '0 événements';
-    return;
-  }
-
-  // Afficher du plus récent au plus ancien
-  const logs = [..._cryptoLog].reverse();
-  for (const ev of logs) {
-    const row = document.createElement('div');
-    row.className = `cgp-row cgp-row-${_eventColorClass(ev.step)}`;
-
-    const time = new Date(ev.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const label = STEP_LABELS[ev.step] ?? ev.step;
-    const detail = _formatCryptoEvent(ev);
-
-    row.innerHTML = `
-      <span class="cgp-time">${time}</span>
-      <span class="cgp-step-label">${label}</span>
-      <span class="cgp-detail">${detail}</span>`;
-
-    container.appendChild(row);
-  }
-
-  if (countEl) {
-    countEl.textContent = `${_cryptoLog.length} événement${_cryptoLog.length > 1 ? 's' : ''}`;
-  }
-}
-
-function _refreshCryptoPopupIfOpen(): void {
-  if (!_cryptoPopupOpen) return;
-  _renderCryptoLog();
-}
-
-function _eventColorClass(step: string): string {
-  if (step.startsWith('kem:') || step === 'hkdf:derive')     return 'kem';
-  if (step.startsWith('aes:') || step.startsWith('dsa:'))   return 'aes';
-  if (step.startsWith('ratchet:') || step.startsWith('idb:')) return 'ratchet';
-  if (step.startsWith('firestore:'))                         return 'firestore';
-  return 'other';
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Live data dans les panels dépliant existants
-// Quand un panel est ouvert et qu'un event arrive, on injecte les données réelles
-// dans une zone "live" dédiée en bas du panel.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Mapping event step → index du step dans SEND_STEPS / RECV_STEPS
-const SEND_STEP_MAP: Record<string, number> = {
-  'kem:encapsulate': 1,   // Encapsulation KEM
-  'hkdf:derive':     2,   // Dérivation HKDF
-  'aes:encrypt':     3,   // AES-256-GCM
-  'dsa:sign':        4,   // Signature
-  'firestore:write': 5,   // Envoi Firestore
-};
-const RECV_STEP_MAP: Record<string, number> = {
-  'firestore:read-pubkey': 0, // Récupération clé pub
-  'dsa:verify':            1, // Vérification signature
-  'kem:decapsulate':       2, // Décapsulation KEM
-  'hkdf:derive':           3, // Re-dérivation HKDF
-  'aes:decrypt':           4, // Déchiffrement AES
-};
-
-function _updateLiveDataInOpenPanels(ev: CryptoEventPayload): void {
-  // Trouver tous les panels ouverts dans le crypto-steps container
-  const container = document.getElementById('crypto-steps');
-  if (!container) return;
-
-  const openWraps = container.querySelectorAll<HTMLElement>('.crypto-step-wrap.open');
-  if (openWraps.length === 0) return;
-
-  openWraps.forEach((wrap) => {
-    const panel = wrap.querySelector<HTMLElement>('.crypto-step-panel');
-    if (!panel) return;
-
-    // Identifier à quel step correspond ce panel (via index dans le DOM)
-    const allWraps = [...container.querySelectorAll('.crypto-step-wrap')];
-    const stepIdx  = allWraps.indexOf(wrap);
-
-    // Vérifier si cet event correspond à ce step (envoi ou réception)
-    const isSendStep = Object.entries(SEND_STEP_MAP).some(([k, v]) => k === ev.step && v === stepIdx);
-    const isRecvStep = Object.entries(RECV_STEP_MAP).some(([k, v]) => k === ev.step && v === stepIdx);
-    if (!isSendStep && !isRecvStep) return;
-
-    // Créer ou mettre à jour la zone live dans le panel
-    let liveZone = panel.querySelector<HTMLElement>('.crypto-panel-live');
-    if (!liveZone) {
-      liveZone = document.createElement('div');
-      liveZone.className = 'crypto-panel-live';
-      panel.appendChild(liveZone);
-    }
-
-    const detail = _formatCryptoEvent(ev);
-    const time   = new Date(ev.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    liveZone.innerHTML = `
-      <div class="cpl-header">⚡ Données temps réel — ${time}</div>
-      <div class="cpl-row">${detail || '—'}</div>
-      ${ev.verified !== undefined
-        ? `<div class="cpl-row cpl-verify ${ev.verified ? 'ok' : 'fail'}">
-             ${ev.verified ? '✓ Signature valide' : '✗ Signature INVALIDE'}
-           </div>`
-        : ''}
-    `;
-  });
-}
-
 function setCryptoStatus(state: 'idle' | 'sending' | 'active' | 'error'): void {
   const dot = document.getElementById('crypto-status-dot');
   if (!dot) return;
@@ -1256,8 +1065,12 @@ function renderMessages(messages: DecryptedMessage[]): void {
   const container = document.getElementById('messages-container');
   if (!container) return;
 
+  // Filtrer les messages cachés localement
+  const visible = messages.filter(m => !_hiddenMessages.has(m.id));
+
   // Mettre à jour le cache global pour la recherche + backup
-  if (_currentConvId) _allDecryptedMessages.set(_currentConvId, messages);
+  if (_currentConvId) _allDecryptedMessages.set(_currentConvId, visible);
+  messages = visible;
 
   const newMessages     = messages.filter(m => !_renderedMsgIds.has(m.id));
   const hasNewFromOther = newMessages.some(m => m.senderUid !== _myUid);
@@ -1267,6 +1080,55 @@ function renderMessages(messages: DecryptedMessage[]): void {
     if (msg.senderUid === _myUid) _updateReadReceipt(msg.id, msg.readBy ?? []);
     const bubble = container.querySelector<HTMLElement>(`.message-bubble[data-msg-id="${msg.id}"]`);
     if (bubble) {
+      // ── Tombstone : message supprimé après coup ──────────────────────────
+      if (msg.isDeleted && !bubble.classList.contains('msg-deleted-bubble')) {
+        bubble.classList.add('msg-deleted-bubble');
+        const wrap = bubble.querySelector('.message-text-wrap');
+        if (wrap) wrap.innerHTML = `<p class="message-text msg-deleted-text"><em>Ce message a été supprimé</em></p>`;
+        continue;
+      }
+      // ── Transition texte-placeholder → bulle image/fichier/audio ────────
+      // Quand le preload injecte msg.file après le rendu initial (texte placeholder)
+      if (msg.file && !bubble.querySelector('.image-bubble, .file-bubble, .audio-bubble')) {
+        const existingWrap = bubble.querySelector('.message-text-wrap');
+        if (existingWrap) existingWrap.remove();
+        const f       = msg.file;
+        const sizeStr = _fmtSize(f.size);
+        const isImage = f.type.startsWith('image/');
+        if (f.type.startsWith('audio/')) {
+          bubble.insertBefore(buildAudioBubble(f.blob, f.name), bubble.querySelector('.message-meta'));
+        } else if (isImage) {
+          const imgWrap = document.createElement('div');
+          imgWrap.className = 'image-bubble';
+          imgWrap.title     = escapeHtml(f.name);
+          const objectUrl = URL.createObjectURL(f.blob);
+          const img       = document.createElement('img');
+          img.src          = objectUrl;
+          img.alt          = f.name;
+          img.className    = 'image-bubble-img';
+          img.style.cssText = 'max-width:260px;max-height:200px;border-radius:8px;display:block;cursor:pointer;object-fit:cover';
+          img.addEventListener('load', () => URL.revokeObjectURL(objectUrl));
+          img.addEventListener('error', () => { URL.revokeObjectURL(objectUrl); imgWrap.innerHTML = `<span style="font-size:11px;color:rgba(255,255,255,0.5)">[Image non affichable]</span>`; });
+          img.addEventListener('click', () => _openLightbox(f.blob, f.name, f.size));
+          const caption = document.createElement('div');
+          caption.style.cssText = 'font-size:10px;color:rgba(255,255,255,0.4);margin-top:4px';
+          caption.textContent   = `${escapeHtml(f.name)} · ${sizeStr}`;
+          imgWrap.appendChild(img);
+          imgWrap.appendChild(caption);
+          bubble.insertBefore(imgWrap, bubble.querySelector('.message-meta'));
+        } else {
+          const fileDiv = document.createElement('div');
+          fileDiv.className = 'file-bubble';
+          fileDiv.title     = `Télécharger ${f.name}`;
+          fileDiv.innerHTML = `
+            <div class="file-bubble-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><path d="M4 4h8l4 4v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"/><path d="M12 4v4h4"/></svg></div>
+            <div class="file-bubble-info"><span class="file-bubble-name">${escapeHtml(f.name)}</span><span class="file-bubble-meta">${sizeStr} · ${escapeHtml(f.type.split('/')[1] ?? f.type)}</span></div>
+            <div class="file-bubble-dl"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" width="12" height="12"><path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 12h10"/></svg></div>`;
+          fileDiv.addEventListener('click', () => _downloadBlob(f.blob, f.name));
+          bubble.insertBefore(fileDiv, bubble.querySelector('.message-meta'));
+        }
+        continue;
+      }
       const textEl = bubble.querySelector<HTMLElement>('.message-text');
       if (textEl) {
         const current = textEl.textContent ?? '';
@@ -1280,6 +1142,14 @@ function renderMessages(messages: DecryptedMessage[]): void {
           }
           if (!msg.plaintext.startsWith('[\uD83D\uDD12')) {
             bubble.classList.remove('decryption-pending');
+          }
+        }
+        // ── Mise à jour du label "message modifié" ─────────────────────
+        if (msg.isEdited) {
+          textEl.textContent = msg.plaintext;
+          const wrap = textEl.closest('.message-text-wrap');
+          if (wrap && !wrap.querySelector('.msg-edited-label')) {
+            wrap.insertAdjacentHTML('beforeend', `<span class="msg-edited-label"><em>message modifié</em></span>`);
           }
         }
       }
@@ -1325,58 +1195,109 @@ function renderMessages(messages: DecryptedMessage[]): void {
         }
       </div>`;
 
-    if (msg.file) {
-      // ── Bulle fichier ──────────────────────────────────────────────────
+    if (msg.isDeleted) {
+      // ── Message supprimé (tombstone) ─────────────────────────────────────
+      bubble.classList.add('msg-deleted-bubble');
+      bubble.innerHTML = `
+        <div class="message-text-wrap">
+          <p class="message-text msg-deleted-text"><em>Ce message a été supprimé</em></p>
+        </div>`;
+    } else if (msg.file) {
+      // ── Bulle fichier, image ou audio ──────────────────────────────────
       const f       = msg.file;
       const sizeStr = _fmtSize(f.size);
+      const isImage = f.type.startsWith('image/');
+      const isAudio = f.type.startsWith('audio/');
 
-      const fileDiv = document.createElement('div');
-      fileDiv.className = 'file-bubble';
-      fileDiv.title     = `Télécharger ${f.name}`;
-      fileDiv.innerHTML = `
-        <div class="file-bubble-icon">
-          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16">
-            <path d="M4 4h8l4 4v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"/>
-            <path d="M12 4v4h4"/>
-          </svg>
-        </div>
-        <div class="file-bubble-info">
-          <span class="file-bubble-name">${escapeHtml(f.name)}</span>
-          <span class="file-bubble-meta">${sizeStr} · ${escapeHtml(f.type.split('/')[1] ?? f.type)}</span>
-        </div>
-        <div class="file-bubble-dl">
-          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" width="12" height="12">
-            <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 12h10"/>
-          </svg>
-        </div>`;
+      if (isImage) {
+        // ── Aperçu image inline ──────────────────────────────────────────
+        const imgWrap = document.createElement('div');
+        imgWrap.className = 'image-bubble';
+        imgWrap.title     = escapeHtml(f.name);
 
-      fileDiv.addEventListener('click', () => _downloadBlob(f.blob, f.name));
-      bubble.appendChild(fileDiv);
+        const objectUrl = URL.createObjectURL(f.blob);
+        const img       = document.createElement('img');
+        img.src          = objectUrl;
+        img.alt          = f.name;
+        img.className    = 'image-bubble-img';
+        img.style.cssText = 'max-width:260px;max-height:200px;border-radius:8px;display:block;cursor:pointer;object-fit:cover';
+        img.addEventListener('load', () => URL.revokeObjectURL(objectUrl));
+        img.addEventListener('error', () => {
+          URL.revokeObjectURL(objectUrl);
+          imgWrap.innerHTML = `<span style="font-size:11px;color:rgba(255,255,255,0.5)">[Image non affichable]</span>`;
+        });
+        img.addEventListener('click', () => _openLightbox(f.blob, f.name, f.size));
+
+        const caption = document.createElement('div');
+        caption.style.cssText = 'font-size:10px;color:rgba(255,255,255,0.4);margin-top:4px';
+        caption.textContent   = `${escapeHtml(f.name)} · ${sizeStr}`;
+
+        imgWrap.appendChild(img);
+        imgWrap.appendChild(caption);
+        bubble.appendChild(imgWrap);
+      } else if (isAudio) {
+        // ── Player audio ─────────────────────────────────────────────────
+        bubble.appendChild(buildAudioBubble(f.blob, f.name));
+      } else {
+        // ── Fichier générique ────────────────────────────────────────────
+        const fileDiv = document.createElement('div');
+        fileDiv.className = 'file-bubble';
+        fileDiv.title     = `Télécharger ${f.name}`;
+        fileDiv.innerHTML = `
+          <div class="file-bubble-icon">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16">
+              <path d="M4 4h8l4 4v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"/>
+              <path d="M12 4v4h4"/>
+            </svg>
+          </div>
+          <div class="file-bubble-info">
+            <span class="file-bubble-name">${escapeHtml(f.name)}</span>
+            <span class="file-bubble-meta">${sizeStr} · ${escapeHtml(f.type.split('/')[1] ?? f.type)}</span>
+          </div>
+          <div class="file-bubble-dl">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" width="12" height="12">
+              <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 12h10"/>
+            </svg>
+          </div>`;
+        fileDiv.addEventListener('click', () => _downloadBlob(f.blob, f.name));
+        bubble.appendChild(fileDiv);
+      }
     } else {
-      // ── Bulle texte normale ──────────────────────────────────────────────
+      // ── Bulle texte normale (ou modifiée) ───────────────────────────────
+      const editedLabel = msg.isEdited
+        ? `<span class="msg-edited-label"><em>message modifié</em></span>`
+        : '';
       bubble.innerHTML = `
         <div class="message-text-wrap">
           <p class="message-text">${escapeHtml(msg.plaintext)}</p>
+          ${editedLabel}
         </div>`;
     }
 
     bubble.insertAdjacentHTML('beforeend', metaHtml);
+
+    // Clic droit → menu contextuel
+    bubble.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showMessageContextMenu(e, msg.id, isMine, msg);
+    });
+
     container.appendChild(bubble);
     _renderedMsgIds.add(msg.id);
   }
 
-  // Scroller uniquement si l'utilisateur etait deja en bas (ou si c'est son propre message)
   const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
   if (isAtBottom || newMessages.some(m => m.senderUid === _myUid)) {
     container.scrollTop = container.scrollHeight;
   }
 
-  // Reappliquer la recherche sur les nouveaux messages
   if (_msgSearchQuery) applyMsgSearch(_msgSearchQuery);
 
   if (hasNewFromOther) {
     setCryptoStatus('active');
     showCryptoSteps(RECV_STEPS, 'RÉCEPTION');
+    // Notification push si l'app est en arrière-plan
+    _maybePushNotification(newMessages.filter(m => m.senderUid !== _myUid));
   }
 }
 
@@ -1424,6 +1345,57 @@ function _downloadBlob(blob: Blob, name: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
+// ── Lightbox image ──────────────────────────────────────────────────────────
+let _lightboxBlob: Blob | null = null;
+let _lightboxName = '';
+
+function _openLightbox(blob: Blob, name: string, size: number): void {
+  _lightboxBlob = blob;
+  _lightboxName = name;
+
+  const overlay  = document.getElementById('lightbox-overlay')!;
+  const img      = document.getElementById('lightbox-img') as HTMLImageElement;
+  const fname    = document.getElementById('lightbox-filename')!;
+  const footer   = document.getElementById('lightbox-footer')!;
+
+  const url = URL.createObjectURL(blob);
+  img.src = url;
+  img.alt = name;
+  img.addEventListener('load', () => URL.revokeObjectURL(url), { once: true });
+
+  fname.textContent  = name;
+  footer.textContent = _fmtSize(size);
+
+  overlay.classList.add('active');
+  overlay.style.display = 'flex';
+  document.addEventListener('keydown', _lightboxKeyHandler);
+}
+
+function _closeLightbox(): void {
+  const overlay = document.getElementById('lightbox-overlay')!;
+  const img     = document.getElementById('lightbox-img') as HTMLImageElement;
+  overlay.classList.remove('active');
+  overlay.style.display = 'none';
+  img.src = '';
+  _lightboxBlob = null;
+  document.removeEventListener('keydown', _lightboxKeyHandler);
+}
+
+function _lightboxKeyHandler(e: KeyboardEvent): void {
+  if (e.key === 'Escape') _closeLightbox();
+}
+
+function initLightbox(): void {
+  document.getElementById('lightbox-close')?.addEventListener('click', _closeLightbox);
+  document.getElementById('lightbox-download')?.addEventListener('click', () => {
+    if (_lightboxBlob) _downloadBlob(_lightboxBlob, _lightboxName);
+  });
+  // Clic sur le fond (hors container) ferme le lightbox
+  document.getElementById('lightbox-overlay')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'lightbox-overlay') _closeLightbox();
+  });
+}
+
 function _fmtSize(bytes: number): string {
   if (bytes < 1024)        return `${bytes} o`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
@@ -1435,9 +1407,16 @@ function _fmtSize(bytes: number): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSendMessage(): Promise<void> {
-  // Guard anti-double-submit : double-clic ou Enter+clic simultané
   if (_sendInProgress) return;
   if (!_currentConvId || !_currentContactUid) return;
+
+  // ── Image en attente de confirmation ──────────────────────────────────────
+  if (_pendingImageFile) {
+    const file = _pendingImageFile;
+    cancelPendingImage();
+    await handleSendFile(file);
+    return;
+  }
 
   const input = document.getElementById('message-input') as HTMLTextAreaElement | null;
   if (!input) return;
@@ -1463,9 +1442,8 @@ async function handleSendMessage(): Promise<void> {
   try {
     await sendMessage(_myUid, contactUid, text);
   } catch (err) {
-    const msg = err instanceof Error ? `${err.message}` : String(err);
     console.error('[AQ] sendMessage failed:', err);
-    showToast(`Envoi échoué : ${msg}`);
+    showToast('Envoi échoué. Vérifiez la console.');
     input.value = text;
     clearCryptoBox();
     setCryptoStatus('idle');
@@ -1521,16 +1499,12 @@ async function handleSignOut(): Promise<void> {
   _unsubMessages?.();
   _unsubTyping?.();
   _unsubPreview?.();
-  _unsubTyping       = null;
-  _unsubPreview      = null;
-  _unsubCryptoEvents?.();
-  _unsubCryptoEvents = null;
-  _currentConvId     = null;
-  _localConvs        = [];
-  _renderedMsgIds    = new Set();
+  _unsubTyping    = null;
+  _unsubPreview   = null;
+  _currentConvId  = null;
+  _localConvs     = [];
+  _renderedMsgIds  = new Set();
   _allDecryptedMessages.clear();
-  _cryptoLog.length  = 0;
-  closeCryptoPopup();
   closeMsgSearch();
   await signOut();
 }
@@ -1582,7 +1556,6 @@ function applyMsgSearch(query: string): void {
   const countEl = document.getElementById('msg-search-count') as HTMLElement | null;
 
   if (!_msgSearchQuery) {
-    // Mode normal — tout afficher sans highlight
     container.classList.remove('searching');
     container.querySelectorAll<HTMLElement>('.message-bubble').forEach(bubble => {
       bubble.classList.remove('search-match');
@@ -1625,7 +1598,6 @@ function applyMsgSearch(query: string): void {
     }
   });
 
-  // Compteur de résultats dans la barre de recherche
   let counter = document.getElementById('msg-search-count') as HTMLElement | null;
   const wrap  = document.getElementById('msg-search-wrap');
   if (!counter && wrap) {
@@ -1643,7 +1615,6 @@ function applyMsgSearch(query: string): void {
     counter.style.color = matchCount === 0 ? 'var(--c-red)' : 'var(--c-muted)';
   }
 
-  // Scroller jusqu'au premier résultat
   if (firstMatchEl) {
     (firstMatchEl as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
@@ -1694,7 +1665,6 @@ async function confirmBackupExport(): Promise<void> {
   };
 
   try {
-    // Collecter toutes les conversations chargées en mémoire
     const convs: BackupConversation[] = [];
     for (const [convId, msgs] of _allDecryptedMessages.entries()) {
       const conv = _localConvs.find(c => c.id === convId);
@@ -1758,7 +1728,6 @@ function openSessionExportModal(): void {
   if (confirmBtn) {
     confirmBtn.disabled = false;
     confirmBtn.innerHTML = `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px"><path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/></svg>Générer &amp; Télécharger`;
-    // Reset onclick to default handler
     confirmBtn.onclick = null;
   }
   const prog = document.getElementById('session-export-progress');
@@ -1799,7 +1768,6 @@ async function confirmSessionExport(): Promise<void> {
 
     _sessionExportFileJson = fileJson;
 
-    // Afficher les mots mnémotechniques dans la grille
     if (grid) {
       grid.innerHTML = '';
       mnemonic.forEach((word, i) => {
@@ -1821,6 +1789,7 @@ async function confirmSessionExport(): Promise<void> {
       confirmBtn.onclick = () => {
         if (_sessionExportFileJson) downloadSessionFile(_sessionExportFileJson);
         closeSessionExportModal();
+        markSessionExported();
         showToast('Clés exportées avec succès. Gardez vos 10 mots en sécurité !');
       };
     }
@@ -1908,6 +1877,299 @@ async function confirmSessionImport(): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Avertissement fermeture d'onglet
+//
+// 1. `beforeunload` → dialog natif du navigateur (fermeture effective de l'onglet)
+//    NB : les navigateurs modernes ignorent tout texte personnalisé — seul le
+//    déclenchement du dialog est contrôlable.
+// 2. Ctrl+W / Cmd+W → modal personnalisée ; non-fermable via Enter (seulement clic)
+// 3. Bandeau persistant dans l'UI jusqu'à l'export des clés
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _closeWarningActive = false;
+
+// Flag in-memory (remis à zéro à chaque connexion) — évite les clés localStorage
+// périmées qui masqueraient le bandeau même si l'utilisateur n'a pas exporté.
+let _exportedThisSession = false;
+
+function isSessionExported(): boolean {
+  return _exportedThisSession;
+}
+
+function markSessionExported(): void {
+  _exportedThisSession = true;
+  const banner = document.getElementById('export-warning-banner');
+  if (banner) banner.style.display = 'none';
+}
+
+function initExportWarningBanner(): void {
+  if (isSessionExported()) return;
+  const banner = document.getElementById('export-warning-banner');
+  if (!banner) {
+    console.warn('[AQ] export-warning-banner introuvable dans le DOM');
+    return;
+  }
+  banner.style.display = 'flex';
+  banner.addEventListener('click', () => openSessionExportModal());
+}
+
+function initCloseWarning(): void {
+  // beforeunload — déclenché seulement si les clés ne sont pas encore exportées
+  const onBeforeUnload = (e: BeforeUnloadEvent) => {
+    if (isSessionExported()) return; // clés sauvegardées → pas d'avertissement
+    e.preventDefault();
+    e.returnValue = '';
+  };
+  window.addEventListener('beforeunload', onBeforeUnload);
+
+  // Ctrl+W / Cmd+W — intercepte avant que le navigateur ferme l'onglet
+  window.addEventListener('keydown', (e: KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
+      if (isSessionExported()) return; // clés sauvegardées → laisser fermer normalement
+      e.preventDefault();
+      showCloseWarningModal();
+    }
+  });
+
+  // Boutons du modal
+  document.getElementById('btn-close-cancel')?.addEventListener('click', hideCloseWarningModal);
+  document.getElementById('modal-close-warning')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'modal-close-warning') hideCloseWarningModal();
+  });
+
+  const btnCloseAnyway = document.getElementById('btn-close-anyway');
+  if (btnCloseAnyway) {
+    // Bloquer la fermeture via Enter — uniquement clic souris
+    btnCloseAnyway.addEventListener('keydown', (e) => e.preventDefault());
+    btnCloseAnyway.addEventListener('click', () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      hideCloseWarningModal();
+      window.close();
+    });
+  }
+}
+
+function showCloseWarningModal(): void {
+  if (_closeWarningActive) return;
+  _closeWarningActive = true;
+  const modal = document.getElementById('modal-close-warning');
+  if (modal) modal.style.display = 'flex';
+  // Focus sur "Rester" — pas sur "Fermer quand même" — pour éviter Enter accidentel
+  setTimeout(() => document.getElementById('btn-close-cancel')?.focus(), 60);
+}
+
+function hideCloseWarningModal(): void {
+  _closeWarningActive = false;
+  const modal = document.getElementById('modal-close-warning');
+  if (modal) modal.style.display = 'none';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Notifications push — affichées uniquement quand l'app est en arrière-plan
+//
+// Pas de notification si :
+//  - La page est visible (document.visibilityState === 'visible')
+//  - L'API Notification n'est pas disponible
+//  - La permission a été refusée
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _notificationPermission: NotificationPermission = 'default';
+
+function initPushNotifications(): void {
+  if (!('Notification' in window)) return;
+
+  // Lire la permission actuelle (sans demander — certains navigateurs
+  // bloquent requestPermission() sans geste utilisateur)
+  _notificationPermission = Notification.permission;
+
+  if (_notificationPermission === 'default') {
+    // Demander dès que l'utilisateur interagit avec la page (premier clic)
+    const askOnce = (): void => {
+      Notification.requestPermission()
+        .then(perm => { _notificationPermission = perm; })
+        .catch(() => { /* bloqué */ });
+      document.removeEventListener('click', askOnce);
+    };
+    document.addEventListener('click', askOnce, { once: true });
+  }
+}
+
+function _maybePushNotification(newFromOther: import('../types/message').DecryptedMessage[]): void {
+  if (!('Notification' in window)) return;
+  if (_notificationPermission !== 'granted') return;
+  if (newFromOther.length === 0) return;
+  // Pas de notif si la conversation est déjà ouverte ET l'onglet a le focus
+  if (document.visibilityState === 'visible' && document.hasFocus()) return;
+
+  // Regrouper toutes les nouvelles bulles en une seule notification
+  const msg = newFromOther[newFromOther.length - 1];
+  const senderLabel = msg.senderUid.slice(0, 8) + '…';
+  const preview = msg.file
+    ? `📎 ${msg.file.name}`
+    : msg.plaintext.startsWith('[\uD83D\uDD12')
+      ? '🔒 Message chiffré'
+      : msg.plaintext.slice(0, 60) + (msg.plaintext.length > 60 ? '…' : '');
+
+  try {
+    const n = new Notification(`AegisQuantum — ${senderLabel}`, {
+      body: preview,
+      icon: '/BIGLOGO.png',
+      tag : 'aq-msg',          // remplace la notif précédente (anti-spam)
+      silent: false,
+    });
+    // Clic sur la notification → focus l'onglet
+    n.onclick = () => { window.focus(); n.close(); };
+  } catch {
+    /* ServiceWorker manquant ou contexte non-sécurisé */
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Suppression de compte
+// ─────────────────────────────────────────────────────────────────────────────
+
+function openDeleteAccountModal(): void {
+  const modal = document.getElementById('modal-delete-account');
+  const input = document.getElementById('modal-delete-account-confirm-input') as HTMLInputElement | null;
+  const btn   = document.getElementById('modal-delete-account-confirm') as HTMLButtonElement | null;
+  if (input) input.value = '';
+  if (btn)   btn.disabled = true;
+  if (modal) modal.style.display = 'flex';
+  setTimeout(() => input?.focus(), 60);
+}
+
+function closeDeleteAccountModal(): void {
+  const modal = document.getElementById('modal-delete-account');
+  if (modal) modal.style.display = 'none';
+}
+
+async function confirmDeleteAccount(): Promise<void> {
+  const btn = document.getElementById('modal-delete-account-confirm') as HTMLButtonElement | null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Suppression…'; }
+
+  try {
+    await deleteAccount(_myUid);
+    // La suppression Firebase Auth déclenche onAuthStateChanged → retour login
+  } catch (err) {
+    console.error('[AQ] Delete account failed:', err);
+    showToast('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+    if (btn) { btn.disabled = false; btn.textContent = 'Supprimer définitivement'; }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Menu contextuel — messages
+// ─────────────────────────────────────────────────────────────────────────────
+
+function initMessageContextMenu(): void {
+  const menu = document.getElementById('msg-context-menu');
+  if (!menu) return;
+
+  document.addEventListener('click', () => hideContextMenu());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideContextMenu(); });
+
+  document.getElementById('ctx-delete-for-me')?.addEventListener('click', async () => {
+    if (!_ctxMsgId) return;
+    hideContextMenu();
+    await deleteMessageForMe(_myUid, _ctxMsgId);
+    _hiddenMessages.add(_ctxMsgId);
+    removeBubbleFromDom(_ctxMsgId);
+    _ctxMsgId = null;
+  });
+
+  document.getElementById('ctx-delete-for-both')?.addEventListener('click', async () => {
+    if (!_ctxMsgId || !_ctxConvId) return;
+    hideContextMenu();
+    const msgId            = _ctxMsgId;
+    const convId           = _ctxConvId;
+    const kemCiphertext    = _ctxKemCiphertext;
+    const initKemCiphertext = _ctxInitKemCiphertext;
+    const messageIndex     = _ctxMessageIndex;
+    _ctxMsgId = null;
+    try {
+      await deleteMessageForBoth(convId, msgId, kemCiphertext, initKemCiphertext, messageIndex);
+      // Ne pas retirer du DOM — subscribeToMessages va pousser le tombstone
+    } catch (err) {
+      showToast('Suppression échouée : ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  document.getElementById('ctx-edit-message')?.addEventListener('click', () => {
+    if (!_ctxMsgId) return;
+    hideContextMenu();
+    const textarea = document.getElementById('edit-message-input') as HTMLTextAreaElement | null;
+    if (textarea) textarea.value = _ctxPlaintext;
+    const modal = document.getElementById('modal-edit-message');
+    if (modal) modal.style.display = 'flex';
+    setTimeout(() => textarea?.focus(), 60);
+  });
+
+  document.getElementById('btn-edit-cancel')?.addEventListener('click', () => {
+    const modal = document.getElementById('modal-edit-message');
+    if (modal) modal.style.display = 'none';
+  });
+
+  document.getElementById('btn-edit-confirm')?.addEventListener('click', async () => {
+    const textarea = document.getElementById('edit-message-input') as HTMLTextAreaElement | null;
+    const newText  = textarea?.value.trim() ?? '';
+    if (!newText || !_ctxMsgId || !_ctxConvId) return;
+    const modal = document.getElementById('modal-edit-message');
+    if (modal) modal.style.display = 'none';
+    const msgId            = _ctxMsgId;
+    const convId           = _ctxConvId;
+    const kemCiphertext    = _ctxKemCiphertext;
+    const initKemCiphertext = _ctxInitKemCiphertext;
+    const messageIndex     = _ctxMessageIndex;
+    _ctxMsgId = null;
+    try {
+      await editMessage(convId, msgId, newText, kemCiphertext, initKemCiphertext, messageIndex);
+    } catch (err) {
+      showToast('Modification échouée : ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
+}
+
+function showMessageContextMenu(e: MouseEvent, msgId: string, isMine: boolean, msg: DecryptedMessage): void {
+  const menu    = document.getElementById('msg-context-menu');
+  const btnBoth = document.getElementById('ctx-delete-for-both') as HTMLElement | null;
+  const btnEdit = document.getElementById('ctx-edit-message')    as HTMLElement | null;
+  if (!menu) return;
+
+  _ctxMsgId              = msgId;
+  _ctxConvId             = _currentConvId;
+  _ctxKemCiphertext      = msg.kemCiphertext      ?? "";
+  _ctxInitKemCiphertext  = msg.initKemCiphertext;
+  _ctxMessageIndex       = msg.messageIndex       ?? 0;
+  _ctxPlaintext          = msg.plaintext;
+
+  const showOwnerActions = isMine && !msg.isDeleted;
+  const isTextMsg = !msg.messageType || msg.messageType === 'text';
+  if (btnBoth) btnBoth.style.display = showOwnerActions ? '' : 'none';
+  if (btnEdit) btnEdit.style.display = (showOwnerActions && isTextMsg) ? '' : 'none';
+
+  const x = Math.min(e.clientX, window.innerWidth  - 190);
+  const y = Math.min(e.clientY, window.innerHeight - 80);
+  menu.style.left    = `${x}px`;
+  menu.style.top     = `${y}px`;
+  menu.style.display = '';
+}
+
+function hideContextMenu(): void {
+  const menu = document.getElementById('msg-context-menu');
+  if (menu) menu.style.display = 'none';
+}
+
+function removeBubbleFromDom(msgId: string): void {
+  const bubble = document.querySelector<HTMLElement>(`.message-bubble[data-msg-id="${msgId}"]`);
+  bubble?.remove();
+  _renderedMsgIds.delete(msgId);
+  if (_currentConvId) {
+    const msgs = _allDecryptedMessages.get(_currentConvId) ?? [];
+    _allDecryptedMessages.set(_currentConvId, msgs.filter(m => m.id !== msgId));
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Utilitaires
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1921,4 +2183,276 @@ function showToast(msg: string): void {
   toast.textContent = msg;
   document.body.appendChild(toast);
   setTimeout(() => toast.remove(), 4000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MESSAGES VOCAUX — enregistrement + rendu audio player
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _mediaRecorder: MediaRecorder | null = null;
+let _audioChunks: BlobPart[]             = [];
+let _recordingStart  = 0;
+let _recordingTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Formats seconds → "m:ss" */
+function _fmtDuration(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function _setRecordingUI(active: boolean): void {
+  const btn       = document.getElementById('btn-record-voice');
+  const bar       = document.getElementById('recording-bar');
+  const input     = document.getElementById('message-input') as HTMLTextAreaElement | null;
+  const micIdle   = document.getElementById('icon-mic-idle');
+  const micStop   = document.getElementById('icon-mic-stop');
+
+  if (active) {
+    btn?.classList.add('recording');
+    if (bar)   bar.style.display   = 'flex';
+    if (input) input.style.display = 'none';
+    if (micIdle) micIdle.style.display = 'none';
+    if (micStop) micStop.style.display = '';
+  } else {
+    btn?.classList.remove('recording');
+    if (bar)   bar.style.display   = 'none';
+    if (input) input.style.display = '';
+    if (micIdle) micIdle.style.display = '';
+    if (micStop) micStop.style.display = 'none';
+    const timer     = document.getElementById('recording-timer');
+    const hint      = document.getElementById('recording-hint');
+    const cancelBtn = document.getElementById('btn-cancel-pending');
+    if (timer)     timer.textContent         = '0:00';
+    if (hint)      hint.textContent          = 'Relâcher pour envoyer';
+    if (cancelBtn) cancelBtn.style.display   = 'none';
+  }
+}
+
+async function startVoiceRecording(): Promise<void> {
+  if (_mediaRecorder) return; // déjà en cours
+
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    showToast('Microphone inaccessible — vérifiez les permissions');
+    return;
+  }
+
+  // Choisir le codec le plus compatible
+  const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/ogg']
+    .find(t => MediaRecorder.isTypeSupported(t)) ?? '';
+
+  _audioChunks    = [];
+  _recordingStart = Date.now();
+  _mediaRecorder  = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+
+  _mediaRecorder.addEventListener('dataavailable', (e) => {
+    if (e.data.size > 0) _audioChunks.push(e.data);
+  });
+
+  _mediaRecorder.addEventListener('stop', () => {
+    stream.getTracks().forEach(t => t.stop());
+    const duration = _pendingAudioDuration || (Date.now() - _recordingStart) / 1000;
+    if (duration < 0.5) { _setRecordingUI(false); return; }
+
+    const mtype = mimeType || 'audio/webm';
+    const ext   = mtype.startsWith('audio/ogg') ? 'ogg' : 'webm';
+    const blob  = new Blob(_audioChunks, { type: mtype });
+    _pendingAudioFile = new File([blob], `vocal_${Date.now()}.${ext}`, { type: mtype });
+    _setPendingUI(_pendingAudioFile, duration);
+  });
+
+  _mediaRecorder.start(100); // chunks de 100 ms
+  _setRecordingUI(true);
+
+  // Timer d'affichage
+  const timerEl = document.getElementById('recording-timer');
+  _recordingTimer = setInterval(() => {
+    const elapsed = (Date.now() - _recordingStart) / 1000;
+    if (timerEl) timerEl.textContent = _fmtDuration(elapsed);
+    // Limite de sécurité : 2 min max
+    if (elapsed >= 120) stopVoiceRecording();
+  }, 200);
+}
+
+let _pendingAudioFile:    File | null = null;
+let _pendingAudioDuration             = 0;
+let _pendingImageFile:    File | null = null;
+
+function stopVoiceRecording(): void {
+  if (!_mediaRecorder || _mediaRecorder.state === 'inactive') return;
+  if (_recordingTimer) { clearInterval(_recordingTimer); _recordingTimer = null; }
+  _pendingAudioDuration = (Date.now() - _recordingStart) / 1000;
+  _mediaRecorder.stop();
+  _mediaRecorder = null;
+  // Don't reset UI yet — wait for 'stop' event to set pending state
+}
+
+function _setPendingUI(file: File, duration: number): void {
+  const bar       = document.getElementById('recording-bar');
+  const input     = document.getElementById('message-input') as HTMLTextAreaElement | null;
+  const timer     = document.getElementById('recording-timer');
+  const hint      = document.getElementById('recording-hint');
+  const dot       = bar?.querySelector<HTMLElement>('.recording-dot');
+  const level     = document.getElementById('recording-level');
+  const cancelBtn = document.getElementById('btn-cancel-pending');
+  if (bar)       bar.style.display          = 'flex';
+  if (input)     input.style.display        = 'none';
+  if (timer)     timer.textContent          = _fmtDuration(duration);
+  if (hint)      hint.textContent           = 'Appuyer sur Envoyer — ou × pour annuler';
+  if (dot)       dot.style.animation        = 'none';
+  if (level)     { level.style.width = '100%'; level.style.background = 'rgba(123,159,249,0.5)'; }
+  if (cancelBtn) cancelBtn.style.display    = 'flex';
+  const micIdle = document.getElementById('icon-mic-idle');
+  const micStop = document.getElementById('icon-mic-stop');
+  if (micIdle) micIdle.style.display = '';
+  if (micStop) micStop.style.display = 'none';
+  const btn = document.getElementById('btn-record-voice');
+  btn?.classList.remove('recording');
+  void file; // suppress unused warning
+}
+
+function _setPendingImageUI(file: File): void {
+  const bar       = document.getElementById('recording-bar');
+  const input     = document.getElementById('message-input') as HTMLTextAreaElement | null;
+  const timer     = document.getElementById('recording-timer');
+  const hint      = document.getElementById('recording-hint');
+  const dot       = bar?.querySelector<HTMLElement>('.recording-dot');
+  const level     = document.getElementById('recording-level');
+  const cancelBtn = document.getElementById('btn-cancel-pending');
+  if (bar)       bar.style.display          = 'flex';
+  if (input)     input.style.display        = 'none';
+  if (timer)     timer.textContent          = file.name;
+  if (hint)      hint.textContent           = 'Appuyer sur Envoyer — ou × pour annuler';
+  if (dot)       dot.style.animation        = 'none';
+  if (level)     { level.style.width = '100%'; level.style.background = 'rgba(107,143,245,0.45)'; }
+  if (cancelBtn) cancelBtn.style.display    = 'flex';
+}
+
+function cancelPendingAudio(): void {
+  _pendingAudioFile     = null;
+  _pendingAudioDuration = 0;
+  _setRecordingUI(false);
+}
+
+function cancelPendingImage(): void {
+  _pendingImageFile = null;
+  _setRecordingUI(false);
+}
+
+export function initVoiceRecording(): void {
+  const btn = document.getElementById('btn-record-voice');
+  if (!btn) return;
+
+  btn.addEventListener('click', () => {
+    if (_pendingAudioFile) {
+      // En mode pending : re-clic sur micro = annuler
+      cancelPendingAudio();
+    } else if (_mediaRecorder && _mediaRecorder.state !== 'inactive') {
+      stopVoiceRecording();
+    } else {
+      startVoiceRecording();
+    }
+  });
+
+  // Bouton send → envoie le vocal si pending
+  document.getElementById('btn-send')?.addEventListener('click', async () => {
+    if (!_pendingAudioFile) return; // géré normalement par handleSendMessage
+    const file = _pendingAudioFile;
+    cancelPendingAudio();
+    if (!_currentContactUid) return;
+    try {
+      await sendFile(_myUid, _currentContactUid, file);
+      showToast('Message vocal chiffré envoyé');
+    } catch (err) {
+      showToast(`Échec envoi vocal : ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, { capture: true }); // capture: true pour intercepter avant handleSendMessage
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RENDU BULLE AUDIO
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Crée une bulle audio avec player intégré */
+export function buildAudioBubble(blob: Blob, name: string): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'audio-bubble';
+
+  // Générer des barres de waveform simulée (hauteurs pseudo-aléatoires déterministes)
+  const BAR_COUNT = 28;
+  const bars: number[] = [];
+  let seed = name.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+  for (let i = 0; i < BAR_COUNT; i++) {
+    seed = (seed * 1664525 + 1013904223) & 0xffffffff;
+    bars.push(6 + ((seed >>> 0) % 18)); // hauteur 6–24px
+  }
+
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+
+  // Bouton play/pause
+  const playBtn = document.createElement('button');
+  playBtn.className = 'audio-play-btn';
+  playBtn.title     = 'Lire / Pause';
+  playBtn.innerHTML = `<svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path d="M6 4l12 6-12 6V4Z"/></svg>`;
+
+  // Corps : waveform + temps
+  const body = document.createElement('div');
+  body.className = 'audio-body';
+
+  const waveform = document.createElement('div');
+  waveform.className = 'audio-waveform';
+  bars.forEach((h, i) => {
+    const bar = document.createElement('div');
+    bar.className = 'audio-waveform-bar';
+    bar.style.height = `${h}px`;
+    bar.dataset.idx  = String(i);
+    waveform.appendChild(bar);
+  });
+
+  const timeEl = document.createElement('span');
+  timeEl.className   = 'audio-time';
+  timeEl.textContent = '0:00';
+
+  body.appendChild(waveform);
+  body.appendChild(timeEl);
+
+  wrap.appendChild(playBtn);
+  wrap.appendChild(body);
+
+  // Mettre à jour la durée affichée dès que le metadata est chargé
+  audio.addEventListener('loadedmetadata', () => {
+    if (isFinite(audio.duration)) timeEl.textContent = _fmtDuration(audio.duration);
+  });
+
+  // Play / Pause
+  const pauseSvg = `<svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><rect x="4" y="4" width="4" height="12" rx="1"/><rect x="12" y="4" width="4" height="12" rx="1"/></svg>`;
+  const playSvg  = `<svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path d="M6 4l12 6-12 6V4Z"/></svg>`;
+  playBtn.addEventListener('click', () => {
+    if (audio.paused) { audio.play(); playBtn.innerHTML = pauseSvg; }
+    else              { audio.pause(); playBtn.innerHTML = playSvg; }
+  });
+  audio.addEventListener('ended', () => { playBtn.innerHTML = playSvg; });
+
+  // Progression → colore les barres
+  audio.addEventListener('timeupdate', () => {
+    const progress = audio.duration ? audio.currentTime / audio.duration : 0;
+    timeEl.textContent = _fmtDuration(audio.currentTime);
+    waveform.querySelectorAll<HTMLElement>('.audio-waveform-bar').forEach((bar, i) => {
+      bar.classList.toggle('played', i / BAR_COUNT < progress);
+    });
+  });
+
+  // Clic sur la waveform → seek
+  waveform.addEventListener('click', (e) => {
+    if (!audio.duration) return;
+    const rect = waveform.getBoundingClientRect();
+    const ratio = (e.clientX - rect.left) / rect.width;
+    audio.currentTime = ratio * audio.duration;
+  });
+
+  return wrap;
 }

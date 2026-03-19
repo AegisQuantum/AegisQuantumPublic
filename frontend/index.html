@@ -135,6 +135,32 @@
             <button id="submit-btn" class="btn-primary">
               <span id="btn-label">Sign in</span>
             </button>
+
+            <!-- ── Import session sur un nouvel appareil (collapsible) ── -->
+            <button id="btn-toggle-session-import" type="button" style="background:none;border:none;color:var(--text-muted);font-size:0.78rem;font-family:var(--font-sans);cursor:pointer;display:flex;align-items:center;gap:6px;padding:4px 0;width:100%;justify-content:center;margin-top:4px;transition:color 0.15s">
+              <svg id="session-import-chevron" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" style="width:12px;height:12px;transition:transform 0.2s"><path d="M2 4l4 4 4-4"/></svg>
+              Nouvel appareil ? Importer une session
+            </button>
+
+            <div id="login-session-import-panel" style="display:none;flex-direction:column;gap:10px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);margin-top:4px">
+              <p style="font-size:0.75rem;color:var(--text-muted);margin:0">Sélectionnez votre fichier <code>.aqsession</code> et saisissez votre phrase de 10 mots.</p>
+              <div style="display:flex;flex-direction:column;gap:4px">
+                <label style="font-size:0.75rem;color:#a1a1aa;font-family:var(--font-sans)">Fichier .aqsession</label>
+                <input id="login-session-file" type="file" accept=".aqsession" style="font-size:0.8rem;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:5px 8px;cursor:pointer" />
+              </div>
+              <div style="display:flex;flex-direction:column;gap:4px">
+                <label style="font-size:0.75rem;color:#a1a1aa;font-family:var(--font-sans);display:flex;align-items:center;justify-content:space-between">
+                  Phrase de 10 mots
+                  <button id="login-mnemonic-toggle" type="button" style="background:none;border:none;cursor:pointer;color:var(--text-muted);padding:0;display:flex">
+                    <svg id="login-mnemonic-eye" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="width:13px;height:13px"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z"/><line x1="2" y1="2" x2="14" y2="14"/></svg>
+                  </button>
+                </label>
+                <textarea id="login-session-mnemonic" rows="2" placeholder="mot1 mot2 mot3 … mot10" style="-webkit-text-security:disc;text-security:disc;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:7px 10px;resize:none;outline:none"></textarea>
+              </div>
+              <button id="btn-login-and-import" class="btn-primary" style="margin-top:2px">
+                <span id="btn-login-import-label">Se connecter et importer</span>
+              </button>
+            </div>
           </div>
 
           <p class="privacy-note">
@@ -171,95 +197,61 @@
       </div>
     </div>
 
-    <!-- VAULT RECOVERY SCREEN — Affiché quand Firebase Auth réussit mais le vault IDB est absent -->
-    <div id="vault-recovery-screen" class="screen hidden">
-      <div class="cp-wrap">
-        <div class="cp-card" style="max-width:480px">
-          <div class="cp-logo">
-            <img src="/BIGLOGO.png" alt="AQ" />
-          </div>
-          <h2 class="cp-title">Clés privées introuvables</h2>
-          <p class="cp-subtitle">
-            Ce navigateur ne possède pas vos clés cryptographiques.
-            Importez votre fichier <code style="font-size:11px;background:rgba(255,255,255,0.08);padding:2px 6px;border-radius:4px;font-family:'IBM Plex Mono',monospace">.aqsession</code>
-            pour retrouver l'accès à vos conversations.
-          </p>
+    <!-- VAULT RECOVERY SCREEN (vault IDB absent — import ou repartir de zéro) -->
+    <div id="vault-recovery-screen" class="screen hidden" style="align-items:center;justify-content:center;background:var(--bg)">
+      <div style="max-width:480px;width:100%;padding:2rem;display:flex;flex-direction:column;gap:1.5rem">
 
-          <div id="vr-form" style="display:flex;flex-direction:column;gap:14px">
-
-            <div class="cp-field">
-              <label for="vr-file" style="font-size:12px">Fichier .aqsession</label>
-              <input type="file" id="vr-file" accept=".aqsession,.json"
-                style="color:rgba(255,255,255,0.65);font-size:12px;font-family:inherit;cursor:pointer" />
-            </div>
-
-            <div class="cp-field">
-              <label for="vr-mnemonic" style="font-size:12px">Phrase de 10 mots</label>
-              <div style="position:relative">
-                <textarea id="vr-mnemonic" rows="2" autocomplete="off" spellcheck="false"
-                  autocorrect="off" autocapitalize="off"
-                  placeholder="mot1 mot2 mot3 mot4 mot5 mot6 mot7 mot8 mot9 mot10"
-                  style="width:100%;box-sizing:border-box;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:10px 36px 10px 12px;color:inherit;font-family:'IBM Plex Mono',monospace;font-size:12px;resize:vertical;outline:none;line-height:1.5;-webkit-text-security:disc;text-security:disc"></textarea>
-                <button id="vr-mnemonic-toggle" type="button" aria-label="Afficher/masquer la phrase"
-                  style="position:absolute;top:9px;right:9px;background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.35);padding:2px;line-height:0;transition:color 0.15s"
-                  onmouseover="this.style.color='rgba(255,255,255,0.7)'"
-                  onmouseout="this.style.color='rgba(255,255,255,0.35)'">
-                  <svg id="vr-mnemonic-eye" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14">
-                    <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z"/>
-                    <line x1="2" y1="2" x2="14" y2="14"/>
-                  </svg>
-                </button>
-              </div>
-            </div>
-
-            <div id="vr-status" class="status-msg"></div>
-
-            <div id="vr-progress" style="display:none;flex-direction:column;gap:6px">
-              <div style="background:rgba(255,255,255,0.1);border-radius:4px;height:3px;overflow:hidden">
-                <div id="vr-progress-fill" style="height:100%;background:#6b8ff5;width:0%;transition:width 0.3s ease"></div>
-              </div>
-              <span id="vr-progress-label" style="font-size:11px;color:rgba(255,255,255,0.45)"></span>
-            </div>
-
-            <button id="vr-import-btn" class="btn-primary">
-              <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:5px;vertical-align:-1px">
-                <path d="M7 9V2M4 6l3-3 3 3"/><path d="M2 11h10"/>
-              </svg>
-              Importer les clés
-            </button>
-
-            <div style="display:flex;align-items:center;gap:10px">
-              <div style="flex:1;height:1px;background:rgba(255,255,255,0.1)"></div>
-              <span style="font-size:11px;color:rgba(255,255,255,0.3)">ou</span>
-              <div style="flex:1;height:1px;background:rgba(255,255,255,0.1)"></div>
-            </div>
-
-            <button id="vr-readonly-btn"
-              style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:8px;color:rgba(255,255,255,0.5);font-family:inherit;font-size:12px;padding:9px 14px;cursor:pointer;transition:background 0.15s;width:100%"
-              onmouseover="this.style.background='rgba(255,255,255,0.05)'"
-              onmouseout="this.style.background='none'">
-              Continuer sans clés — les messages resteront chiffrés
-            </button>
-
-            <div style="display:flex;align-items:center;gap:10px">
-              <div style="flex:1;height:1px;background:rgba(255,255,255,0.1)"></div>
-              <span style="font-size:11px;color:rgba(255,255,255,0.3)">ou</span>
-              <div style="flex:1;height:1px;background:rgba(255,255,255,0.1)"></div>
-            </div>
-
-            <button id="vr-fresh-btn"
-              style="background:none;border:1px solid rgba(252,129,129,0.3);border-radius:8px;color:#fc8181;font-family:inherit;font-size:12px;padding:9px 14px;cursor:pointer;transition:background 0.15s;width:100%"
-              onmouseover="this.style.background='rgba(252,129,129,0.07)'"
-              onmouseout="this.style.background='none'">
-              Démarrer de zéro — générer de nouvelles clés
-            </button>
-
-          </div>
-
-          <p class="cp-hint" style="margin-top:18px">
-            Exportez vos clés via <strong>Paramètres → Clés de session</strong> sur votre appareil d'origine.
+        <div style="text-align:center">
+          <img src="/BIGLOGO.png" alt="AQ" style="width:56px;height:56px;margin-bottom:1rem" />
+          <h2 style="font-size:1.25rem;font-weight:600;color:var(--text);margin:0 0 0.5rem">Clés introuvables</h2>
+          <p style="font-size:0.85rem;color:var(--text-muted);margin:0;line-height:1.5">
+            Vos clés cryptographiques locales sont absentes de ce navigateur.<br>
+            Importez votre fichier <code>.aqsession</code> pour retrouver vos conversations.
           </p>
         </div>
+
+        <div id="vr-status" class="status-msg"></div>
+
+        <!-- Import session -->
+        <div style="display:flex;flex-direction:column;gap:12px;padding:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md)">
+          <h3 style="font-size:0.85rem;font-weight:600;color:var(--text);margin:0">Importer une session</h3>
+
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:0.78rem;color:#a1a1aa;font-family:var(--font-sans)">Fichier .aqsession</label>
+            <input id="vr-file" type="file" accept=".aqsession" style="font-size:0.8rem;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 8px;cursor:pointer" />
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:0.78rem;color:#a1a1aa;font-family:var(--font-sans);display:flex;align-items:center;justify-content:space-between">
+              Phrase de 10 mots
+              <button id="vr-mnemonic-toggle" type="button" style="background:none;border:none;cursor:pointer;color:var(--text-muted);padding:0;display:flex">
+                <svg id="vr-mnemonic-eye" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="width:13px;height:13px"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z"/><line x1="2" y1="2" x2="14" y2="14"/></svg>
+              </button>
+            </label>
+            <textarea id="vr-mnemonic" rows="2" placeholder="mot1 mot2 mot3 … mot10" style="-webkit-text-security:disc;text-security:disc;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:7px 10px;resize:none;outline:none;width:100%;box-sizing:border-box"></textarea>
+          </div>
+
+          <!-- Barre de progression (masquée par défaut) -->
+          <div id="vr-progress" style="display:none;flex-direction:column;gap:6px">
+            <div style="height:4px;background:var(--border);border-radius:4px;overflow:hidden">
+              <div id="vr-progress-fill" style="height:100%;width:0%;background:var(--accent);border-radius:4px;transition:width 0.3s ease"></div>
+            </div>
+            <span id="vr-progress-label" style="font-size:0.72rem;color:var(--text-muted);font-family:var(--font-mono)"></span>
+          </div>
+
+          <button id="vr-import-btn" class="btn-primary">Importer et continuer</button>
+        </div>
+
+        <!-- Options alternatives -->
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <button id="vr-readonly-btn" type="button" style="background:none;border:1px solid var(--border);border-radius:var(--radius-md);color:var(--text-muted);font-family:var(--font-sans);font-size:0.8rem;padding:0.6rem;cursor:pointer;transition:border-color 0.15s,color 0.15s">
+            Continuer sans clés (lecture seule — messages chiffrés)
+          </button>
+          <button id="vr-fresh-btn" type="button" style="background:none;border:1px solid rgba(220,38,38,0.3);border-radius:var(--radius-md);color:#f87171;font-family:var(--font-sans);font-size:0.8rem;padding:0.6rem;cursor:pointer;transition:border-color 0.15s,color 0.15s">
+            Démarrer de zéro — générer de nouvelles clés
+          </button>
+        </div>
+
       </div>
     </div>
 
