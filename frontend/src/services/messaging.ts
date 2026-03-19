@@ -41,7 +41,7 @@ import {
 } from "firebase/firestore";
 import { toBase64 as _toB64 } from "../crypto/kem";
 import { db }            from "./firebase";
-import { getPublicKeys } from "./key-registry";
+import { getPublicKeys, clearPublicKeysCache } from "./key-registry";
 import { getKemPrivateKey, getDsaPrivateKey, saveRatchetState, loadRatchetState, deleteRatchetState, saveMsgCache, loadMsgCache, deleteMsgCache } from "./key-store";
 import { hideMessageLocally } from "./idb-cache";
 import { dsaSign, dsaVerify } from "../crypto";
@@ -793,6 +793,12 @@ export function subscribeToMessages(
       // Un attaquant (MitM, participant malveillant) ne peut pas forger
       // un faux signal : sans la clé privée DSA de l'expéditeur, la
       // signature ne passe pas → le ratchet local est préservé.
+      //
+      // IMPORTANT : on invalide le cache des clés publiques du sender
+      // AVANT la vérification. Après une régénération de clés, le signal
+      // est signé avec la NOUVELLE clé DSA — le cache contient encore
+      // l'ANCIENNE → la vérification échouerait silencieusement.
+      clearPublicKeysCache(senderUid);
       const senderKeys = await getPublicKeys(senderUid);
       if (!senderKeys) {
         console.warn(`[AQ] Signal ratchet-reset ignoré : clés publiques introuvables pour ${senderUid}`);
