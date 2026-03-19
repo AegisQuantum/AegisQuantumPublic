@@ -1775,17 +1775,16 @@ async function confirmSessionImport(): Promise<void> {
 
 let _closeWarningActive = false;
 
-function _exportFlagKey(): string {
-  return `aq:exported:${_myUid}`;
-}
+// Flag in-memory (remis à zéro à chaque connexion) — évite les clés localStorage
+// périmées qui masqueraient le bandeau même si l'utilisateur n'a pas exporté.
+let _exportedThisSession = false;
 
 function isSessionExported(): boolean {
-  try { return !!localStorage.getItem(_exportFlagKey()); } catch { return false; }
+  return _exportedThisSession;
 }
 
 function markSessionExported(): void {
-  try { localStorage.setItem(_exportFlagKey(), '1'); } catch { /* ignore */ }
-  // Masquer le bandeau
+  _exportedThisSession = true;
   const banner = document.getElementById('export-warning-banner');
   if (banner) banner.style.display = 'none';
 }
@@ -1793,9 +1792,11 @@ function markSessionExported(): void {
 function initExportWarningBanner(): void {
   if (isSessionExported()) return;
   const banner = document.getElementById('export-warning-banner');
-  if (!banner) return;
+  if (!banner) {
+    console.warn('[AQ] export-warning-banner introuvable dans le DOM');
+    return;
+  }
   banner.style.display = 'flex';
-  // Clic sur le bandeau → ouvrir la modale d'export
   banner.addEventListener('click', () => openSessionExportModal());
 }
 
@@ -1863,17 +1864,29 @@ let _notificationPermission: NotificationPermission = 'default';
 
 function initPushNotifications(): void {
   if (!('Notification' in window)) return;
-  // Demander la permission silencieusement sans bloquer l'UX
-  Notification.requestPermission()
-    .then(perm => { _notificationPermission = perm; })
-    .catch(() => { /* permission refusée ou API bloquée */ });
+
+  // Lire la permission actuelle (sans demander — certains navigateurs
+  // bloquent requestPermission() sans geste utilisateur)
+  _notificationPermission = Notification.permission;
+
+  if (_notificationPermission === 'default') {
+    // Demander dès que l'utilisateur interagit avec la page (premier clic)
+    const askOnce = (): void => {
+      Notification.requestPermission()
+        .then(perm => { _notificationPermission = perm; })
+        .catch(() => { /* bloqué */ });
+      document.removeEventListener('click', askOnce);
+    };
+    document.addEventListener('click', askOnce, { once: true });
+  }
 }
 
 function _maybePushNotification(newFromOther: import('../types/message').DecryptedMessage[]): void {
   if (!('Notification' in window)) return;
   if (_notificationPermission !== 'granted') return;
-  if (document.visibilityState === 'visible') return;  // app au premier plan → pas de notif
   if (newFromOther.length === 0) return;
+  // Pas de notif si la conversation est déjà ouverte ET l'onglet a le focus
+  if (document.visibilityState === 'visible' && document.hasFocus()) return;
 
   // Regrouper toutes les nouvelles bulles en une seule notification
   const msg = newFromOther[newFromOther.length - 1];

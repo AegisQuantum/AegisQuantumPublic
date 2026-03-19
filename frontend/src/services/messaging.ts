@@ -522,7 +522,8 @@ export async function decryptMessage(
   } catch (ratchetErr: unknown) {
     const errMsg = ratchetErr instanceof Error ? ratchetErr.message : String(ratchetErr);
     // Erreurs ratchet permanentes → [🔒] direct, pas de retry utile
-    const isPermanent = /initKemCiphertext|replay detected|too far ahead|RAT_EMPTY_CHAIN_KEY/i.test(errMsg);
+    // OperationError = échec AES-GCM (mauvaise clé ratchet) — permanent, retry inutile
+    const isPermanent = /initKemCiphertext|replay detected|too far ahead|RAT_EMPTY_CHAIN_KEY|OperationError/i.test(errMsg);
     if (isPermanent) {
       return {
         id: msg.id, senderUid: msg.senderUid,
@@ -729,6 +730,28 @@ export function subscribeToMessages(
 
       // Effacer notre propre état ratchet pour cette conversation
       await deleteRatchetState(myUid, conversationId);
+
+      // Vider les files de retry et retenter tous les messages échoués de cette
+      // conversation. Les messages qui avaient échoué avec l'ancien état ratchet
+      // (OperationError, etc.) doivent être retentés avec le nouvel état null.
+      // Cibler uniquement les messages de cette conversation (présents dans allDocs)
+      const failedIds = new Set(
+        [..._retrySet, ..._retryFailed].filter(id => allDocs.has(id))
+      );
+      for (const id of failedIds) { _retrySet.delete(id); _retryFailed.delete(id); }
+
+      for (const id of failedIds) {
+        const freshDoc = allDocs.get(id);
+        if (!freshDoc) continue;
+        const msgData = { id: freshDoc.id, ...freshDoc.data() } as EncryptedMessage;
+        if (msgData.senderUid === myUid) continue;
+        try {
+          const decrypted = await decryptMessage(myUid, msgData);
+          decryptedCache.set(id, decrypted);
+        } catch {
+          _retryFailedAdd(id);
+        }
+      }
 
       // Afficher une bulle système (signature vérifiée ✓ donc on peut afficher "vérifié")
       decryptedCache.set(change.doc.id, {
