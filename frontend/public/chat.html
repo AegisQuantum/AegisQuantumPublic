@@ -216,6 +216,25 @@
             </svg>
           </label>
           <input type="file" id="image-input" accept="image/*" style="display:none" />
+          <!-- Bouton micro -->
+          <button class="btn-attach" id="btn-record-voice" title="Message vocal chiffré" style="margin-left:2px">
+            <svg id="icon-mic-idle" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" width="14" height="14">
+              <rect x="7" y="2" width="6" height="10" rx="3"/>
+              <path d="M4 10a6 6 0 0 0 12 0M10 16v2M7 18h6"/>
+            </svg>
+            <svg id="icon-mic-stop" viewBox="0 0 20 20" fill="currentColor" width="14" height="14" style="display:none">
+              <rect x="5" y="5" width="10" height="10" rx="2"/>
+            </svg>
+          </button>
+          <!-- Barre d'enregistrement (cachée par défaut) -->
+          <div id="recording-bar" style="display:none;align-items:center;gap:8px;flex:1;padding:0 8px">
+            <span class="recording-dot"></span>
+            <span id="recording-timer" style="font-size:12px;font-family:var(--mono);color:var(--c-text);min-width:36px">0:00</span>
+            <div style="flex:1;height:2px;background:rgba(239,68,68,0.3);border-radius:2px">
+              <div id="recording-level" style="height:100%;background:#ef4444;border-radius:2px;width:0%;transition:width 0.1s"></div>
+            </div>
+            <span style="font-size:11px;color:var(--c-muted)">Relâcher pour envoyer</span>
+          </div>
           <textarea class="message-input" id="message-input" placeholder="Écrire un message chiffré…" rows="1"></textarea>
           <button class="btn-send" id="btn-send" title="Envoyer">
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" width="15" height="15">

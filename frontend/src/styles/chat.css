@@ -1936,3 +1936,105 @@
   color: var(--c-muted);
   margin-top: 2px;
 }
+
+/* ═══════════════════════════════════════
+   ENREGISTREMENT VOCAL
+═══════════════════════════════════════ */
+
+#btn-record-voice.recording {
+  color: #ef4444;
+  border-color: rgba(239,68,68,0.4);
+  background: rgba(239,68,68,0.08);
+}
+
+.recording-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  flex-shrink: 0;
+  animation: blink-rec 1s step-end infinite;
+}
+@keyframes blink-rec {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+/* ═══════════════════════════════════════
+   BULLE AUDIO
+═══════════════════════════════════════ */
+
+.audio-bubble {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  min-width: 220px;
+  max-width: 280px;
+}
+.message-bubble.mine  .audio-bubble {
+  background: linear-gradient(135deg,#2a3f70 0%,#243460 100%);
+  border: 1px solid rgba(123,159,249,0.25);
+  border-bottom-right-radius: 3px;
+}
+.message-bubble.theirs .audio-bubble {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border2);
+  border-bottom-left-radius: 3px;
+}
+
+.audio-play-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(123,159,249,0.18);
+  color: var(--c-accent);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background var(--transition), transform 0.1s;
+}
+.audio-play-btn:hover  { background: rgba(123,159,249,0.30); }
+.audio-play-btn:active { transform: scale(0.93); }
+.message-bubble.mine .audio-play-btn { color: #a8c4ff; }
+
+.audio-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.audio-waveform {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  cursor: pointer;
+  position: relative;
+}
+.audio-waveform-bar {
+  width: 3px;
+  border-radius: 2px;
+  background: rgba(123,159,249,0.35);
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.audio-waveform-bar.played {
+  background: var(--c-accent);
+}
+.message-bubble.mine .audio-waveform-bar         { background: rgba(168,196,255,0.3); }
+.message-bubble.mine .audio-waveform-bar.played  { background: #a8c4ff; }
+
+.audio-time {
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--c-muted);
+  letter-spacing: 0.02em;
+}
+.message-bubble.mine .audio-time { color: rgba(168,196,255,0.7); }

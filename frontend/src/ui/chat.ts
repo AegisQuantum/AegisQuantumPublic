@@ -362,6 +362,7 @@ export async function initChat(uid: string): Promise<void> {
   initCloseWarning();
   initExportWarningBanner();
   initLightbox();
+  initVoiceRecording();
 
   // ── Notifications push ──
   initPushNotifications();
@@ -1080,15 +1081,17 @@ function renderMessages(messages: DecryptedMessage[]): void {
         if (wrap) wrap.innerHTML = `<p class="message-text msg-deleted-text"><em>Ce message a été supprimé</em></p>`;
         continue;
       }
-      // ── Transition texte-placeholder → bulle image/fichier ──────────────
+      // ── Transition texte-placeholder → bulle image/fichier/audio ────────
       // Quand le preload injecte msg.file après le rendu initial (texte placeholder)
-      if (msg.file && !bubble.querySelector('.image-bubble, .file-bubble')) {
+      if (msg.file && !bubble.querySelector('.image-bubble, .file-bubble, .audio-bubble')) {
         const existingWrap = bubble.querySelector('.message-text-wrap');
         if (existingWrap) existingWrap.remove();
         const f       = msg.file;
         const sizeStr = _fmtSize(f.size);
         const isImage = f.type.startsWith('image/');
-        if (isImage) {
+        if (f.type.startsWith('audio/')) {
+          bubble.insertBefore(buildAudioBubble(f.blob, f.name), bubble.querySelector('.message-meta'));
+        } else if (isImage) {
           const imgWrap = document.createElement('div');
           imgWrap.className = 'image-bubble';
           imgWrap.title     = escapeHtml(f.name);
@@ -1194,10 +1197,11 @@ function renderMessages(messages: DecryptedMessage[]): void {
           <p class="message-text msg-deleted-text"><em>Ce message a été supprimé</em></p>
         </div>`;
     } else if (msg.file) {
-      // ── Bulle fichier ou image ─────────────────────────────────────────
+      // ── Bulle fichier, image ou audio ──────────────────────────────────
       const f       = msg.file;
       const sizeStr = _fmtSize(f.size);
       const isImage = f.type.startsWith('image/');
+      const isAudio = f.type.startsWith('audio/');
 
       if (isImage) {
         // ── Aperçu image inline ──────────────────────────────────────────
@@ -1225,6 +1229,9 @@ function renderMessages(messages: DecryptedMessage[]): void {
         imgWrap.appendChild(img);
         imgWrap.appendChild(caption);
         bubble.appendChild(imgWrap);
+      } else if (isAudio) {
+        // ── Player audio ─────────────────────────────────────────────────
+        bubble.appendChild(buildAudioBubble(f.blob, f.name));
       } else {
         // ── Fichier générique ────────────────────────────────────────────
         const fileDiv = document.createElement('div');
@@ -2162,4 +2169,206 @@ function showToast(msg: string): void {
   toast.textContent = msg;
   document.body.appendChild(toast);
   setTimeout(() => toast.remove(), 4000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MESSAGES VOCAUX — enregistrement + rendu audio player
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _mediaRecorder: MediaRecorder | null = null;
+let _audioChunks: BlobPart[]             = [];
+let _recordingStart  = 0;
+let _recordingTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Formats seconds → "m:ss" */
+function _fmtDuration(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function _setRecordingUI(active: boolean): void {
+  const btn       = document.getElementById('btn-record-voice');
+  const bar       = document.getElementById('recording-bar');
+  const input     = document.getElementById('message-input') as HTMLTextAreaElement | null;
+  const micIdle   = document.getElementById('icon-mic-idle');
+  const micStop   = document.getElementById('icon-mic-stop');
+
+  if (active) {
+    btn?.classList.add('recording');
+    if (bar)   bar.style.display   = 'flex';
+    if (input) input.style.display = 'none';
+    if (micIdle) micIdle.style.display = 'none';
+    if (micStop) micStop.style.display = '';
+  } else {
+    btn?.classList.remove('recording');
+    if (bar)   bar.style.display   = 'none';
+    if (input) input.style.display = '';
+    if (micIdle) micIdle.style.display = '';
+    if (micStop) micStop.style.display = 'none';
+    const timer = document.getElementById('recording-timer');
+    if (timer) timer.textContent = '0:00';
+  }
+}
+
+async function startVoiceRecording(): Promise<void> {
+  if (_mediaRecorder) return; // déjà en cours
+
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    showToast('Microphone inaccessible — vérifiez les permissions');
+    return;
+  }
+
+  // Choisir le codec le plus compatible
+  const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/ogg']
+    .find(t => MediaRecorder.isTypeSupported(t)) ?? '';
+
+  _audioChunks    = [];
+  _recordingStart = Date.now();
+  _mediaRecorder  = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+
+  _mediaRecorder.addEventListener('dataavailable', (e) => {
+    if (e.data.size > 0) _audioChunks.push(e.data);
+  });
+
+  _mediaRecorder.addEventListener('stop', async () => {
+    stream.getTracks().forEach(t => t.stop());
+    const duration = (Date.now() - _recordingStart) / 1000;
+    if (duration < 0.5) { _setRecordingUI(false); return; } // trop court
+
+    const mtype = mimeType || 'audio/webm';
+    const ext   = mtype.startsWith('audio/ogg') ? 'ogg' : 'webm';
+    const blob  = new Blob(_audioChunks, { type: mtype });
+    const file  = new File([blob], `vocal_${Date.now()}.${ext}`, { type: mtype });
+
+    if (!_currentContactUid) return;
+    try {
+      await sendFile(_myUid, _currentContactUid, file);
+      showToast('Message vocal chiffré envoyé');
+    } catch (err) {
+      showToast(`Échec envoi vocal : ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  _mediaRecorder.start(100); // chunks de 100 ms
+  _setRecordingUI(true);
+
+  // Timer d'affichage
+  const timerEl = document.getElementById('recording-timer');
+  _recordingTimer = setInterval(() => {
+    const elapsed = (Date.now() - _recordingStart) / 1000;
+    if (timerEl) timerEl.textContent = _fmtDuration(elapsed);
+    // Limite de sécurité : 2 min max
+    if (elapsed >= 120) stopVoiceRecording();
+  }, 200);
+}
+
+function stopVoiceRecording(): void {
+  if (!_mediaRecorder || _mediaRecorder.state === 'inactive') return;
+  if (_recordingTimer) { clearInterval(_recordingTimer); _recordingTimer = null; }
+  _mediaRecorder.stop();
+  _mediaRecorder = null;
+  _setRecordingUI(false);
+}
+
+export function initVoiceRecording(): void {
+  const btn = document.getElementById('btn-record-voice');
+  if (!btn) return;
+
+  // Click-to-toggle : un clic démarre, un autre arrête
+  btn.addEventListener('click', () => {
+    if (_mediaRecorder && _mediaRecorder.state !== 'inactive') {
+      stopVoiceRecording();
+    } else {
+      startVoiceRecording();
+    }
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RENDU BULLE AUDIO
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Crée une bulle audio avec player intégré */
+export function buildAudioBubble(blob: Blob, name: string): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'audio-bubble';
+
+  // Générer des barres de waveform simulée (hauteurs pseudo-aléatoires déterministes)
+  const BAR_COUNT = 28;
+  const bars: number[] = [];
+  let seed = name.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+  for (let i = 0; i < BAR_COUNT; i++) {
+    seed = (seed * 1664525 + 1013904223) & 0xffffffff;
+    bars.push(6 + ((seed >>> 0) % 18)); // hauteur 6–24px
+  }
+
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+
+  // Bouton play/pause
+  const playBtn = document.createElement('button');
+  playBtn.className = 'audio-play-btn';
+  playBtn.title     = 'Lire / Pause';
+  playBtn.innerHTML = `<svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path d="M6 4l12 6-12 6V4Z"/></svg>`;
+
+  // Corps : waveform + temps
+  const body = document.createElement('div');
+  body.className = 'audio-body';
+
+  const waveform = document.createElement('div');
+  waveform.className = 'audio-waveform';
+  bars.forEach((h, i) => {
+    const bar = document.createElement('div');
+    bar.className = 'audio-waveform-bar';
+    bar.style.height = `${h}px`;
+    bar.dataset.idx  = String(i);
+    waveform.appendChild(bar);
+  });
+
+  const timeEl = document.createElement('span');
+  timeEl.className   = 'audio-time';
+  timeEl.textContent = '0:00';
+
+  body.appendChild(waveform);
+  body.appendChild(timeEl);
+
+  wrap.appendChild(playBtn);
+  wrap.appendChild(body);
+
+  // Mettre à jour la durée affichée dès que le metadata est chargé
+  audio.addEventListener('loadedmetadata', () => {
+    if (isFinite(audio.duration)) timeEl.textContent = _fmtDuration(audio.duration);
+  });
+
+  // Play / Pause
+  const pauseSvg = `<svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><rect x="4" y="4" width="4" height="12" rx="1"/><rect x="12" y="4" width="4" height="12" rx="1"/></svg>`;
+  const playSvg  = `<svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path d="M6 4l12 6-12 6V4Z"/></svg>`;
+  playBtn.addEventListener('click', () => {
+    if (audio.paused) { audio.play(); playBtn.innerHTML = pauseSvg; }
+    else              { audio.pause(); playBtn.innerHTML = playSvg; }
+  });
+  audio.addEventListener('ended', () => { playBtn.innerHTML = playSvg; });
+
+  // Progression → colore les barres
+  audio.addEventListener('timeupdate', () => {
+    const progress = audio.duration ? audio.currentTime / audio.duration : 0;
+    timeEl.textContent = _fmtDuration(audio.currentTime);
+    waveform.querySelectorAll<HTMLElement>('.audio-waveform-bar').forEach((bar, i) => {
+      bar.classList.toggle('played', i / BAR_COUNT < progress);
+    });
+  });
+
+  // Clic sur la waveform → seek
+  waveform.addEventListener('click', (e) => {
+    if (!audio.duration) return;
+    const rect = waveform.getBoundingClientRect();
+    const ratio = (e.clientX - rect.left) / rect.width;
+    audio.currentTime = ratio * audio.duration;
+  });
+
+  return wrap;
 }
