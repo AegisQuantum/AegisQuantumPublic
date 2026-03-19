@@ -2130,8 +2130,9 @@ function showMessageContextMenu(e: MouseEvent, msgId: string, isMine: boolean, m
   _ctxPlaintext          = msg.plaintext;
 
   const showOwnerActions = isMine && !msg.isDeleted;
+  const isTextMsg = !msg.messageType || msg.messageType === 'text';
   if (btnBoth) btnBoth.style.display = showOwnerActions ? '' : 'none';
-  if (btnEdit) btnEdit.style.display = showOwnerActions ? '' : 'none';
+  if (btnEdit) btnEdit.style.display = (showOwnerActions && isTextMsg) ? '' : 'none';
 
   const x = Math.min(e.clientX, window.innerWidth  - 190);
   const y = Math.min(e.clientY, window.innerHeight - 80);
@@ -2234,23 +2235,16 @@ async function startVoiceRecording(): Promise<void> {
     if (e.data.size > 0) _audioChunks.push(e.data);
   });
 
-  _mediaRecorder.addEventListener('stop', async () => {
+  _mediaRecorder.addEventListener('stop', () => {
     stream.getTracks().forEach(t => t.stop());
-    const duration = (Date.now() - _recordingStart) / 1000;
-    if (duration < 0.5) { _setRecordingUI(false); return; } // trop court
+    const duration = _pendingAudioDuration || (Date.now() - _recordingStart) / 1000;
+    if (duration < 0.5) { _setRecordingUI(false); return; }
 
     const mtype = mimeType || 'audio/webm';
     const ext   = mtype.startsWith('audio/ogg') ? 'ogg' : 'webm';
     const blob  = new Blob(_audioChunks, { type: mtype });
-    const file  = new File([blob], `vocal_${Date.now()}.${ext}`, { type: mtype });
-
-    if (!_currentContactUid) return;
-    try {
-      await sendFile(_myUid, _currentContactUid, file);
-      showToast('Message vocal chiffré envoyé');
-    } catch (err) {
-      showToast(`Échec envoi vocal : ${err instanceof Error ? err.message : String(err)}`);
-    }
+    _pendingAudioFile = new File([blob], `vocal_${Date.now()}.${ext}`, { type: mtype });
+    _setPendingUI(_pendingAudioFile, duration);
   });
 
   _mediaRecorder.start(100); // chunks de 100 ms
@@ -2266,11 +2260,43 @@ async function startVoiceRecording(): Promise<void> {
   }, 200);
 }
 
+let _pendingAudioFile: File | null = null;
+let _pendingAudioDuration = 0;
+
 function stopVoiceRecording(): void {
   if (!_mediaRecorder || _mediaRecorder.state === 'inactive') return;
   if (_recordingTimer) { clearInterval(_recordingTimer); _recordingTimer = null; }
+  _pendingAudioDuration = (Date.now() - _recordingStart) / 1000;
   _mediaRecorder.stop();
   _mediaRecorder = null;
+  // Don't reset UI yet — wait for 'stop' event to set pending state
+}
+
+function _setPendingUI(file: File, duration: number): void {
+  const bar      = document.getElementById('recording-bar');
+  const input    = document.getElementById('message-input') as HTMLTextAreaElement | null;
+  const timer    = document.getElementById('recording-timer');
+  const hint     = bar?.querySelector<HTMLElement>('span:last-child');
+  const dot      = bar?.querySelector<HTMLElement>('.recording-dot');
+  const level    = document.getElementById('recording-level');
+  if (bar)   bar.style.display   = 'flex';
+  if (input) input.style.display = 'none';
+  if (timer) timer.textContent   = _fmtDuration(duration);
+  if (hint)  hint.textContent    = 'Appuyer sur Envoyer — ou × pour annuler';
+  if (dot)   dot.style.animation = 'none';
+  if (level) { level.style.width = '100%'; level.style.background = 'rgba(123,159,249,0.5)'; }
+  const micIdle = document.getElementById('icon-mic-idle');
+  const micStop = document.getElementById('icon-mic-stop');
+  if (micIdle) micIdle.style.display = '';
+  if (micStop) micStop.style.display = 'none';
+  const btn = document.getElementById('btn-record-voice');
+  btn?.classList.remove('recording');
+  void file; // suppress unused warning
+}
+
+function cancelPendingAudio(): void {
+  _pendingAudioFile     = null;
+  _pendingAudioDuration = 0;
   _setRecordingUI(false);
 }
 
@@ -2278,14 +2304,30 @@ export function initVoiceRecording(): void {
   const btn = document.getElementById('btn-record-voice');
   if (!btn) return;
 
-  // Click-to-toggle : un clic démarre, un autre arrête
   btn.addEventListener('click', () => {
-    if (_mediaRecorder && _mediaRecorder.state !== 'inactive') {
+    if (_pendingAudioFile) {
+      // En mode pending : re-clic sur micro = annuler
+      cancelPendingAudio();
+    } else if (_mediaRecorder && _mediaRecorder.state !== 'inactive') {
       stopVoiceRecording();
     } else {
       startVoiceRecording();
     }
   });
+
+  // Bouton send → envoie le vocal si pending
+  document.getElementById('btn-send')?.addEventListener('click', async () => {
+    if (!_pendingAudioFile) return; // géré normalement par handleSendMessage
+    const file = _pendingAudioFile;
+    cancelPendingAudio();
+    if (!_currentContactUid) return;
+    try {
+      await sendFile(_myUid, _currentContactUid, file);
+      showToast('Message vocal chiffré envoyé');
+    } catch (err) {
+      showToast(`Échec envoi vocal : ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, { capture: true }); // capture: true pour intercepter avant handleSendMessage
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

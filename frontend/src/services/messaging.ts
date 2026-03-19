@@ -303,6 +303,7 @@ export async function sendFile(
       signature,
       messageIndex     : drResult.messageIndex,
       timestamp        : ts,
+      messageType      : (file.type.startsWith('image/') ? 'image' : file.type.startsWith('audio/') ? 'audio' : 'file') as 'image' | 'audio' | 'file',
       hasFile          : true,
       fileCiphertext,
       fileNonce,
@@ -322,6 +323,7 @@ export async function sendFile(
   _preloadSentMessage(convId, {
     id: msgId, senderUid: myUid, plaintext: placeholder,
     timestamp: ts, verified: true, readBy: [],
+    messageType      : (file.type.startsWith('image/') ? 'image' : file.type.startsWith('audio/') ? 'audio' : 'file') as 'image'|'audio'|'file',
     kemCiphertext    : drResult.kemCiphertext,
     initKemCiphertext: drResult.initKemCiphertext,
     messageIndex     : drResult.messageIndex,
@@ -393,6 +395,7 @@ export async function sendMessage(
       signature,
       messageIndex      : drResult.messageIndex,
       timestamp         : ts,
+      messageType       : 'text' as const,
       ...(drResult.initKemCiphertext ? { initKemCiphertext: drResult.initKemCiphertext } : {}),
     } as Omit<EncryptedMessage, "id">);
   } catch (err: unknown) {
@@ -404,6 +407,7 @@ export async function sendMessage(
   _preloadSentMessage(convId, {
     id: msgId, senderUid: myUid, plaintext,
     timestamp: ts, verified: true, readBy: [],
+    messageType      : 'text' as const,
     kemCiphertext    : drResult.kemCiphertext,
     initKemCiphertext: drResult.initKemCiphertext,
     messageIndex     : drResult.messageIndex,
@@ -419,6 +423,31 @@ export async function sendMessage(
 // ---------------------------------------------------------------------------
 // Dechiffrement
 // ---------------------------------------------------------------------------
+
+/** Re-déchiffre uniquement la pièce jointe d'un message (sans Double Ratchet).
+ *  Utilisé pour les propres messages de l'envoyeur sur rechargement de page.
+ */
+async function _decryptFileOnly(msgId: string, msg: EncryptedMessage): Promise<DecryptedMessage | null> {
+  if (!msg.hasFile || !msg.fileCiphertext || !msg.fileNonce || !msg.fileName) return null;
+  const kemForFileKey = msg.kemCiphertext || msg.initKemCiphertext || msg.nonce;
+  const fileKey  = await hkdfDerive(
+    kemForFileKey,
+    `AegisQuantum-v1-file-key:${msg.conversationId}:${msg.messageIndex}`,
+    32,
+  );
+  const fileB64   = await aesGcmDecrypt(msg.fileCiphertext, msg.fileNonce, fileKey);
+  const fileBytes = fromBase64(fileB64);
+  const ftype     = msg.fileType ?? "application/octet-stream";
+  const blob      = new Blob([fileBytes.buffer as ArrayBuffer], { type: ftype });
+  return {
+    id: msgId, senderUid: msg.senderUid,
+    plaintext: `[Fichier] ${msg.fileName}`,
+    timestamp: msg.timestamp, verified: false, readBy: msg.readBy ?? [],
+    messageType: msg.messageType,
+    kemCiphertext: msg.kemCiphertext, initKemCiphertext: msg.initKemCiphertext, messageIndex: msg.messageIndex,
+    file: { blob, name: msg.fileName, size: msg.fileSize ?? fileBytes.length, type: ftype },
+  };
+}
 
 export async function decryptMessage(
   myUid: string,
@@ -582,6 +611,7 @@ export async function decryptMessage(
     id: msg.id, senderUid: msg.senderUid, plaintext: drResult.plaintext,
     timestamp: msg.timestamp, verified, readBy: msg.readBy ?? [],
     file: fileAttachment,
+    messageType      : msg.messageType,
     // Métadonnées de clé — permettent delete/edit depuis l'UI sans re-lire Firestore
     kemCiphertext    : msg.kemCiphertext,
     initKemCiphertext: msg.initKemCiphertext,
@@ -851,7 +881,9 @@ export function subscribeToMessages(
       const cached = await loadMsgCache(d.id);
       if (cached) {
         // Inclure les métadonnées Firestore pour permettre delete/edit depuis l'UI
-        const msgFirestore = d as unknown as EncryptedMessage;
+        const msgFirestore = { id: d.id, ...d.data() } as EncryptedMessage;
+        // Skip IDB cache for file messages — blob must be re-decrypted each session
+        if (msgFirestore.hasFile) continue;
         decryptedCache.set(d.id, {
           id       : d.id,
           senderUid: cached.senderUid,
@@ -859,6 +891,7 @@ export function subscribeToMessages(
           timestamp: cached.timestamp,
           verified : cached.verified,
           readBy   : [],
+          messageType      : msgFirestore.messageType,
           kemCiphertext    : msgFirestore.kemCiphertext,
           initKemCiphertext: msgFirestore.initKemCiphertext,
           messageIndex     : msgFirestore.messageIndex,
@@ -906,13 +939,38 @@ export function subscribeToMessages(
       // Tenter de les déchiffrer avec le ratchet (état N+1 après l'envoi) échoue
       // systématiquement. On les ignore ici ; le preload les affiche correctement.
       if (msg.senderUid === myUid) {
-        // Si absent du cache (autre appareil / IDB vidé) → placeholder neutre
         if (!decryptedCache.has(d.id)) {
-          decryptedCache.set(d.id, {
-            id: d.id, senderUid: msg.senderUid,
-            plaintext: "[\uD83D\uDD12 Message envoy\u00e9 — non disponible sur cet appareil]",
-            timestamp: msg.timestamp, verified: false, readBy: msg.readBy ?? [],
-          });
+          if (msg.hasFile && msg.fileCiphertext && msg.fileNonce && msg.fileName) {
+            // Fichier propre : re-dériver la clé sans le ratchet (IKM = kemCT dans Firestore)
+            _decryptFileOnly(d.id, msg).then(result => {
+              if (result) { decryptedCache.set(d.id, result); emitResult(); }
+            }).catch(() => {
+              decryptedCache.set(d.id, {
+                id: d.id, senderUid: msg.senderUid,
+                plaintext: `[Fichier] ${msg.fileName}`,
+                timestamp: msg.timestamp, verified: false, readBy: msg.readBy ?? [],
+                messageType: msg.messageType,
+                kemCiphertext: msg.kemCiphertext, initKemCiphertext: msg.initKemCiphertext, messageIndex: msg.messageIndex,
+              });
+              emitResult();
+            });
+            // Placeholder immédiat pendant le déchiffrement
+            decryptedCache.set(d.id, {
+              id: d.id, senderUid: msg.senderUid,
+              plaintext: `[Fichier] ${msg.fileName ?? ''}`,
+              timestamp: msg.timestamp, verified: false, readBy: msg.readBy ?? [],
+              messageType: msg.messageType,
+              kemCiphertext: msg.kemCiphertext, initKemCiphertext: msg.initKemCiphertext, messageIndex: msg.messageIndex,
+            });
+          } else {
+            decryptedCache.set(d.id, {
+              id: d.id, senderUid: msg.senderUid,
+              plaintext: "[\uD83D\uDD12 Message envoy\u00e9 — non disponible sur cet appareil]",
+              timestamp: msg.timestamp, verified: false, readBy: msg.readBy ?? [],
+              messageType: msg.messageType,
+              kemCiphertext: msg.kemCiphertext, initKemCiphertext: msg.initKemCiphertext, messageIndex: msg.messageIndex,
+            });
+          }
           hasNewWork = true;
         }
         continue;

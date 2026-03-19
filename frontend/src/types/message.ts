@@ -102,6 +102,12 @@ export interface EncryptedMessage {
 
   /** Timestamp de la dernière modification. */
   editedAt?: number;
+
+  /**
+   * Type du message — permet un rendu adapté et des règles d'accès cohérentes.
+   * Absent sur les anciens messages (retro-compat).
+   */
+  messageType?: 'text' | 'image' | 'audio' | 'file' | 'system';
 }
 
 /** Metadata d'une conversation (sans messages). */
@@ -130,6 +136,8 @@ export interface DecryptedMessage {
    * Absent pour les messages normaux.
    */
   type?: "system";
+  /** Type du message pour le rendu et les contrôles d'accès */
+  messageType?: 'text' | 'image' | 'audio' | 'file' | 'system';
   /** Pièce jointe déchiffrée — présente uniquement pour les messages fichier */
   file?: {
     /** Blob déchiffré du fichier (jamais transmis, reconstruit en mémoire) */
