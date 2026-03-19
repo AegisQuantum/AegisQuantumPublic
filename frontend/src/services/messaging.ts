@@ -257,6 +257,7 @@ export async function sendFile(
 
   const myDsaPrivateKey = getDsaPrivateKey(myUid);
   const myKemPrivateKey = getKemPrivateKey(myUid);
+  if (!myKemPrivateKey) throw new Error("Clé KEM privée non chargée — impossible d'envoyer");
 
   const fileBuffer = await file.arrayBuffer();
   const fileBytes  = new Uint8Array(fileBuffer);
@@ -362,6 +363,7 @@ export async function sendMessage(
 
   const myDsaPrivateKey = getDsaPrivateKey(myUid);
   const myKemPrivateKey = getKemPrivateKey(myUid);
+  if (!myKemPrivateKey) throw new Error("Clé KEM privée non chargée — impossible d'envoyer");
 
   // Ratchet sous verrou — load→encrypt→save en séquence
   const { drResult, ts } = await _withRatchetLock(convId, async () => {
@@ -533,10 +535,8 @@ export async function decryptMessage(
 
   const myKeys      = await getPublicKeys(myUid);
   const myKemPubKey = myKeys?.kemPublicKey ?? "";
-  let   myKemPrivKey: string;
-  try {
-    myKemPrivKey = getKemPrivateKey(myUid);
-  } catch {
+  const myKemPrivKey = getKemPrivateKey(myUid);
+  if (!myKemPrivKey) {
     return {
       id: msg.id, senderUid: msg.senderUid,
       plaintext : "[\uD83D\uDD12 Message chiffr\u00e9 — cl\u00e9s non charg\u00e9es]",
@@ -551,7 +551,7 @@ export async function decryptMessage(
       const stateJson = await loadRatchetState(myUid, msg.conversationId);
       const _drResult = await doubleRatchetDecrypt(
         msg.ciphertext, msg.nonce, msg.messageIndex, msg.kemCiphertext,
-        stateJson, msg.conversationId, myKemPrivKey, myKemPubKey,
+        msg.senderEphPub ?? '', stateJson, msg.conversationId, myKemPrivKey, myKemPubKey,
         senderKeys?.kemPublicKey ?? "", msg.initKemCiphertext,
       );
       await saveRatchetState(myUid, msg.conversationId, _drResult.newStateJson);
@@ -587,7 +587,7 @@ export async function decryptMessage(
           ({ drResult } = await _withRatchetLock(msg.conversationId, async () => {
             const _dr = await doubleRatchetDecrypt(
               msg.ciphertext, msg.nonce, msg.messageIndex, msg.kemCiphertext,
-              null, // stateJson null → bootstrap à froid
+              msg.senderEphPub ?? '', null, // stateJson null → bootstrap à froid
               msg.conversationId, myKemPrivKey, myKemPubKey,
               senderKeys?.kemPublicKey ?? "", msg.initKemCiphertext,
             );

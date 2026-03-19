@@ -84,6 +84,7 @@ export async function exportSessionKeys(
 
   onProgress?.("collecting");
   const kemPrivateKey  = getKemPrivateKey(uid);
+  if (!kemPrivateKey) throw new Error("Clé KEM privée non chargée — export impossible");
   const dsaPrivateKey  = getDsaPrivateKey(uid);
   const ratchetStates  = await getAllRatchetStates(uid);
 
