@@ -525,6 +525,19 @@ export async function decryptMessage(
     // OperationError = échec AES-GCM (mauvaise clé ratchet) — permanent, retry inutile
     const isPermanent = /initKemCiphertext|replay detected|too far ahead|RAT_EMPTY_CHAIN_KEY|OperationError/i.test(errMsg);
     if (isPermanent) {
+      // Diagnostic : aide à identifier les désynchronisations de clés
+      const stateJson = await loadRatchetState(myUid, msg.conversationId).catch(() => null);
+      const myPubKey  = await getPublicKeys(myUid).catch(() => null);
+      const senderPub = await getPublicKeys(msg.senderUid).catch(() => null);
+      console.error(
+        `[AQ:decrypt] Échec permanent msg=${msg.id} index=${msg.messageIndex}`,
+        `\n  erreur     : ${errMsg}`,
+        `\n  ratchet    : ${stateJson ? 'présent' : 'NULL (bootstrap attendu)'}`,
+        `\n  myKemPub   : ${myPubKey?.kemPublicKey?.slice(0, 20) ?? 'ABSENT'}…`,
+        `\n  senderPub  : ${senderPub?.kemPublicKey?.slice(0, 20) ?? 'ABSENT'}…`,
+        `\n  initKemCT  : ${msg.initKemCiphertext ? msg.initKemCiphertext.slice(0, 20) + '…' : 'absent'}`,
+        `\n  kemCT      : ${msg.kemCiphertext ? msg.kemCiphertext.slice(0, 20) + '…' : 'vide (epoch sym)'}`,
+      );
       return {
         id: msg.id, senderUid: msg.senderUid,
         plaintext : "[\uD83D\uDD12 Message non d\u00e9chiffrable]",
@@ -863,17 +876,41 @@ export function subscribeToMessages(
       const d   = change.doc;
       const msg = { id: d.id, ...d.data() } as EncryptedMessage;
 
-      // Deja dans le cache, en retry actif, ou definitvement echoue -> SKIP
-      if (_retryFailed.has(d.id)) continue;
-      if (decryptedCache.has(d.id) && !_retrySet.has(d.id)) continue;
-
       // Signaux système (ratchet-reset, etc.) — déjà traités plus haut → SKIP
       if ((msg as unknown as { type?: string }).type === "ratchet-reset") continue;
+
+      // Déjà déchiffré et pas en cours de retry → SKIP
+      if (decryptedCache.has(d.id) && !_retrySet.has(d.id)) continue;
+
+      // Définitivement échoué → placeholder immédiat (évite le fallback [🔒 Message chiffré]
+      // quand la conversation est rouverte avec un nouveau decryptedCache vide)
+      if (_retryFailed.has(d.id)) {
+        if (!decryptedCache.has(d.id)) {
+          decryptedCache.set(d.id, {
+            id: d.id, senderUid: msg.senderUid,
+            plaintext: "[\uD83D\uDD12 Message non d\u00e9chiffrable]",
+            timestamp: msg.timestamp, verified: false, readBy: msg.readBy ?? [],
+          });
+          hasNewWork = true;
+        }
+        continue;
+      }
 
       // Messages envoyés par soi-même — déjà dans le cache via _preloadSentMessage.
       // Tenter de les déchiffrer avec le ratchet (état N+1 après l'envoi) échoue
       // systématiquement. On les ignore ici ; le preload les affiche correctement.
-      if (msg.senderUid === myUid) continue;
+      if (msg.senderUid === myUid) {
+        // Si absent du cache (autre appareil / IDB vidé) → placeholder neutre
+        if (!decryptedCache.has(d.id)) {
+          decryptedCache.set(d.id, {
+            id: d.id, senderUid: msg.senderUid,
+            plaintext: "[\uD83D\uDD12 Message envoy\u00e9 — non disponible sur cet appareil]",
+            timestamp: msg.timestamp, verified: false, readBy: msg.readBy ?? [],
+          });
+          hasNewWork = true;
+        }
+        continue;
+      }
 
       toDecrypt.push(msg);
     }
