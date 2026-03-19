@@ -65,6 +65,17 @@
     <!-- ══ PANNEAU GAUCHE ══ -->
     <div class="left-panel" id="left-panel">
 
+      <!-- Bandeau d'avertissement export clés — affiché par JS si non exporté -->
+      <div id="export-warning-banner" style="display:none;background:rgba(246,173,85,0.1);border-bottom:1px solid rgba(246,173,85,0.2);padding:8px 12px;font-size:11.5px;color:rgba(246,173,85,0.9);align-items:center;gap:8px;cursor:pointer" title="Cliquer pour exporter vos clés">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13" style="flex-shrink:0">
+          <path d="M8 2L1.5 13.5h13L8 2Z"/><path d="M8 6v4M8 11.5v.5"/>
+        </svg>
+        <span>Clés non sauvegardées — <strong>exporter avant de fermer</strong></span>
+        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10" style="margin-left:auto;flex-shrink:0;opacity:0.5">
+          <path d="M2 6h8M7 3l3 3-3 3"/>
+        </svg>
+      </div>
+
       <aside class="sidebar" id="sidebar-chat">
         <div class="sidebar-header">
           <div class="sidebar-title">Messages</div>

@@ -358,8 +358,9 @@ export async function initChat(uid: string): Promise<void> {
     }
   });
 
-  // ── Avertissement fermeture ──
+  // ── Avertissement fermeture + bandeau export clés ──
   initCloseWarning();
+  initExportWarningBanner();
 
   // ── Notifications push ──
   initPushNotifications();
@@ -1675,6 +1676,7 @@ async function confirmSessionExport(): Promise<void> {
       confirmBtn.onclick = () => {
         if (_sessionExportFileJson) downloadSessionFile(_sessionExportFileJson);
         closeSessionExportModal();
+        markSessionExported();
         showToast('Clés exportées avec succès. Gardez vos 10 mots en sécurité !');
       };
     }
@@ -1765,14 +1767,42 @@ async function confirmSessionImport(): Promise<void> {
 // Avertissement fermeture d'onglet
 //
 // 1. `beforeunload` → dialog natif du navigateur (fermeture effective de l'onglet)
+//    NB : les navigateurs modernes ignorent tout texte personnalisé — seul le
+//    déclenchement du dialog est contrôlable.
 // 2. Ctrl+W / Cmd+W → modal personnalisée ; non-fermable via Enter (seulement clic)
+// 3. Bandeau persistant dans l'UI jusqu'à l'export des clés
 // ─────────────────────────────────────────────────────────────────────────────
 
 let _closeWarningActive = false;
 
+function _exportFlagKey(): string {
+  return `aq:exported:${_myUid}`;
+}
+
+function isSessionExported(): boolean {
+  try { return !!localStorage.getItem(_exportFlagKey()); } catch { return false; }
+}
+
+function markSessionExported(): void {
+  try { localStorage.setItem(_exportFlagKey(), '1'); } catch { /* ignore */ }
+  // Masquer le bandeau
+  const banner = document.getElementById('export-warning-banner');
+  if (banner) banner.style.display = 'none';
+}
+
+function initExportWarningBanner(): void {
+  if (isSessionExported()) return;
+  const banner = document.getElementById('export-warning-banner');
+  if (!banner) return;
+  banner.style.display = 'flex';
+  // Clic sur le bandeau → ouvrir la modale d'export
+  banner.addEventListener('click', () => openSessionExportModal());
+}
+
 function initCloseWarning(): void {
-  // beforeunload — dialog natif pour fermeture effective
+  // beforeunload — déclenché seulement si les clés ne sont pas encore exportées
   const onBeforeUnload = (e: BeforeUnloadEvent) => {
+    if (isSessionExported()) return; // clés sauvegardées → pas d'avertissement
     e.preventDefault();
     e.returnValue = '';
   };
@@ -1781,6 +1811,7 @@ function initCloseWarning(): void {
   // Ctrl+W / Cmd+W — intercepte avant que le navigateur ferme l'onglet
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
+      if (isSessionExported()) return; // clés sauvegardées → laisser fermer normalement
       e.preventDefault();
       showCloseWarningModal();
     }
