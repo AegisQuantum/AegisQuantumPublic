@@ -147,11 +147,7 @@ export async function loadCryptoKeys(uid: string, password: string): Promise<voi
     // ("Vos clés locales sont introuvables. Effacez vos données et recréez un compte.").
     // Ne jamais régénérer silencieusement quand des clés publiques existent déjà.
     console.error("[AQ:crypto] Vault IDB introuvable alors que des clés publiques existent dans Firestore.");
-    throw new Error(
-      "VAULT_MISSING: Vos cl\u00e9s priv\u00e9es locales sont introuvables (IDB vid\u00e9 ?). " +
-      "Impossible de se connecter sans elles — r\u00e9g\u00e9n\u00e9rer casserait toutes vos conversations. " +
-      "Pour repartir de z\u00e9ro : supprimez votre compte et recr\u00e9ez-en un."
-    );
+    throw new VaultMissingError(uid);
   }
 }
 
@@ -169,16 +165,7 @@ export async function signIn(username: string, password: string): Promise<AQUser
   const fakeEmail  = toFakeEmail(username);
   const credential = await signInWithEmailAndPassword(auth, fakeEmail, password);
   const uid        = credential.user.uid;
-  try {
-    await loadCryptoKeys(uid, password);
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith("VAULT_MISSING")) {
-      // Firebase Auth a réussi mais le vault IDB est absent sur cet appareil.
-      // On propage un VaultMissingError typé pour que l'UI propose la récupération.
-      throw new VaultMissingError(uid);
-    }
-    throw e;
-  }
+  await loadCryptoKeys(uid, password); // peut lever VaultMissingError → propagée telle quelle
   _currentUser = { uid };
   return _currentUser;
 }
