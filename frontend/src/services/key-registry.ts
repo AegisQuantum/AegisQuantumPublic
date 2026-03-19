@@ -17,51 +17,48 @@ import {
   getDocs,
 } from "firebase/firestore";
 import { db } from "./firebase";
-import { loadCachedPubKey, saveCachedPubKey } from "./idb-cache";
-import { emitCryptoEvent, shortUid } from "./crypto-events";
 import type { PublicKeyBundle } from "../types/user";
 
 const publicKeysCol = () => collection(db, "publicKeys");
 const publicKeyDoc  = (uid: string) => doc(db, "publicKeys", uid);
 
-// Cache memoire de session — evite N reads Firestore par message dechiffre.
-// Invalide uniquement a la deconnexion (clearPublicKeysCache).
-const _publicKeysCache = new Map<string, PublicKeyBundle | null>();
+// Cache mémoire avec TTL de 5 minutes.
+// Sans TTL, une régénération de clés (generateFreshKeys) ne serait jamais
+// détectée par les contacts pendant toute la durée de la session.
+const PUBKEY_TTL_MS = 5 * 60 * 1000; // 5 min
 
-export function clearPublicKeysCache(): void {
-  _publicKeysCache.clear();
-}
+interface CachedEntry { bundle: PublicKeyBundle; cachedAt: number; }
+const _publicKeysCache = new Map<string, CachedEntry>();
 
 /**
  * Publie les clés publiques d'un utilisateur dans Firestore.
  */
 export async function publishPublicKeys(uid: string, bundle: PublicKeyBundle): Promise<void> {
   await setDoc(publicKeyDoc(uid), bundle);
-  _publicKeysCache.set(uid, bundle); // mettre en cache immediatement
+  _publicKeysCache.set(uid, { bundle, cachedAt: Date.now() });
+}
+
+/**
+ * Invalide le cache mémoire d'un uid (ex. après generateFreshKeys).
+ */
+export function clearPublicKeysCache(uid?: string): void {
+  if (uid) _publicKeysCache.delete(uid);
+  else     _publicKeysCache.clear();
 }
 
 /**
  * Récupère le bundle de clés publiques d'un utilisateur depuis Firestore.
  * Retourne null si l'utilisateur n'existe pas.
- * Cache memoire de session pour eviter les reads repetitifs.
+ * Les clés sont mises en cache mémoire — 1 seul read Firestore par uid par session.
  */
 export async function getPublicKeys(uid: string): Promise<PublicKeyBundle | null> {
-  // 1. Cache mémoire (le plus rapide)
-  if (_publicKeysCache.has(uid)) return _publicKeysCache.get(uid)!;
+  const entry = _publicKeysCache.get(uid);
+  if (entry && Date.now() - entry.cachedAt < PUBKEY_TTL_MS) return entry.bundle;
 
-  // 2. Cache IDB persisté (TTL 24h) — évite un read Firestore à chaque reconnexion
-  const idbBundle = await loadCachedPubKey(uid);
-  if (idbBundle) {
-    _publicKeysCache.set(uid, idbBundle);
-    return idbBundle;
-  }
-
-  // 3. Firestore (fallback)
-  emitCryptoEvent({ step: 'firestore:read-pubkey', peerUid: shortUid(uid) });
   const snap = await getDoc(publicKeyDoc(uid));
-  const bundle = snap.exists() ? snap.data() as PublicKeyBundle : null;
-  _publicKeysCache.set(uid, bundle);
-  if (bundle) saveCachedPubKey(uid, bundle).catch(() => {});
+  if (!snap.exists()) return null;
+  const bundle = snap.data() as PublicKeyBundle;
+  _publicKeysCache.set(uid, { bundle, cachedAt: Date.now() });
   return bundle;
 }
 

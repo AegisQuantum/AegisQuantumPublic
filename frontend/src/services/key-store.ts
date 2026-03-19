@@ -13,7 +13,7 @@
  *  - La master key elle-même n'est jamais stockée — seulement en mémoire.
  */
 
-import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto"; // utilisé dans saveRatchetState/loadRatchetState uniquement
+import { aesGcmEncrypt, aesGcmDecrypt } from "../crypto";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types internes
@@ -48,14 +48,46 @@ const _memoryStore = new Map<string, PrivateKeyMemory>();
 
 const IDB_NAME    = "aegisquantum-vault";
 const IDB_STORE   = "keys";
-const IDB_VERSION = 1;
+const IDB_VERSION = 2; // bump a 2 pour forcer onupgradeneeded sur Safari
 
+// openDB — robuste Safari :
+// Safari peut ouvrir la DB avec succes sans declencher onupgradeneeded
+// (notamment en navigation privee ou apres un deleteDatabase partiel).
+// On verifie apres ouverture que l'objectStore existe ; s'il est absent on
+// force un upgrade en reopenrant avec version + 1.
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(IDB_NAME, IDB_VERSION);
-    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
+
+    req.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE);
+      }
+    };
+
+    req.onsuccess = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      // Verif defensive : si l'objectStore est absent malgre tout (Safari bug),
+      // on ferme et on force un re-open avec version incrementee.
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.close();
+        const version = db.version + 1;
+        const req2 = indexedDB.open(IDB_NAME, version);
+        req2.onupgradeneeded = (ev2) => {
+          const db2 = (ev2.target as IDBOpenDBRequest).result;
+          if (!db2.objectStoreNames.contains(IDB_STORE)) {
+            db2.createObjectStore(IDB_STORE);
+          }
+        };
+        req2.onsuccess = (ev2) => resolve((ev2.target as IDBOpenDBRequest).result);
+        req2.onerror   = (ev2) => reject((ev2.target as IDBOpenDBRequest).error);
+        return;
+      }
+      resolve(db);
+    };
+
+    req.onerror = (event) => reject((event.target as IDBOpenDBRequest).error);
   });
 }
 
@@ -163,13 +195,11 @@ export async function storePrivateKeys(uid: string, bundle: PrivateKeyBundle): P
     dsaPrivateKey: bundle.dsaPrivateKey,
   };
 
-  // Normaliser la masterKey → 32 bytes SHA-256 (robuste aux strings arbitraires)
   const keyBytes = await _normalizeKey(bundle.masterKey);
   const { ciphertext, nonce } = await _aesEncryptWithKey(JSON.stringify(payload), keyBytes);
   const vault: EncryptedVault = { ciphertext, nonce };
   await idbSet(`vault:${uid}`, JSON.stringify(vault));
 
-  // Charger en mémoire pour la session courante
   _memoryStore.set(uid, payload);
 }
 
@@ -250,7 +280,6 @@ export async function loadRatchetState(
   if (masterKey) {
     try {
       const vault: EncryptedVault = JSON.parse(raw);
-      // Si c'est un vault chiffré (a ciphertext + nonce)
       if (vault.ciphertext && vault.nonce) {
         return await aesGcmDecrypt(vault.ciphertext, vault.nonce, masterKey);
       }
@@ -277,4 +306,126 @@ export function clearPrivateKeys(): void {
 export async function deleteVault(uid: string): Promise<void> {
   _memoryStore.delete(uid);
   await idbDelete(`vault:${uid}`);
+}
+
+/**
+ * Retourne tous les états ratchet stockés pour un utilisateur.
+ * Utilisé par l'export de clés de session.
+ */
+export async function getAllRatchetStates(
+  uid: string
+): Promise<Array<{ convId: string; stateJson: string }>> {
+  const prefix = `ratchet:${uid}:`;
+  const db     = await openDB();
+  const tx     = db.transaction(IDB_STORE, "readonly");
+  const str    = tx.objectStore(IDB_STORE);
+
+  return new Promise((resolve, reject) => {
+    const results: Array<{ convId: string; stateJson: string }> = [];
+    const range  = IDBKeyRange.bound(prefix, prefix + "\uffff");
+    const req    = str.openCursor(range);
+
+    req.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+      if (cursor) {
+        const key     = cursor.key as string;
+        const convId  = key.slice(prefix.length);
+        const val     = cursor.value as string;
+        results.push({ convId, stateJson: val });
+        cursor.continue();
+      } else {
+        db.close();
+        resolve(results);
+      }
+    };
+    req.onerror = () => { db.close(); reject(req.error); };
+  });
+}
+
+/**
+ * Restaure un état ratchet dans IndexedDB (import de session).
+ */
+export async function restoreRatchetState(
+  uid    : string,
+  convId : string,
+  stateJson: string,
+): Promise<void> {
+  await idbSet(`ratchet:${uid}:${convId}`, stateJson);
+}
+
+/**
+ * Supprime l'état ratchet d'une conversation dans IndexedDB.
+ * Après suppression, le prochain envoi/réception repartira d'un bootstrap
+ * complet (stateJson === null → initKemCiphertext).
+ * Appelé lors d'une resynchronisation manuelle du ratchet.
+ */
+export async function deleteRatchetState(uid: string, convId: string): Promise<void> {
+  await idbDelete(`ratchet:${uid}:${convId}`);
+}
+
+/**
+ * Supprime tous les états ratchet d'un utilisateur depuis IndexedDB.
+ * Appelé lors de la suppression de compte.
+ */
+export async function deleteAllRatchetStatesForUser(uid: string): Promise<void> {
+  const prefix = `ratchet:${uid}:`;
+  const db     = await openDB();
+  const tx     = db.transaction(IDB_STORE, "readwrite");
+  const str    = tx.objectStore(IDB_STORE);
+  return new Promise((resolve, reject) => {
+    const range = IDBKeyRange.bound(prefix, prefix + "\uffff");
+    const req   = str.openCursor(range);
+    req.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+      if (cursor) { cursor.delete(); cursor.continue(); }
+      else { db.close(); resolve(); }
+    };
+    req.onerror = () => { db.close(); reject(req.error); };
+  });
+}
+
+/**
+ * Supprime le plaintext mis en cache d'un message spécifique.
+ * Appelé lors de la suppression d'un message.
+ */
+export async function deleteMsgCache(msgId: string): Promise<void> {
+  await idbDelete(`msgcache:${msgId}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache de plaintexts déchiffrés — persistant en clair dans IDB
+//
+// Objectif : pouvoir ré-afficher les messages d'une conversation lors d'un
+// rechargement (clic sur la conv, reconnexion) SANS relancer le Double Ratchet.
+// Le ratchet est un état séquentiel et ne peut déchiffrer que les messages
+// "futurs" ; les anciens ne sont récupérables que depuis ce cache.
+//
+// Stockage "en clair" justifié : si un attaquant accède à l'IDB du navigateur
+// il a déjà accès à l'ensemble de la session (clés en mémoire, DOM, etc.).
+// Ce cache n'aggrave pas la surface d'attaque.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface MsgCacheEntry {
+  plaintext : string;
+  verified  : boolean;
+  senderUid : string;
+  timestamp : number;
+}
+
+/**
+ * Sauvegarde le plaintext déchiffré d'un message dans IDB (en clair).
+ * Clé IDB : msgcache:{msgId}
+ */
+export async function saveMsgCache(msgId: string, entry: MsgCacheEntry): Promise<void> {
+  await idbSet(`msgcache:${msgId}`, JSON.stringify(entry));
+}
+
+/**
+ * Charge le plaintext d'un message depuis le cache IDB.
+ * Retourne null si le message n'a jamais été déchiffré sur cet appareil.
+ */
+export async function loadMsgCache(msgId: string): Promise<MsgCacheEntry | null> {
+  const raw = await idbGet<string>(`msgcache:${msgId}`);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as MsgCacheEntry; } catch { return null; }
 }

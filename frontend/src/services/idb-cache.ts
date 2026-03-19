@@ -28,10 +28,11 @@ import type { PublicKeyBundle } from '../types/user';
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DB_NAME    = 'aegisquantum-cache';
-const DB_VERSION = 1;
-const STORE_MSGS  = 'messages';
-const STORE_CONVS = 'conversations';
-const STORE_PKEYS = 'pubkeys';
+const DB_VERSION = 2;
+const STORE_MSGS   = 'messages';
+const STORE_CONVS  = 'conversations';
+const STORE_PKEYS  = 'pubkeys';
+const STORE_HIDDEN = 'hidden';
 
 const TTL_PUBKEYS_MS = 24 * 60 * 60 * 1000; // 24 h
 
@@ -43,9 +44,10 @@ function openCacheDB(): Promise<IDBDatabase> {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(STORE_MSGS))  db.createObjectStore(STORE_MSGS);
-      if (!db.objectStoreNames.contains(STORE_CONVS)) db.createObjectStore(STORE_CONVS);
-      if (!db.objectStoreNames.contains(STORE_PKEYS)) db.createObjectStore(STORE_PKEYS);
+      if (!db.objectStoreNames.contains(STORE_MSGS))   db.createObjectStore(STORE_MSGS);
+      if (!db.objectStoreNames.contains(STORE_CONVS))  db.createObjectStore(STORE_CONVS);
+      if (!db.objectStoreNames.contains(STORE_PKEYS))  db.createObjectStore(STORE_PKEYS);
+      if (!db.objectStoreNames.contains(STORE_HIDDEN)) db.createObjectStore(STORE_HIDDEN);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror   = () => { _dbPromise = null; reject(req.error); };
@@ -240,10 +242,59 @@ export async function clearCacheForUser(uid: string): Promise<void> {
     const db = await openCacheDB();
     const tx = db.transaction([STORE_CONVS, STORE_PKEYS], 'readwrite');
     tx.objectStore(STORE_CONVS).delete(uid);
-    // Les msgs par convId sont laissés — ils ne contiennent pas d'info sensible
-    // et seront écrasés à la prochaine session. Pour une purge totale, utiliser
-    // clearAllCache().
   } catch {
     // silencieux
+  }
+}
+
+/**
+ * Purge totale du cache IDB (appelé lors de la suppression de compte).
+ * Efface tous les messages déchiffrés, conversations, clés publiques et hidden list.
+ */
+export async function clearAllCachesForAccount(uid: string): Promise<void> {
+  try {
+    const db = await openCacheDB();
+    const tx = db.transaction([STORE_MSGS, STORE_CONVS, STORE_PKEYS, STORE_HIDDEN], 'readwrite');
+    tx.objectStore(STORE_MSGS).clear();
+    tx.objectStore(STORE_CONVS).delete(uid);
+    tx.objectStore(STORE_PKEYS).clear();
+    tx.objectStore(STORE_HIDDEN).delete(uid);
+  } catch {
+    // silencieux
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Messages cachés localement (suppression "pour moi" uniquement)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Marque un message comme caché localement pour cet utilisateur.
+ * Le message reste dans Firestore et visible par l'autre participant.
+ */
+export async function hideMessageLocally(uid: string, msgId: string): Promise<void> {
+  try {
+    const raw     = await cacheGet<string>(STORE_HIDDEN, uid) ?? '[]';
+    const hidden: string[] = JSON.parse(raw);
+    if (!hidden.includes(msgId)) {
+      hidden.push(msgId);
+      await cacheSet(STORE_HIDDEN, uid, JSON.stringify(hidden));
+    }
+  } catch {
+    // silencieux
+  }
+}
+
+/**
+ * Retourne l'ensemble des IDs de messages cachés localement pour cet utilisateur.
+ */
+export async function getHiddenMessages(uid: string): Promise<Set<string>> {
+  try {
+    const raw = await cacheGet<string>(STORE_HIDDEN, uid);
+    if (!raw) return new Set();
+    const arr: string[] = JSON.parse(raw);
+    return new Set(arr);
+  } catch {
+    return new Set();
   }
 }

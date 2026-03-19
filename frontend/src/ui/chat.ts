@@ -5,7 +5,7 @@
 // Import du CSS chat — Vite le bundle en prod, l'injecte via <style> en dev
 import '../styles/chat.css';
 
-import { signOut }                          from '../services/auth';
+import { signOut, deleteAccount }           from '../services/auth';
 import { openFingerprintModal, closeFingerprintModal } from './fingerprint';
 import {
   subscribeToConversations,
@@ -14,7 +14,11 @@ import {
   sendFile,
   getOrCreateConversation,
   onConvPreviewUpdate,
+  sendRatchetResetSignal,
+  deleteMessageForBoth,
+  deleteMessageForMe,
 }                                           from '../services/messaging';
+import { getHiddenMessages }               from '../services/idb-cache';
 import {
   subscribeToTyping,
   markAllRead,
@@ -25,13 +29,18 @@ import {
   type BackupConversation,
   type BackupPayload,
 }                                           from '../services/backup';
+import {
+  exportSessionKeys,
+  importSessionKeys,
+  downloadSessionFile,
+}                                           from '../services/session-keys';
+import { validateMnemonic, normalizeMnemonic } from '../crypto/mnemonic';
 import type { Conversation, DecryptedMessage } from '../types/message';
-import { onCryptoEvent, type CryptoEventPayload } from '../services/crypto-events';
 
 let _unsubConvs:        (() => void) | null = null;
 let _unsubMessages:     (() => void) | null = null;
 let _unsubTyping:       (() => void) | null = null;
-let _unsubPreview:      (() => void) | null = null; // listener preview local
+let _unsubPreview:      (() => void) | null = null;
 let _currentConvId:     string | null       = null;
 let _currentContactUid: string | null       = null;
 let _myUid:             string              = '';
@@ -49,16 +58,19 @@ let _typingDebouncer: ReturnType<typeof createTypingDebouncer> | null = null;
 // ─────────────────────────────────────────────────────────────────────────────
 const _allDecryptedMessages = new Map<string, DecryptedMessage[]>();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Crypto Event Log — alimente la "machine sous verre" en temps réel
-// Ring-buffer de 60 events max pour le popup protocoles
-// ─────────────────────────────────────────────────────────────────────────────
-const CRYPTO_LOG_MAX = 60;
-const _cryptoLog: CryptoEventPayload[] = [];
-let _unsubCryptoEvents: (() => void) | null = null;
-
 // État de la recherche dans les messages
 let _msgSearchQuery = '';
+
+// Guard anti-double-submit — empêche deux envois simultanés (double-clic, Enter + clic)
+let _sendInProgress = false;
+
+// Context menu — message ciblé par le clic droit courant
+let _ctxMsgId:    string | null = null;
+let _ctxConvId:   string | null = null;
+let _ctxIsMine:   boolean       = false;
+
+// Messages cachés localement pour l'utilisateur courant
+let _hiddenMessages = new Set<string>();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LocalStorage — noms locaux des conversations + avatar
@@ -144,7 +156,7 @@ export async function initChat(uid: string): Promise<void> {
   document.getElementById('btn-send')?.addEventListener('click', handleSendMessage);
   const msgInput = document.getElementById('message-input') as HTMLTextAreaElement | null;
   msgInput?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); handleSendMessage(); }
   });
   msgInput?.addEventListener('input',  () => _typingDebouncer?.onInput());
   msgInput?.addEventListener('blur',   () => _typingDebouncer?.onBlur());
@@ -264,6 +276,24 @@ export async function initChat(uid: string): Promise<void> {
     if ((e.target as HTMLElement).id === 'backup-export-modal') closeBackupExportModal();
   });
 
+  // ── Export clés de session ──
+  document.getElementById('btn-export-session')?.addEventListener('click', openSessionExportModal);
+  document.getElementById('session-export-close')?.addEventListener('click', closeSessionExportModal);
+  document.getElementById('session-export-cancel')?.addEventListener('click', closeSessionExportModal);
+  document.getElementById('session-export-confirm')?.addEventListener('click', confirmSessionExport);
+  document.getElementById('session-export-modal')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'session-export-modal') closeSessionExportModal();
+  });
+
+  // ── Import clés de session ──
+  document.getElementById('btn-import-session')?.addEventListener('click', openSessionImportModal);
+  document.getElementById('session-import-close')?.addEventListener('click', closeSessionImportModal);
+  document.getElementById('session-import-cancel')?.addEventListener('click', closeSessionImportModal);
+  document.getElementById('session-import-confirm')?.addEventListener('click', confirmSessionImport);
+  document.getElementById('session-import-modal')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'session-import-modal') closeSessionImportModal();
+  });
+
   // ── Safety Numbers ──
   document.getElementById('btn-fingerprint')?.addEventListener('click', () => {
     if (_currentContactUid) {
@@ -286,6 +316,53 @@ export async function initChat(uid: string): Promise<void> {
     if (e.key === 'Enter')  confirmNewConv();
     if (e.key === 'Escape') closeNewConvModal();
   });
+
+  // ── Resync ratchet ──
+  document.getElementById('btn-resync-ratchet')?.addEventListener('click', async () => {
+    if (!_currentConvId || !_currentContactUid) return;
+    const confirmed = window.confirm(
+      '↺ Resynchroniser le Double Ratchet ?\n\n' +
+      'À utiliser si les messages ne s\'envoient plus ou restent [🔒] après une régénération de clés.\n\n' +
+      'Les messages existants ne seront pas affectés. ' +
+      'Les deux parties pourront s\'envoyer de nouveaux messages déchiffrables après la resync.'
+    );
+    if (!confirmed) return;
+
+    const btn = document.getElementById('btn-resync-ratchet') as HTMLButtonElement | null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Resync…'; }
+
+    try {
+      await sendRatchetResetSignal(_myUid, _currentContactUid);
+      showToast('Resynchronisation envoyée — le ratchet repart de zéro.');
+    } catch (e) {
+      showToast('Erreur lors de la resync : ' + ((e as Error).message ?? String(e)));
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><path d="M13.5 8A5.5 5.5 0 1 1 8 2.5"/><path d="M10 2.5h3.5V6"/></svg> Resync`;
+      }
+    }
+  });
+
+  // ── Supprimer compte ──
+  document.getElementById('btn-delete-account')?.addEventListener('click', openDeleteAccountModal);
+  document.getElementById('modal-delete-account-close')?.addEventListener('click', closeDeleteAccountModal);
+  document.getElementById('modal-delete-account-cancel')?.addEventListener('click', closeDeleteAccountModal);
+  document.getElementById('modal-delete-account')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'modal-delete-account') closeDeleteAccountModal();
+  });
+  document.getElementById('modal-delete-account-confirm-input')?.addEventListener('input', (e) => {
+    const val = (e.target as HTMLInputElement).value;
+    const btn = document.getElementById('modal-delete-account-confirm') as HTMLButtonElement | null;
+    if (btn) btn.disabled = val !== 'SUPPRIMER';
+  });
+  document.getElementById('modal-delete-account-confirm')?.addEventListener('click', confirmDeleteAccount);
+
+  // ── Menu contextuel messages ──
+  initMessageContextMenu();
+
+  // Charger les messages cachés au démarrage
+  getHiddenMessages(_myUid).then(s => { _hiddenMessages = s; });
 
   // ── Renommer conversation ──
   document.getElementById('chat-contact-name')?.addEventListener('dblclick', () => {
@@ -314,28 +391,6 @@ export async function initChat(uid: string): Promise<void> {
       const name = el.querySelector('.contact-name')?.textContent?.toLowerCase() ?? '';
       el.style.display = name.includes(q) ? '' : 'none';
     });
-  });
-
-  // ── Machine sous verre — bouton dans la crypto-box + badges settings ──
-  const _openGlass = (anchorId: string) => (e: Event) => {
-    e.stopPropagation();
-    if (_cryptoPopupOpen) { closeCryptoPopup(); return; }
-    openCryptoPopup(anchorId);
-  };
-  document.getElementById('btn-crypto-glass')?.addEventListener('click', _openGlass('btn-crypto-glass'));
-  document.getElementById('badge-mlkem')?.addEventListener('click',     _openGlass('badge-mlkem'));
-  document.getElementById('badge-mldsa')?.addEventListener('click',     _openGlass('badge-mldsa'));
-  document.getElementById('badge-ratchet')?.addEventListener('click',   _openGlass('badge-ratchet'));
-
-  // ── Brancher le bus d'événements crypto (machine sous verre) ──
-  _unsubCryptoEvents?.();
-  _unsubCryptoEvents = onCryptoEvent((ev) => {
-    _cryptoLog.push(ev);
-    if (_cryptoLog.length > CRYPTO_LOG_MAX) _cryptoLog.shift();
-    // Mettre à jour le popup si ouvert
-    _refreshCryptoPopupIfOpen();
-    // Mettre à jour les panels dépliant ouverts avec les données live
-    _updateLiveDataInOpenPanels(ev);
   });
 
   // ── S'abonner aux conversations ──
@@ -559,36 +614,36 @@ interface CryptoStepDef {
 
 const SEND_STEPS: CryptoStepDef[] = [
   {
-    icon: '🔑', type: 'send', delay: 0,
-    label: 'Génération des clés éphémères',
-    detail: 'ML-KEM-768 keypair',
+    icon: '📡', type: 'send', delay: 0,
+    label: 'Récupération clé publique KEM',
+    detail: 'key-registry.getPublicKeys(contactUid) ← Firestore',
     explain: {
-      what:  'Génération d\'une paire de clés ML-KEM-768 fraîche pour ce message uniquement.',
-      how:   'ML-KEM (Module-LWE) génère une clé publique et une clé privée éphémères aléatoires. La clé publique permet au destinataire d\'encapsuler un secret partagé.',
-      why:   'Les clés éphémères garantissent la forward secrecy : même si une clé long-terme est compromise, les anciens messages restent protégés.',
-      algo:  'ML-KEM-768 (NIST FIPS 203) — Niveau 3, 192-bit post-quantique',
+      what:  'Récupération de la clé publique ML-KEM-768 du destinataire depuis Firestore.',
+      how:   'À l\'inscription, chaque utilisateur publie sa clé KEM publique dans /publicKeys/{uid}. Elle est lue depuis le cache mémoire ou Firestore si absente.',
+      why:   'Sans cette clé publique, impossible d\'encapsuler un secret partagé. Premier message = initialisation du Double Ratchet avec cette clé.',
+      algo:  'key-registry.ts — cache mémoire + Firestore fallback',
     },
   },
   {
-    icon: '🔗', type: 'active', delay: 300,
-    label: 'Encapsulation KEM',
-    detail: 'kemEncapsulate(recipientPubKey) → sharedSecret + kemCiphertext',
+    icon: '🔑', type: 'active', delay: 300,
+    label: 'Double Ratchet — avancement KEM',
+    detail: 'kemEncapsulate(theirKemPubKey) → sharedSecret éphémère; HKDF(rootKey ‖ sharedSecret) → rootKey + sendingChainKey',
     explain: {
-      what:  'Encapsulation d\'un secret partagé avec la clé publique ML-KEM-768 du destinataire.',
-      how:   'La clé publique du contact (Firestore) encapsule un secret aléatoire → kemCiphertext (transmis) + sharedSecret (jamais transmis).',
-      why:   'Seul le destinataire avec sa clé privée peut décapsuler et retrouver le sharedSecret, même face à un ordinateur quantique.',
-      algo:  'ML-KEM-768 encapsulate — IND-CCA2 sécurisé',
+      what:  'Chaque message fait tourner la "machine" du Double Ratchet via un échange KEM éphémère.',
+      how:   'kemEncapsulate génère un secret partagé éphémère avec la clé publique KEM du contact. HKDF combine ce secret avec le rootKey courant pour produire un nouveau rootKey et une sendingChainKey. Le kemCiphertext est transmis avec le message.',
+      why:   'C\'est le cœur du Double Ratchet : à chaque message, les clés changent (forward secrecy + break-in recovery). Un attaquant capturant un message ne peut ni lire les précédents ni forger les suivants.',
+      algo:  'ML-KEM-768 encapsulate (FIPS 203) + HKDF-SHA256 (RFC 5869)',
     },
   },
   {
     icon: '🧩', type: 'send', delay: 600,
-    label: 'Dérivation de clé HKDF',
-    detail: 'HKDF-SHA256(sharedSecret, info) → messageKey 256 bits',
+    label: 'Dérivation clé de message',
+    detail: 'HKDF(sendingChainKey, "AQ-chain-v1") → messageKey 256 bits + nextChainKey',
     explain: {
-      what:  'Dérivation d\'une clé AES-256 à partir du sharedSecret KEM.',
-      how:   'HKDF (HMAC-based Extract-and-Expand KDF) avec SHA-256 transforme le sharedSecret brut en clé uniforme de 256 bits, avec un contexte (info) liant la clé à cet usage.',
-      why:   'Le sharedSecret KEM brut n\'est pas utilisable directement comme clé AES. HKDF le distille et l\'isole de tout autre usage.',
-      algo:  'HKDF-SHA256 (RFC 5869)',
+      what:  'Dérivation d\'une clé AES-256 unique et jetable pour ce message.',
+      how:   'La sendingChainKey est dérivée par HKDF en deux sorties : messageKey (pour AES-GCM) et nextChainKey (qui remplace sendingChainKey pour le prochain message). La chaîne avance sans jamais revenir en arrière.',
+      why:   'Chaque message a une clé de chiffrement différente. Même si une messageKey est compromise, les autres messages restent protégés — c\'est le ratchet symétrique.',
+      algo:  'HKDF-SHA256 (RFC 5869) — contexte "AQ-chain-v1"',
     },
   },
   {
@@ -596,32 +651,32 @@ const SEND_STEPS: CryptoStepDef[] = [
     label: 'Chiffrement AES-256-GCM',
     detail: 'aesGcmEncrypt(plaintext, messageKey, nonce) → ciphertext',
     explain: {
-      what:  'Chiffrement authentifié du message avec AES-256-GCM.',
-      how:   'Un nonce aléatoire de 96 bits est généré. AES-256-GCM chiffre le message et produit un ciphertext + tag d\'authentification GCM 128 bits. Le nonce est stocké avec le message.',
-      why:   'AES-GCM garantit confidentialité et intégrité : toute modification du ciphertext invalide le tag et est détectée avant déchiffrement.',
+      what:  'Chiffrement authentifié du message avec la clé jetable dérivée du ratchet.',
+      how:   'Un nonce aléatoire 96 bits est généré. AES-256-GCM chiffre le message et produit un ciphertext + tag d\'authentification GCM 128 bits. La messageKey est détruite après usage.',
+      why:   'AES-GCM garantit confidentialité et intégrité. Toute modification du ciphertext invalide le tag et est détectée avant de produire un quelconque plaintext.',
       algo:  'AES-256-GCM (NIST SP 800-38D) — nonce 96 bits, tag 128 bits',
     },
   },
   {
     icon: '✍️', type: 'send', delay: 1200,
     label: 'Signature ML-DSA-65',
-    detail: 'dsaSign(ciphertext ‖ nonce ‖ kemCiphertext, myPrivKey)',
+    detail: 'dsaSign(ciphertext ‖ nonce ‖ kemCiphertext, myDsaPrivKey)',
     explain: {
-      what:  'Signature numérique du message chiffré avec votre clé privée ML-DSA-65.',
-      how:   'La concaténation (ciphertext + nonce + kemCiphertext) est signée avec Dilithium. La signature (~3 309 octets) est stockée dans Firestore avec le message.',
-      why:   'Prouve que c\'est bien vous l\'expéditeur et que le message n\'a pas été altéré. Sans signature, un attaquant pourrait substituer le ciphertext.',
+      what:  'Signature numérique du payload chiffré avec votre clé privée ML-DSA-65 (Dilithium).',
+      how:   'La concaténation (ciphertext + nonce + kemCiphertext) est signée avec votre clé DSA long-terme. La signature (~3 309 octets) est stockée avec le message dans Firestore.',
+      why:   'Authentifie l\'expéditeur et garantit l\'intégrité. Sans signature, n\'importe qui pourrait injecter un faux message ou modifier le kemCiphertext pour détourner le ratchet.',
       algo:  'ML-DSA-65 (NIST FIPS 204 / Dilithium3) — résistant quantique',
     },
   },
   {
     icon: '📤', type: 'done', delay: 1500,
     label: 'Message envoyé dans Firestore',
-    detail: '{ ciphertext, nonce, kemCiphertext, signature } → Firestore',
+    detail: '{ kemCiphertext, senderEphPub, ciphertext, nonce, signature, messageIndex }',
     explain: {
-      what:  'Le paquet chiffré et signé est écrit dans Firestore.',
-      how:   'Le document contient : kemCiphertext, ciphertext, nonce, signature. Le plaintext n\'est jamais transmis ni stocké.',
-      why:   'Firebase ne voit que des blobs opaques. Même un accès complet à Firestore ne permet pas de lire les messages sans les clés privées locales.',
-      algo:  'Firestore — stockage chiffré au repos (AES-256 Google)',
+      what:  'Le paquet chiffré, signé et indexé est écrit dans Firestore.',
+      how:   'Le document Firestore contient les blobs cryptographiques nécessaires à la réception (kemCiphertext, ciphertext, nonce, signature, senderEphPub). Le plaintext n\'y figure jamais.',
+      why:   'Firebase ne voit que des blobs opaques. Même un accès root à Firestore ne permet pas de lire les messages sans les clés privées locales du destinataire.',
+      algo:  'Firestore — stockage chiffré au repos (AES-256 Google) + règles de sécurité',
     },
   },
 ];
@@ -634,41 +689,41 @@ const RECV_STEPS: CryptoStepDef[] = [
     explain: {
       what:  'Récupération de la clé publique ML-DSA-65 de l\'expéditeur depuis Firestore.',
       how:   'La clé publique DSA est publiée dans /publicKeys/{uid} lors de l\'inscription. Elle est lue depuis le cache mémoire ou Firestore si absente.',
-      why:   'Vérifier la signature nécessite la clé publique de l\'expéditeur. Cette clé est publiée à l\'inscription et ne peut pas être falsifiée.',
+      why:   'La vérification de signature requiert la clé publique de l\'expéditeur. Sans elle, impossible d\'authentifier le message.',
       algo:  'key-registry.ts — cache mémoire + Firestore fallback',
     },
   },
   {
     icon: '🔍', type: 'active', delay: 350,
     label: 'Vérification signature ML-DSA-65',
-    detail: 'dsaVerify(payload, signature, senderDsaPubKey)',
+    detail: 'dsaVerify(ciphertext ‖ nonce ‖ kemCiphertext, signature, senderDsaPubKey)',
     explain: {
-      what:  'Vérification cryptographique que la signature est valide et provient de l\'expéditeur déclaré.',
-      how:   'ML-DSA-65 vérifie que la signature correspond au payload (ciphertext + nonce + kemCiphertext) et à la clé publique. Un seul octet modifié → échec.',
-      why:   'Garantit authenticité et intégrité : impossible d\'injecter un message forgé ou d\'altérer un message existant sans être détecté.',
+      what:  'Vérification cryptographique que le message provient bien de l\'expéditeur déclaré et n\'a pas été altéré.',
+      how:   'ML-DSA-65 (Dilithium) vérifie que la signature correspond au payload (ciphertext + nonce + kemCiphertext) et à la clé publique DSA. Un seul bit modifié → rejet immédiat.',
+      why:   'Garantit authenticité et intégrité avant tout déchiffrement. Un attaquant ne peut ni forger un message ni modifier le kemCiphertext sans que la vérification échoue.',
       algo:  'ML-DSA-65 verify (NIST FIPS 204) — retourne true/false',
     },
   },
   {
     icon: '🔓', type: 'recv', delay: 700,
-    label: 'Décapsulation KEM',
-    detail: 'kemDecapsulate(kemCiphertext, myPrivKey) → sharedSecret',
+    label: 'Double Ratchet — avancement KEM',
+    detail: 'kemDecapsulate(kemCiphertext, ourPrivKey) → sharedSecret; HKDF(rootKey ‖ sharedSecret) → rootKey + receivingChainKey',
     explain: {
-      what:  'Décapsulation du secret partagé avec votre clé privée ML-KEM-768.',
-      how:   'Votre clé privée ML-KEM-768 (mémoire uniquement, jamais dans Firestore) décapsule le kemCiphertext pour retrouver le même sharedSecret que l\'expéditeur.',
-      why:   'Seul le destinataire légitime a la clé privée. Sans elle, décapsuler le kemCiphertext est impossible même avec un ordinateur quantique.',
-      algo:  'ML-KEM-768 decapsulate (NIST FIPS 203) — IND-CCA2',
+      what:  'Décapsulation du secret éphémère et avancement de la machine Double Ratchet côté récepteur.',
+      how:   'Votre clé privée KEM décapsule le kemCiphertext pour obtenir le même sharedSecret que l\'expéditeur. HKDF le combine avec le rootKey courant → nouveau rootKey + receivingChainKey. Même avancement de machine qu\'à l\'envoi.',
+      why:   'Le ratchet avance de façon symétrique des deux côtés sans jamais transmettre la clé. Chaque message = nouvelle machine, même propriété de forward secrecy.',
+      algo:  'ML-KEM-768 decapsulate (FIPS 203) + HKDF-SHA256 (RFC 5869)',
     },
   },
   {
     icon: '🧩', type: 'recv', delay: 1050,
-    label: 'Re-dérivation clé HKDF',
-    detail: 'HKDF-SHA256(sharedSecret, info) → messageKey',
+    label: 'Dérivation clé de message',
+    detail: 'HKDF(receivingChainKey, "AQ-chain-v1") → messageKey + nextChainKey',
     explain: {
-      what:  'Re-dérivation de la clé AES-256 à partir du sharedSecret décapsulé.',
-      how:   'Même HKDF-SHA256 qu\'à l\'envoi. Le sharedSecret étant identique des deux côtés, la messageKey reconstruite est identique — sans jamais avoir transité.',
-      why:   'La clé de déchiffrement n\'est jamais transmise. Elle est reconstruite indépendamment grâce au mécanisme KEM.',
-      algo:  'HKDF-SHA256 (RFC 5869) — mêmes paramètres que l\'envoi',
+      what:  'Re-dérivation de la clé AES-256 unique de ce message côté récepteur.',
+      how:   'Même dérivation HKDF qu\'à l\'envoi depuis la receivingChainKey. Le sharedSecret KEM étant identique des deux côtés, la messageKey obtenue est exactement la même — sans jamais avoir transité sur le réseau.',
+      why:   'La clé de déchiffrement n\'est jamais transmise. Elle est reconstruite indépendamment, preuve du fonctionnement du Double Ratchet.',
+      algo:  'HKDF-SHA256 (RFC 5869) — contexte "AQ-chain-v1"',
     },
   },
   {
@@ -676,9 +731,9 @@ const RECV_STEPS: CryptoStepDef[] = [
     label: 'Déchiffrement AES-256-GCM',
     detail: 'aesGcmDecrypt(ciphertext, nonce, messageKey) → plaintext',
     explain: {
-      what:  'Déchiffrement authentifié et vérification d\'intégrité du message.',
-      how:   'AES-256-GCM déchiffre le ciphertext avec la messageKey et le nonce. Le tag GCM est vérifié en premier — toute altération lève une exception avant d\'exposer des données.',
-      why:   'GCM garantit un déchiffrement authentifié : impossible d\'obtenir un plaintext corrompu ou forgé sans que ce soit détecté.',
+      what:  'Déchiffrement authentifié et vérification d\'intégrité avec la clé jetable du ratchet.',
+      how:   'AES-256-GCM déchiffre le ciphertext avec la messageKey dérivée et le nonce stocké. Le tag GCM 128 bits est vérifié avant tout — toute altération lève une exception sans exposer de données.',
+      why:   'GCM garantit un déchiffrement authentifié : impossible d\'obtenir un plaintext corrompu ou forgé sans détection. La messageKey est détruite après usage.',
       algo:  'AES-256-GCM (NIST SP 800-38D) — authentification + confidentialité',
     },
   },
@@ -691,226 +746,6 @@ const ICONS_SVG: Record<CryptoStepType, string> = {
   warn:   `<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10"><path d="M6 1 11 10H1L6 1Z"/><path d="M6 5v2.5M6 8.5v.5"/></svg>`,
   active: `<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10"><circle cx="6" cy="6" r="4.5"/><path d="M6 3v3l2 1.5"/></svg>`,
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Machine sous verre — Popup crypto live
-// S'ouvre quand on clique sur un badge protocole en bas (ML-KEM, ML-DSA, etc.)
-// Affiche le ring-buffer _cryptoLog en temps réel.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const STEP_LABELS: Record<string, string> = {
-  'kem:encapsulate'      : '🔗 KEM Encapsulate',
-  'kem:decapsulate'      : '🔓 KEM Décapsule',
-  'hkdf:derive'          : '🧩 HKDF Dérivation',
-  'aes:encrypt'          : '🔒 AES-GCM Chiffre',
-  'aes:decrypt'          : '✅ AES-GCM Déchiffre',
-  'dsa:sign'             : '✍️ DSA Signature',
-  'dsa:verify'           : '🔍 DSA Vérification',
-  'ratchet:load'         : '⚙️ Ratchet Chargé',
-  'ratchet:save'         : '💾 Ratchet Sauvé',
-  'firestore:write'      : '📤 Firestore Écriture',
-  'firestore:read-pubkey': '📡 Firestore Clé Pub',
-  'idb:cache-hit'        : '⚡ IDB Cache Hit',
-  'idb:cache-write'      : '💾 IDB Cache Write',
-};
-
-function _formatCryptoEvent(ev: CryptoEventPayload): string {
-  const parts: string[] = [];
-  if (ev.messageIndex !== undefined) parts.push(`#${ev.messageIndex}`);
-  if (ev.peerUid)               parts.push(`peer:${ev.peerUid}`);
-  if (ev.convId)                parts.push(`conv:${ev.convId}`);
-  if (ev.kemCiphertextPreview)  parts.push(`kem:${ev.kemCiphertextPreview}`);
-  if (ev.ciphertextPreview)     parts.push(`ct:${ev.ciphertextPreview}`);
-  if (ev.signaturePreview)      parts.push(`sig:${ev.signaturePreview}`);
-  if (ev.nonce)                 parts.push(`nonce:${ev.nonce.slice(0,12)}…`);
-  if (ev.ciphertextLen)         parts.push(`${ev.ciphertextLen}B`);
-  if (ev.signatureLen)          parts.push(`${ev.signatureLen}B`);
-  if (ev.verified !== undefined) parts.push(ev.verified ? '✓ ok' : '✗ FAIL');
-  if (ev.firestoreDocId)        parts.push(`doc:${ev.firestoreDocId}`);
-  if (ev.cacheKey)              parts.push(`store:${ev.cacheKey}`);
-  if (ev.cacheCount !== undefined) parts.push(`n=${ev.cacheCount}`);
-  return parts.join('  ');
-}
-
-let _cryptoPopupOpen = false;
-
-function openCryptoPopup(anchorId?: string): void {
-  // Supprimer ancien popup s'il existe
-  document.getElementById('crypto-glass-popup')?.remove();
-
-  const popup = document.createElement('div');
-  popup.id        = 'crypto-glass-popup';
-  popup.className = 'crypto-glass-popup';
-  popup.innerHTML = `
-    <div class="cgp-header">
-      <span class="cgp-title">🔬 Machine sous verre</span>
-      <span class="cgp-subtitle">Opérations cryptographiques en temps réel</span>
-      <button class="cgp-close" id="cgp-close-btn" title="Fermer">✕</button>
-    </div>
-    <div class="cgp-legend">
-      <span class="cgp-legend-item"><span style="color:var(--c-accent)">■</span> KEM/HKDF</span>
-      <span class="cgp-legend-item"><span style="color:#6fffb0">■</span> AES/DSA</span>
-      <span class="cgp-legend-item"><span style="color:#ffd06f">■</span> Ratchet/IDB</span>
-      <span class="cgp-legend-item"><span style="color:#c084fc">■</span> Firestore</span>
-    </div>
-    <div class="cgp-log" id="cgp-log-container"></div>
-    <div class="cgp-footer">
-      <span id="cgp-event-count">0 événements</span>
-      <span class="cgp-secure-badge">🔐 Clés privées jamais exposées</span>
-    </div>`;
-
-  // Positionner près de l'ancre si fournie
-  const anchor = anchorId ? document.getElementById(anchorId) : null;
-  if (anchor) {
-    const rect = anchor.getBoundingClientRect();
-    popup.style.bottom = `${window.innerHeight - rect.top + 8}px`;
-    popup.style.left   = `${Math.max(8, rect.left - 20)}px`;
-  }
-
-  document.body.appendChild(popup);
-  _cryptoPopupOpen = true;
-
-  document.getElementById('cgp-close-btn')?.addEventListener('click', closeCryptoPopup);
-
-  // Clic en dehors ferme le popup
-  setTimeout(() => {
-    document.addEventListener('click', _onCryptoPopupOutsideClick);
-  }, 50);
-
-  _renderCryptoLog();
-
-  // Animation d'entrée
-  requestAnimationFrame(() => popup.classList.add('visible'));
-}
-
-function closeCryptoPopup(): void {
-  _cryptoPopupOpen = false;
-  document.removeEventListener('click', _onCryptoPopupOutsideClick);
-  const popup = document.getElementById('crypto-glass-popup');
-  if (popup) {
-    popup.classList.remove('visible');
-    setTimeout(() => popup.remove(), 200);
-  }
-}
-
-function _onCryptoPopupOutsideClick(e: MouseEvent): void {
-  const popup = document.getElementById('crypto-glass-popup');
-  if (popup && !popup.contains(e.target as Node)) closeCryptoPopup();
-}
-
-function _renderCryptoLog(): void {
-  const container = document.getElementById('cgp-log-container');
-  const countEl   = document.getElementById('cgp-event-count');
-  if (!container) return;
-
-  container.innerHTML = '';
-
-  if (_cryptoLog.length === 0) {
-    container.innerHTML = '<div class="cgp-empty">Aucune activité pour l\'instant…<br/>Envoyez ou recevez un message.</div>';
-    if (countEl) countEl.textContent = '0 événements';
-    return;
-  }
-
-  // Afficher du plus récent au plus ancien
-  const logs = [..._cryptoLog].reverse();
-  for (const ev of logs) {
-    const row = document.createElement('div');
-    row.className = `cgp-row cgp-row-${_eventColorClass(ev.step)}`;
-
-    const time = new Date(ev.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const label = STEP_LABELS[ev.step] ?? ev.step;
-    const detail = _formatCryptoEvent(ev);
-
-    row.innerHTML = `
-      <span class="cgp-time">${time}</span>
-      <span class="cgp-step-label">${label}</span>
-      <span class="cgp-detail">${detail}</span>`;
-
-    container.appendChild(row);
-  }
-
-  if (countEl) {
-    countEl.textContent = `${_cryptoLog.length} événement${_cryptoLog.length > 1 ? 's' : ''}`;
-  }
-}
-
-function _refreshCryptoPopupIfOpen(): void {
-  if (!_cryptoPopupOpen) return;
-  _renderCryptoLog();
-}
-
-function _eventColorClass(step: string): string {
-  if (step.startsWith('kem:') || step === 'hkdf:derive')     return 'kem';
-  if (step.startsWith('aes:') || step.startsWith('dsa:'))   return 'aes';
-  if (step.startsWith('ratchet:') || step.startsWith('idb:')) return 'ratchet';
-  if (step.startsWith('firestore:'))                         return 'firestore';
-  return 'other';
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Live data dans les panels dépliant existants
-// Quand un panel est ouvert et qu'un event arrive, on injecte les données réelles
-// dans une zone "live" dédiée en bas du panel.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Mapping event step → index du step dans SEND_STEPS / RECV_STEPS
-const SEND_STEP_MAP: Record<string, number> = {
-  'kem:encapsulate': 1,   // Encapsulation KEM
-  'hkdf:derive':     2,   // Dérivation HKDF
-  'aes:encrypt':     3,   // AES-256-GCM
-  'dsa:sign':        4,   // Signature
-  'firestore:write': 5,   // Envoi Firestore
-};
-const RECV_STEP_MAP: Record<string, number> = {
-  'firestore:read-pubkey': 0, // Récupération clé pub
-  'dsa:verify':            1, // Vérification signature
-  'kem:decapsulate':       2, // Décapsulation KEM
-  'hkdf:derive':           3, // Re-dérivation HKDF
-  'aes:decrypt':           4, // Déchiffrement AES
-};
-
-function _updateLiveDataInOpenPanels(ev: CryptoEventPayload): void {
-  // Trouver tous les panels ouverts dans le crypto-steps container
-  const container = document.getElementById('crypto-steps');
-  if (!container) return;
-
-  const openWraps = container.querySelectorAll<HTMLElement>('.crypto-step-wrap.open');
-  if (openWraps.length === 0) return;
-
-  openWraps.forEach((wrap) => {
-    const panel = wrap.querySelector<HTMLElement>('.crypto-step-panel');
-    if (!panel) return;
-
-    // Identifier à quel step correspond ce panel (via index dans le DOM)
-    const allWraps = [...container.querySelectorAll('.crypto-step-wrap')];
-    const stepIdx  = allWraps.indexOf(wrap);
-
-    // Vérifier si cet event correspond à ce step (envoi ou réception)
-    const isSendStep = Object.entries(SEND_STEP_MAP).some(([k, v]) => k === ev.step && v === stepIdx);
-    const isRecvStep = Object.entries(RECV_STEP_MAP).some(([k, v]) => k === ev.step && v === stepIdx);
-    if (!isSendStep && !isRecvStep) return;
-
-    // Créer ou mettre à jour la zone live dans le panel
-    let liveZone = panel.querySelector<HTMLElement>('.crypto-panel-live');
-    if (!liveZone) {
-      liveZone = document.createElement('div');
-      liveZone.className = 'crypto-panel-live';
-      panel.appendChild(liveZone);
-    }
-
-    const detail = _formatCryptoEvent(ev);
-    const time   = new Date(ev.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    liveZone.innerHTML = `
-      <div class="cpl-header">⚡ Données temps réel — ${time}</div>
-      <div class="cpl-row">${detail || '—'}</div>
-      ${ev.verified !== undefined
-        ? `<div class="cpl-row cpl-verify ${ev.verified ? 'ok' : 'fail'}">
-             ${ev.verified ? '✓ Signature valide' : '✗ Signature INVALIDE'}
-           </div>`
-        : ''}
-    `;
-  });
-}
 
 function setCryptoStatus(state: 'idle' | 'sending' | 'active' | 'error'): void {
   const dot = document.getElementById('crypto-status-dot');
@@ -1201,8 +1036,12 @@ function renderMessages(messages: DecryptedMessage[]): void {
   const container = document.getElementById('messages-container');
   if (!container) return;
 
+  // Filtrer les messages cachés localement
+  const visible = messages.filter(m => !_hiddenMessages.has(m.id));
+
   // Mettre à jour le cache global pour la recherche + backup
-  if (_currentConvId) _allDecryptedMessages.set(_currentConvId, messages);
+  if (_currentConvId) _allDecryptedMessages.set(_currentConvId, visible);
+  messages = visible;
 
   const newMessages     = messages.filter(m => !_renderedMsgIds.has(m.id));
   const hasNewFromOther = newMessages.some(m => m.senderUid !== _myUid);
@@ -1216,14 +1055,16 @@ function renderMessages(messages: DecryptedMessage[]): void {
       if (textEl) {
         const current = textEl.textContent ?? '';
         const isPlaceholder = current.startsWith('[\uD83D\uDD12');
-        if (isPlaceholder && !msg.plaintext.startsWith('[\uD83D\uDD12')) {
+        if (isPlaceholder && msg.plaintext !== current) {
           textEl.textContent = msg.plaintext;
           // Réappliquer la recherche si active
           if (_msgSearchQuery) {
             textEl.dataset.plaintext = msg.plaintext;
             applyMsgSearch(_msgSearchQuery);
           }
-          bubble.classList.remove('decryption-pending');
+          if (!msg.plaintext.startsWith('[\uD83D\uDD12')) {
+            bubble.classList.remove('decryption-pending');
+          }
         }
       }
     }
@@ -1236,6 +1077,17 @@ function renderMessages(messages: DecryptedMessage[]): void {
   if (newMessages.length === 0) return;
 
   for (const msg of newMessages) {
+    // ── Bulle système (resync ratchet, etc.) ──────────────────────────────
+    if (msg.type === 'system') {
+      const sysBubble = document.createElement('div');
+      sysBubble.className     = 'message-bubble system-msg';
+      sysBubble.dataset.msgId = msg.id;
+      sysBubble.innerHTML = `<span class="system-msg-text">${escapeHtml(msg.plaintext)}</span>`;
+      container.appendChild(sysBubble);
+      _renderedMsgIds.add(msg.id);
+      continue;
+    }
+
     const isMine = msg.senderUid === _myUid;
     const isRead = isMine && (msg.readBy ?? []).includes(_currentContactUid ?? '');
     const bubble = document.createElement('div');
@@ -1293,17 +1145,22 @@ function renderMessages(messages: DecryptedMessage[]): void {
     }
 
     bubble.insertAdjacentHTML('beforeend', metaHtml);
+
+    // Clic droit → menu contextuel
+    bubble.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showMessageContextMenu(e, msg.id, isMine);
+    });
+
     container.appendChild(bubble);
     _renderedMsgIds.add(msg.id);
   }
 
-  // Scroller uniquement si l'utilisateur etait deja en bas (ou si c'est son propre message)
   const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
   if (isAtBottom || newMessages.some(m => m.senderUid === _myUid)) {
     container.scrollTop = container.scrollHeight;
   }
 
-  // Reappliquer la recherche sur les nouveaux messages
   if (_msgSearchQuery) applyMsgSearch(_msgSearchQuery);
 
   if (hasNewFromOther) {
@@ -1367,6 +1224,7 @@ function _fmtSize(bytes: number): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleSendMessage(): Promise<void> {
+  if (_sendInProgress) return;
   if (!_currentConvId || !_currentContactUid) return;
 
   const input = document.getElementById('message-input') as HTMLTextAreaElement | null;
@@ -1377,6 +1235,10 @@ async function handleSendMessage(): Promise<void> {
 
   const convId     = _currentConvId;
   const contactUid = _currentContactUid;
+
+  _sendInProgress = true;
+  const btn = document.getElementById('btn-send') as HTMLButtonElement | null;
+  if (btn) btn.disabled = true;
 
   input.value    = '';
   input.disabled = true;
@@ -1389,13 +1251,14 @@ async function handleSendMessage(): Promise<void> {
   try {
     await sendMessage(_myUid, contactUid, text);
   } catch (err) {
-    const msg = err instanceof Error ? `${err.message}` : String(err);
     console.error('[AQ] sendMessage failed:', err);
-    showToast(`Envoi échoué : ${msg}`);
+    showToast('Envoi échoué. Vérifiez la console.');
     input.value = text;
     clearCryptoBox();
     setCryptoStatus('idle');
   } finally {
+    _sendInProgress = false;
+    if (btn) btn.disabled = false;
     input.disabled = false;
     input.focus();
     if (_currentConvId !== convId) {
@@ -1445,16 +1308,12 @@ async function handleSignOut(): Promise<void> {
   _unsubMessages?.();
   _unsubTyping?.();
   _unsubPreview?.();
-  _unsubTyping       = null;
-  _unsubPreview      = null;
-  _unsubCryptoEvents?.();
-  _unsubCryptoEvents = null;
-  _currentConvId     = null;
-  _localConvs        = [];
-  _renderedMsgIds    = new Set();
+  _unsubTyping    = null;
+  _unsubPreview   = null;
+  _currentConvId  = null;
+  _localConvs     = [];
+  _renderedMsgIds  = new Set();
   _allDecryptedMessages.clear();
-  _cryptoLog.length  = 0;
-  closeCryptoPopup();
   closeMsgSearch();
   await signOut();
 }
@@ -1506,7 +1365,6 @@ function applyMsgSearch(query: string): void {
   const countEl = document.getElementById('msg-search-count') as HTMLElement | null;
 
   if (!_msgSearchQuery) {
-    // Mode normal — tout afficher sans highlight
     container.classList.remove('searching');
     container.querySelectorAll<HTMLElement>('.message-bubble').forEach(bubble => {
       bubble.classList.remove('search-match');
@@ -1549,7 +1407,6 @@ function applyMsgSearch(query: string): void {
     }
   });
 
-  // Compteur de résultats dans la barre de recherche
   let counter = document.getElementById('msg-search-count') as HTMLElement | null;
   const wrap  = document.getElementById('msg-search-wrap');
   if (!counter && wrap) {
@@ -1567,7 +1424,6 @@ function applyMsgSearch(query: string): void {
     counter.style.color = matchCount === 0 ? 'var(--c-red)' : 'var(--c-muted)';
   }
 
-  // Scroller jusqu'au premier résultat
   if (firstMatchEl) {
     (firstMatchEl as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
@@ -1618,7 +1474,6 @@ async function confirmBackupExport(): Promise<void> {
   };
 
   try {
-    // Collecter toutes les conversations chargées en mémoire
     const convs: BackupConversation[] = [];
     for (const [convId, msgs] of _allDecryptedMessages.entries()) {
       const conv = _localConvs.find(c => c.id === convId);
@@ -1660,6 +1515,273 @@ async function confirmBackupExport(): Promise<void> {
     showToast(`Export échoué : ${err instanceof Error ? err.message : String(err)}`);
     if (confirmBtn) { confirmBtn.disabled = false; }
     setProgress(0, '');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Export clés de session
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Stocker le fileJson généré entre step1 et step2
+let _sessionExportFileJson: string | null = null;
+
+function openSessionExportModal(): void {
+  _sessionExportFileJson = null;
+  const modal = document.getElementById('session-export-modal');
+  if (modal) modal.style.display = 'flex';
+  const step1 = document.getElementById('session-export-step1');
+  const step2 = document.getElementById('session-export-step2');
+  if (step1) step1.style.display = 'flex';
+  if (step2) step2.style.display = 'none';
+  const confirmBtn = document.getElementById('session-export-confirm') as HTMLButtonElement | null;
+  if (confirmBtn) {
+    confirmBtn.disabled = false;
+    confirmBtn.innerHTML = `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px"><path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/></svg>Générer &amp; Télécharger`;
+    confirmBtn.onclick = null;
+  }
+  const prog = document.getElementById('session-export-progress');
+  if (prog) prog.style.display = 'none';
+}
+
+function closeSessionExportModal(): void {
+  const modal = document.getElementById('session-export-modal');
+  if (modal) modal.style.display = 'none';
+  _sessionExportFileJson = null;
+}
+
+async function confirmSessionExport(): Promise<void> {
+  const confirmBtn = document.getElementById('session-export-confirm') as HTMLButtonElement | null;
+  const prog  = document.getElementById('session-export-progress');
+  const fill  = document.getElementById('session-export-progress-fill');
+  const label = document.getElementById('session-export-progress-label');
+  const step1 = document.getElementById('session-export-step1');
+  const step2 = document.getElementById('session-export-step2');
+  const grid  = document.getElementById('session-mnemonic-grid');
+
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (prog) prog.style.display = '';
+
+  const setProgress = (pct: number, text: string): void => {
+    if (fill)  fill.style.width  = `${pct}%`;
+    if (label) label.textContent = text;
+  };
+
+  try {
+    const { fileJson, mnemonic } = await exportSessionKeys(_myUid, (phase) => {
+      if (phase === 'generating') setProgress(10, 'Génération de la phrase mnémotechnique…');
+      if (phase === 'collecting') setProgress(25, 'Collecte des clés et états ratchet…');
+      if (phase === 'deriving')   setProgress(50, 'Dérivation Argon2id… (quelques secondes)');
+      if (phase === 'encrypting') setProgress(85, 'Chiffrement AES-256-GCM…');
+      if (phase === 'done')       setProgress(100, 'Terminé !');
+    });
+
+    _sessionExportFileJson = fileJson;
+
+    if (grid) {
+      grid.innerHTML = '';
+      mnemonic.forEach((word, i) => {
+        const cell = document.createElement('div');
+        cell.style.cssText = 'background:rgba(107,143,245,0.1);border:1px solid rgba(107,143,245,0.2);border-radius:5px;padding:6px 8px;text-align:center;font-family:monospace;font-size:12px;color:#c4c9e8';
+        cell.innerHTML = `<span style="color:#5a6080;font-size:9px;display:block">${i + 1}.</span>${escapeHtml(word)}`;
+        grid.appendChild(cell);
+      });
+    }
+
+    if (step1) step1.style.display = 'none';
+    if (prog)  prog.style.display  = 'none';
+    if (step2) step2.style.display = 'flex';
+
+    // Le bouton "Confirmer" déclenche maintenant le téléchargement
+    if (confirmBtn) {
+      confirmBtn.disabled = false;
+      confirmBtn.innerHTML = `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px"><path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/></svg>Télécharger le fichier`;
+      confirmBtn.onclick = () => {
+        if (_sessionExportFileJson) downloadSessionFile(_sessionExportFileJson);
+        closeSessionExportModal();
+        showToast('Clés exportées avec succès. Gardez vos 10 mots en sécurité !');
+      };
+    }
+  } catch (err) {
+    console.error('[AQ] Session export failed:', err);
+    showToast(`Export échoué : ${err instanceof Error ? err.message : String(err)}`);
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (prog) prog.style.display = 'none';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Import clés de session
+// ─────────────────────────────────────────────────────────────────────────────
+
+function openSessionImportModal(): void {
+  const modal = document.getElementById('session-import-modal');
+  if (modal) modal.style.display = 'flex';
+  const fileInput  = document.getElementById('session-import-file') as HTMLInputElement | null;
+  const passInput  = document.getElementById('session-import-password') as HTMLInputElement | null;
+  const mnemoInput = document.getElementById('session-import-mnemonic') as HTMLTextAreaElement | null;
+  if (fileInput)  fileInput.value  = '';
+  if (passInput)  passInput.value  = '';
+  if (mnemoInput) mnemoInput.value = '';
+  const prog = document.getElementById('session-import-progress');
+  if (prog) prog.style.display = 'none';
+  const confirmBtn = document.getElementById('session-import-confirm') as HTMLButtonElement | null;
+  if (confirmBtn) confirmBtn.disabled = false;
+  setTimeout(() => fileInput?.focus(), 60);
+}
+
+function closeSessionImportModal(): void {
+  const modal = document.getElementById('session-import-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function confirmSessionImport(): Promise<void> {
+  const fileInput  = document.getElementById('session-import-file') as HTMLInputElement | null;
+  const passInput  = document.getElementById('session-import-password') as HTMLInputElement | null;
+  const mnemoInput = document.getElementById('session-import-mnemonic') as HTMLTextAreaElement | null;
+  const confirmBtn = document.getElementById('session-import-confirm') as HTMLButtonElement | null;
+  const prog  = document.getElementById('session-import-progress');
+  const fill  = document.getElementById('session-import-progress-fill');
+  const label = document.getElementById('session-import-progress-label');
+
+  const file     = fileInput?.files?.[0];
+  const password = passInput?.value ?? '';
+  const phrase   = mnemoInput?.value ?? '';
+
+  if (!file)     { showToast('Sélectionnez un fichier .aqsession.'); return; }
+  if (!password) { showToast('Entrez votre mot de passe AegisQuantum actuel.'); return; }
+
+  const words = normalizeMnemonic(phrase);
+  if (!validateMnemonic(words)) {
+    showToast('Phrase invalide — 10 mots de la liste requis, séparés par des espaces.');
+    return;
+  }
+
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (prog) prog.style.display = '';
+
+  const setProgress = (pct: number, text: string): void => {
+    if (fill)  fill.style.width  = `${pct}%`;
+    if (label) label.textContent = text;
+  };
+
+  try {
+    const fileContent = await file.text();
+    const importedUid = await importSessionKeys(fileContent, words, password, (phase) => {
+      if (phase === 'parsing')    setProgress(10, 'Lecture du fichier…');
+      if (phase === 'deriving')   setProgress(30, 'Dérivation Argon2id… (quelques secondes)');
+      if (phase === 'decrypting') setProgress(65, 'Déchiffrement AES-256-GCM…');
+      if (phase === 'restoring')  setProgress(85, 'Restauration des clés et états ratchet…');
+      if (phase === 'done')       setProgress(100, 'Terminé !');
+    });
+
+    closeSessionImportModal();
+    showToast(`Session restaurée (UID: ${importedUid.slice(0, 8)}…). Reconnectez-vous pour appliquer.`);
+  } catch (err) {
+    console.error('[AQ] Session import failed:', err);
+    showToast(`Import échoué : ${err instanceof Error ? err.message : String(err)}`);
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (prog) prog.style.display = 'none';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Suppression de compte
+// ─────────────────────────────────────────────────────────────────────────────
+
+function openDeleteAccountModal(): void {
+  const modal = document.getElementById('modal-delete-account');
+  const input = document.getElementById('modal-delete-account-confirm-input') as HTMLInputElement | null;
+  const btn   = document.getElementById('modal-delete-account-confirm') as HTMLButtonElement | null;
+  if (input) input.value = '';
+  if (btn)   btn.disabled = true;
+  if (modal) modal.style.display = 'flex';
+  setTimeout(() => input?.focus(), 60);
+}
+
+function closeDeleteAccountModal(): void {
+  const modal = document.getElementById('modal-delete-account');
+  if (modal) modal.style.display = 'none';
+}
+
+async function confirmDeleteAccount(): Promise<void> {
+  const btn = document.getElementById('modal-delete-account-confirm') as HTMLButtonElement | null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Suppression…'; }
+
+  try {
+    await deleteAccount(_myUid);
+    // La suppression Firebase Auth déclenche onAuthStateChanged → retour login
+  } catch (err) {
+    console.error('[AQ] Delete account failed:', err);
+    showToast('Erreur : ' + (err instanceof Error ? err.message : String(err)));
+    if (btn) { btn.disabled = false; btn.textContent = 'Supprimer définitivement'; }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Menu contextuel — messages
+// ─────────────────────────────────────────────────────────────────────────────
+
+function initMessageContextMenu(): void {
+  const menu = document.getElementById('msg-context-menu');
+  if (!menu) return;
+
+  document.addEventListener('click', () => hideContextMenu());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideContextMenu(); });
+
+  document.getElementById('ctx-delete-for-me')?.addEventListener('click', async () => {
+    if (!_ctxMsgId) return;
+    hideContextMenu();
+    await deleteMessageForMe(_myUid, _ctxMsgId);
+    _hiddenMessages.add(_ctxMsgId);
+    removeBubbleFromDom(_ctxMsgId);
+    _ctxMsgId = null;
+  });
+
+  document.getElementById('ctx-delete-for-both')?.addEventListener('click', async () => {
+    if (!_ctxMsgId || !_ctxConvId) return;
+    hideContextMenu();
+    const msgId  = _ctxMsgId;
+    const convId = _ctxConvId;
+    _ctxMsgId = null;
+    try {
+      await deleteMessageForBoth(convId, msgId);
+      removeBubbleFromDom(msgId);
+    } catch (err) {
+      showToast('Suppression échouée : ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
+}
+
+function showMessageContextMenu(e: MouseEvent, msgId: string, isMine: boolean): void {
+  const menu        = document.getElementById('msg-context-menu');
+  const btnBoth     = document.getElementById('ctx-delete-for-both') as HTMLElement | null;
+  if (!menu) return;
+
+  _ctxMsgId  = msgId;
+  _ctxConvId = _currentConvId;
+  _ctxIsMine = isMine;
+
+  if (btnBoth) btnBoth.style.display = isMine ? '' : 'none';
+
+  const x = Math.min(e.clientX, window.innerWidth  - 190);
+  const y = Math.min(e.clientY, window.innerHeight - 80);
+  menu.style.left    = `${x}px`;
+  menu.style.top     = `${y}px`;
+  menu.style.display = '';
+}
+
+function hideContextMenu(): void {
+  const menu = document.getElementById('msg-context-menu');
+  if (menu) menu.style.display = 'none';
+}
+
+function removeBubbleFromDom(msgId: string): void {
+  const bubble = document.querySelector<HTMLElement>(`.message-bubble[data-msg-id="${msgId}"]`);
+  bubble?.remove();
+  _renderedMsgIds.delete(msgId);
+  if (_currentConvId) {
+    const msgs = _allDecryptedMessages.get(_currentConvId) ?? [];
+    _allDecryptedMessages.set(_currentConvId, msgs.filter(m => m.id !== msgId));
   }
 }
 

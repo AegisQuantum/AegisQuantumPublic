@@ -127,6 +127,49 @@ vi.mock("../../crypto", () => {
   };
 });
 
+// ── 3a. Polyfill File + arrayBuffer ──────────────────────────────────────
+// Implémentation robuste via FileReader (disponible en jsdom).
+// Ne délègue pas à Blob.prototype.arrayBuffer qui peut être absent.
+function _blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
+  return new Promise<ArrayBuffer>((resolve, reject) => {
+    const reader = new (globalThis.FileReader ?? (globalThis as Record<string, unknown>).FileReader as typeof FileReader)();
+    reader.onload  = () => resolve(reader.result as ArrayBuffer);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(blob);
+  });
+}
+
+if (typeof globalThis.File === "undefined") {
+  // Node <20 : File n'est pas un global — on le construit sur Blob
+  (globalThis as Record<string, unknown>).File = class NodeFile extends Blob {
+    name: string;
+    lastModified: number;
+    constructor(parts: BlobPart[], filename: string, opts?: FilePropertyBag) {
+      super(parts, opts);
+      this.name         = filename;
+      this.lastModified = opts?.lastModified ?? Date.now();
+    }
+    arrayBuffer(): Promise<ArrayBuffer> { return _blobToArrayBuffer(this); }
+  };
+} else if (typeof (globalThis.File.prototype as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
+  // File existe mais sans arrayBuffer — polyfill via FileReader
+  (globalThis.File.prototype as { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer =
+    function (this: Blob) { return _blobToArrayBuffer(this); };
+}
+
+// ── 3b. Mock localStorage si absent (jsdom sans URL) ─────────────────────
+if (typeof localStorage === "undefined" || typeof localStorage.setItem !== "function") {
+  const _ls = new Map<string, string>();
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem   : (k: string) => _ls.get(k) ?? null,
+    setItem   : (k: string, v: string) => { _ls.set(k, v); },
+    removeItem: (k: string) => { _ls.delete(k); },
+    clear     : () => { _ls.clear(); },
+    get length() { return _ls.size; },
+    key: (i: number) => [..._ls.keys()][i] ?? null,
+  };
+}
+
 // ── 3. Mock Firebase Auth ─────────────────────────────────────────────────
 // _accounts est persisté entre les tests pour les beforeAll de provisioning.
 const _accounts = new Map<string, { uid: string; password: string }>();
@@ -143,7 +186,10 @@ vi.mock("firebase/auth", async () => {
   const actual = await vi.importActual<typeof import("firebase/auth")>("firebase/auth");
   return {
     ...actual,
-    getAuth: vi.fn(() => ({ _mock: true })),
+    getAuth: vi.fn(() => ({
+      _mock: true,
+      get currentUser() { return _currentFirebaseUser; },
+    })),
 
     createUserWithEmailAndPassword: vi.fn(async (_auth: unknown, fakeEmail: string, password: string) => {
       if (!fakeEmail?.includes("@"))
@@ -182,6 +228,13 @@ vi.mock("firebase/auth", async () => {
     }),
 
     updatePassword: vi.fn(async () => {}),
+
+    deleteUser: vi.fn(async (_user: { uid: string }) => {
+      // Dans le mock, on ne supprime pas de _accounts pour permettre aux tests
+      // successifs de se re-connecter avec le même compte.
+      // On se contente de notifier que l'utilisateur est déconnecté.
+      _notifyAuth(null);
+    }),
   };
 });
 
@@ -214,8 +267,17 @@ vi.mock("firebase/firestore", async () => {
   return {
     ...actual,
     getFirestore: vi.fn(() => ({ _mock: true })),
-    collection: vi.fn((_db: unknown, ...segs: string[]) => ({ _path: segs.join("/"), _type: "collection" })),
-    doc       : vi.fn((_db: unknown, ...segs: string[]) => ({ _path: segs.join("/"), _type: "doc" })),
+    // collection/doc acceptent deux formes :
+    //  - (db, "seg", "seg", ...)         → premier arg = db, ignorer
+    //  - (collectionRef|docRef, "seg")   → premier arg = ref avec _path, préfixer
+    collection: vi.fn((dbOrRef: unknown, ...segs: string[]) => {
+      const base = (dbOrRef as { _path?: string })?._path;
+      return { _path: base ? [base, ...segs].join("/") : segs.join("/"), _type: "collection" };
+    }),
+    doc: vi.fn((dbOrRef: unknown, ...segs: string[]) => {
+      const base = (dbOrRef as { _path?: string })?._path;
+      return { _path: base ? [base, ...segs].join("/") : segs.join("/"), _type: "doc" };
+    }),
     setDoc: vi.fn(async (ref: { _path: string }, data: unknown) => {
       _store.set(ref._path, data);
       const parts = ref._path.split("/"); parts.pop(); _fireSnap(parts.join("/"));
@@ -234,6 +296,31 @@ vi.mock("firebase/firestore", async () => {
       const existing = _store.get(ref._path) ?? {};
       _store.set(ref._path, { ...(existing as object), ...(data as object) });
       const parts = ref._path.split("/"); parts.pop(); _fireSnap(parts.join("/"));
+    }),
+    deleteDoc: vi.fn(async (ref: { _path: string }) => {
+      _store.delete(ref._path);
+      const parts = ref._path.split("/"); parts.pop(); _fireSnap(parts.join("/"));
+    }),
+    writeBatch: vi.fn(() => {
+      const _ops: Array<() => void> = [];
+      return {
+        delete: vi.fn((ref: { _path: string }) => {
+          _ops.push(() => {
+            _store.delete(ref._path);
+            const parts = ref._path.split("/"); parts.pop(); _fireSnap(parts.join("/"));
+          });
+        }),
+        set: vi.fn((ref: { _path: string }, data: unknown) => {
+          _ops.push(() => { _store.set(ref._path, data); });
+        }),
+        update: vi.fn((ref: { _path: string }, data: unknown) => {
+          _ops.push(() => {
+            const existing = _store.get(ref._path) ?? {};
+            _store.set(ref._path, { ...(existing as object), ...(data as object) });
+          });
+        }),
+        commit: vi.fn(async () => { for (const op of _ops) op(); }),
+      };
     }),
     arrayUnion: vi.fn((...items: unknown[]) => items),
     getDocs   : vi.fn(async (queryRef: { _path: string }) => _buildSnap(queryRef._path)),

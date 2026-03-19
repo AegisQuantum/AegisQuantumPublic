@@ -97,7 +97,6 @@
             Protocole crypto
           </span>
           <span class="crypto-box-status" id="crypto-status-dot"></span>
-          <button class="crypto-glass-btn" id="btn-crypto-glass" title="Machine sous verre — voir les opérations en direct">🔬</button>
         </div>
         <div class="crypto-steps" id="crypto-steps">
           <div class="crypto-idle">
@@ -165,6 +164,13 @@
                 <path d="M11 2.5a1.5 1.5 0 0 1 2.5 1.5L5 12.5 2 13.5l1-3L11 2.5Z"/>
               </svg>
               Renommer
+            </button>
+            <button class="btn-topbar" id="btn-resync-ratchet" title="Resynchroniser le Double Ratchet (après changement de clés)">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13">
+                <path d="M13.5 8A5.5 5.5 0 1 1 8 2.5"/>
+                <path d="M10 2.5h3.5V6"/>
+              </svg>
+              Resync
             </button>
             <button class="btn-topbar" id="btn-fingerprint">Safety Numbers</button>
           </div>
@@ -256,14 +262,14 @@
               <span class="settings-row-label">ML-KEM-768 (FIPS 203)</span>
               <span class="settings-row-desc">Key Encapsulation — résistant quantique</span>
             </div>
-            <span class="settings-badge badge-blue crypto-glass-trigger" id="badge-mlkem" title="Voir les opérations en direct" style="cursor:pointer">FIPS 203 🔬</span>
+            <span class="settings-badge badge-blue">FIPS 203</span>
           </div>
           <div class="settings-row">
             <div class="settings-row-left">
               <span class="settings-row-label">ML-DSA-65 (FIPS 204)</span>
               <span class="settings-row-desc">Signatures numériques post-quantiques</span>
             </div>
-            <span class="settings-badge badge-blue crypto-glass-trigger" id="badge-mldsa" title="Voir les signatures en direct" style="cursor:pointer">FIPS 204 🔬</span>
+            <span class="settings-badge badge-blue">FIPS 204</span>
           </div>
           <div class="settings-row">
             <div class="settings-row-left">
@@ -275,9 +281,9 @@
           <div class="settings-row">
             <div class="settings-row-left">
               <span class="settings-row-label">Double Ratchet (ML-KEM-768)</span>
-              <span class="settings-row-desc">Forward secrecy — clé éphème KEM + ratchet symétrique par message</span>
+              <span class="settings-row-desc">Forward secrecy — clé éphémère KEM + ratchet symétrique par message</span>
             </div>
-            <span class="settings-badge badge-green crypto-glass-trigger" id="badge-ratchet" title="Voir le ratchet en direct" style="cursor:pointer">Actif 🔬</span>
+            <span class="settings-badge badge-green">Actif</span>
           </div>
         </div>
       </div>
@@ -321,6 +327,37 @@
         </div>
       </div>
 
+      <!-- Clés de session -->
+      <div class="settings-section">
+        <div class="settings-section-title">Clés de session</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-row-left">
+              <span class="settings-row-label">Exporter les clés</span>
+              <span class="settings-row-desc">Clés privées + états ratchet · chiffré · phrase de 10 mots</span>
+            </div>
+            <button class="btn-copy" id="btn-export-session">
+              <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px">
+                <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/>
+              </svg>
+              Exporter
+            </button>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-left">
+              <span class="settings-row-label">Importer les clés</span>
+              <span class="settings-row-desc">Reprendre une session depuis un autre appareil</span>
+            </div>
+            <button class="btn-copy" id="btn-import-session">
+              <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px">
+                <path d="M7 9V2M4 6l3-3 3 3"/><path d="M2 11h10"/>
+              </svg>
+              Importer
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div class="settings-section">
         <div class="settings-section-title">Session</div>
         <button class="btn-signout-settings" id="btn-signout-settings">
@@ -330,9 +367,69 @@
           Se déconnecter
         </button>
       </div>
+
+      <!-- Zone dangereuse -->
+      <div class="settings-section settings-section-danger">
+        <div class="settings-section-title">Zone dangereuse</div>
+        <div class="settings-card danger-card">
+          <div class="settings-row">
+            <div class="settings-row-left">
+              <span class="settings-row-label">Supprimer mon compte</span>
+              <span class="settings-row-desc">Supprime définitivement le compte, les clés et les données locales. Les conversations chiffrées restent si l'autre participant existe encore.</span>
+            </div>
+            <button class="btn-danger" id="btn-delete-account">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="12" height="12">
+                <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 9a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1l1-9"/>
+              </svg>
+              Supprimer
+            </button>
+          </div>
+        </div>
+      </div>
     </section>
 
   </div>
+</div>
+
+<!-- ══ MODAL — Supprimer compte ══ -->
+<div class="modal-overlay" id="modal-delete-account" style="display:none">
+  <div class="modal modal-danger">
+    <div class="modal-header">
+      <span class="modal-title">Supprimer mon compte</span>
+      <button class="modal-close" id="modal-delete-account-close">×</button>
+    </div>
+    <div>
+      <div class="delete-account-warning">
+        <svg viewBox="0 0 20 20" fill="none" stroke="#fc8181" stroke-width="1.6" width="20" height="20">
+          <path d="M10 2L2 17h16L10 2Z"/><path d="M10 8v4M10 14v.5"/>
+        </svg>
+        <span>Cette action est <strong>irréversible</strong>. Votre compte, vos clés privées et toutes vos données locales seront définitivement supprimés.</span>
+      </div>
+      <div class="modal-label">Tapez <strong>SUPPRIMER</strong> pour confirmer</div>
+      <input type="text" class="modal-input" id="modal-delete-account-confirm-input"
+        placeholder="SUPPRIMER" autocomplete="off" spellcheck="false"/>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" id="modal-delete-account-cancel">Annuler</button>
+      <button class="btn-modal-danger" id="modal-delete-account-confirm" disabled>Supprimer définitivement</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MENU CONTEXTUEL — Message ══ -->
+<div class="msg-context-menu" id="msg-context-menu" style="display:none">
+  <button class="msg-context-item" id="ctx-delete-for-me">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="12" height="12">
+      <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 9a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1l1-9"/>
+    </svg>
+    Supprimer pour moi
+  </button>
+  <button class="msg-context-item msg-context-item-danger" id="ctx-delete-for-both" style="display:none">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="12" height="12">
+      <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 9a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1l1-9"/>
+    </svg>
+    Supprimer pour tous
+  </button>
 </div>
 
 <!-- ══ MODAL — Nouvelle conversation ══ -->
@@ -504,5 +601,91 @@
       Non vérifié &mdash; comparez hors de l’application
     </div>
 
+  </div>
+</div>
+
+<!-- ══ MODAL — Export clés de session ══ -->
+<div class="modal-overlay" id="session-export-modal" style="display:none">
+  <div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <span class="modal-title">Exporter les clés de session</span>
+      <button class="modal-close" id="session-export-close">&times;</button>
+    </div>
+    <div id="session-export-step1" style="display:flex;flex-direction:column;gap:12px">
+      <div class="modal-hint" style="background:rgba(107,143,245,0.08);border:1px solid rgba(107,143,245,0.2);border-radius:6px;padding:10px 14px;color:#8890c0;font-size:11px;line-height:1.6">
+        Vos clés privées et états ratchet seront chiffrés avec AES-256-GCM.<br/>
+        La clé de déchiffrement est une phrase de <strong style="color:#c4c9e8">10 mots</strong> générée automatiquement.<br/>
+        <strong style="color:#fc8181">Notez ces mots — vous en aurez besoin pour importer sur un autre appareil.</strong>
+      </div>
+      <div class="backup-progress" id="session-export-progress" style="display:none">
+        <div class="backup-progress-bar"><div class="backup-progress-fill" id="session-export-progress-fill"></div></div>
+        <span class="backup-progress-label" id="session-export-progress-label">Génération…</span>
+      </div>
+    </div>
+    <div id="session-export-step2" style="display:none;flex-direction:column;gap:12px">
+      <div class="modal-label">Votre phrase de récupération (10 mots)</div>
+      <div id="session-mnemonic-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px"></div>
+      <div class="modal-hint" style="color:#fc8181;font-size:11px">
+        Notez ces mots dans l’ordre sur papier. Ils ne seront plus affichés.
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" id="session-export-cancel">Annuler</button>
+      <button class="btn-modal-confirm" id="session-export-confirm">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px">
+          <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 11h10"/>
+        </svg>
+        Générer &amp; Télécharger
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MODAL — Import clés de session ══ -->
+<div class="modal-overlay" id="session-import-modal" style="display:none">
+  <div class="modal" style="max-width:480px">
+    <div class="modal-header">
+      <span class="modal-title">Importer les clés de session</span>
+      <button class="modal-close" id="session-import-close">&times;</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="modal-hint" style="background:rgba(252,129,129,0.06);border:1px solid rgba(252,129,129,0.2);border-radius:6px;padding:10px 14px;color:#8890c0;font-size:11px;line-height:1.6">
+        <strong style="color:#fc8181">Attention :</strong> l’import remplace vos clés locales actuelles.
+        Faites un export avant si nécessaire.
+      </div>
+      <div>
+        <div class="modal-label">Fichier .aqsession</div>
+        <input type="file" class="modal-input" id="session-import-file"
+          accept=".aqsession,application/octet-stream"
+          style="cursor:pointer;padding:7px 10px;font-size:11px"/>
+      </div>
+      <div>
+        <div class="modal-label">Votre mot de passe AegisQuantum actuel</div>
+        <input type="password" class="modal-input" id="session-import-password"
+          placeholder="Requis pour re-chiffrer les clés localement"
+          autocomplete="current-password"/>
+      </div>
+      <div>
+        <div class="modal-label">Phrase de récupération (10 mots, séparés par des espaces)</div>
+        <textarea class="modal-input" id="session-import-mnemonic"
+          placeholder="mot1 mot2 mot3 mot4 mot5 mot6 mot7 mot8 mot9 mot10"
+          rows="3"
+          style="resize:vertical;font-family:monospace;font-size:12px;line-height:1.6"
+          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+      </div>
+      <div class="backup-progress" id="session-import-progress" style="display:none">
+        <div class="backup-progress-bar"><div class="backup-progress-fill" id="session-import-progress-fill"></div></div>
+        <span class="backup-progress-label" id="session-import-progress-label">Import…</span>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" id="session-import-cancel">Annuler</button>
+      <button class="btn-modal-confirm" id="session-import-confirm">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="11" height="11" style="margin-right:4px">
+          <path d="M7 9V2M4 6l3-3 3 3"/><path d="M2 11h10"/>
+        </svg>
+        Importer
+      </button>
+    </div>
   </div>
 </div>

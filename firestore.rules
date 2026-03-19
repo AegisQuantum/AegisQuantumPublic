@@ -18,7 +18,8 @@ service cloud.firestore {
     match /provisioned/{userId} {
       allow read:   if request.auth != null && request.auth.uid == userId;
       allow update: if request.auth != null && request.auth.uid == userId;
-      allow create, delete: if false;
+      allow delete: if request.auth != null && request.auth.uid == userId;
+      allow create: if false;
     }
 
     // ── CONVERSATIONS ────────────────────────────────────────────────────────
@@ -39,7 +40,10 @@ service cloud.firestore {
                     && resource != null
                     && request.auth.uid in resource.data.participants;
 
-      allow delete: if false;
+      // Suppression : participant de la conversation (pour suppression de compte)
+      allow delete: if request.auth != null
+                    && resource != null
+                    && request.auth.uid in resource.data.participants;
 
       // ── MESSAGES (sous-collection) ──────────────────────────────────────
       match /messages/{messageId} {
@@ -62,7 +66,9 @@ service cloud.firestore {
                       && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy'])
                       && request.auth.uid in request.resource.data.readBy;
 
-        allow delete: if false;
+        // Suppression : expéditeur (delete for both) ou participant (suppression de compte)
+        allow delete: if request.auth != null
+                      && request.auth.uid in get(/databases/$(database)/documents/conversations/$(convId)).data.participants;
       }
 
       // ── TYPING (sous-collection) ──────────────────────────────────────────
