@@ -310,15 +310,25 @@ export async function deleteAccount(uid: string): Promise<void> {
 
   await batch.commit();
 
+  // 2b. Invalider le cache mémoire des clés publiques (key-registry garde un cache
+  //     en mémoire pour éviter des reads Firestore répétés ; il faut le vider
+  //     pour que getPublicKeys renvoie null après la suppression Firestore).
+  clearPublicKeysCache(uid);
+
   // 3. Purge IDB
   await deleteVault(uid);
   await deleteAllRatchetStatesForUser(uid);
   await clearAllCachesForAccount(uid);
 
   // 4. Purge localStorage
-  for (const key of [...Object.keys(localStorage)]) {
-    if (key.startsWith("aq:")) localStorage.removeItem(key);
+  // localStorage.key(i) fonctionne dans tous les environnements (jsdom/happy-dom/browser).
+  // Object.keys(localStorage) renvoie [] dans certains runtimes de test.
+  const _lsKeys: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k?.startsWith("aq:")) _lsKeys.push(k);
   }
+  _lsKeys.forEach(k => localStorage.removeItem(k));
 
   // 5. Suppression Firebase Auth (révoque le token — doit être en dernier)
   resetMessagingState();

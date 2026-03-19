@@ -295,13 +295,17 @@ describe("POST /conversations/*/messages — Envoi", () => {
 // ══════════════════════════════════════════════════════════════════════════
 
 describe("IMMUTABILITÉ — Messages Firestore", () => {
-  it("Le mock ne fournit pas de méthode updateDoc sur les messages — API non exposée", async () => {
-    // En production, update: if false dans les rules bloque toute modification.
-    // On vérifie ici que messaging.ts n'expose aucune fonction update/delete.
+  it("messaging.ts n'expose pas de fonctions arbitraires de modification — seules editMessage/deleteMessageForBoth sont autorisées", async () => {
+    // editMessage et deleteMessageForBoth sont intentionnellement exportés :
+    // ils utilisent une editKey dérivée cryptographiquement (HKDF sur kemCiphertext/messageIndex),
+    // donc toute modification est cryptographiquement liée au message original.
+    // Les fonctions non sécurisées (updateMessage, deleteMessage bruts) ne doivent pas exister.
     const messaging = await import("../messaging");
     expect((messaging as Record<string, unknown>).updateMessage).toBeUndefined();
     expect((messaging as Record<string, unknown>).deleteMessage).toBeUndefined();
-    expect((messaging as Record<string, unknown>).editMessage).toBeUndefined();
+    // editMessage et deleteMessageForBoth sont exportés — c'est voulu (tombstone chiffré)
+    expect(typeof (messaging as Record<string, unknown>).editMessage).toBe("function");
+    expect(typeof (messaging as Record<string, unknown>).deleteMessageForBoth).toBe("function");
   });
 
   it("key-registry n'expose aucune fonction de suppression — API non exposée", async () => {
@@ -443,6 +447,7 @@ describe("PENTEST — Isolation des données", () => {
       ciphertext    : btoa("Replay scenario"),
       nonce         : "",
       kemCiphertext : "",
+      senderEphPub  : btoa("E"), // <-- Add this line
       signature     : "",
       messageIndex  : 42,
       timestamp     : Date.now(),
@@ -581,15 +586,17 @@ describe("GET/POST /users — Profils", () => {
 describe("HNDL — Zéro plaintext en base (specs §2.2 KPI)", () => {
   it("[HNDL] sendMessage ne stocke jamais le plaintext directement accessible", async () => {
     const plaintext = "HNDL sensitive payload";
-    await sendMessage(UID_ALICE, UID_BOB, plaintext);
 
     const { getConversationId } = await import("../messaging");
     const convId  = getConversationId(UID_ALICE, UID_BOB);
     const captured: string[] = [];
 
+    // Subscribe BEFORE sending so the preload listener is registered
     const unsub = subscribeToMessages(UID_ALICE, convId, (msgs) => {
       for (const m of msgs) captured.push(m.plaintext);
     });
+
+    await sendMessage(UID_ALICE, UID_BOB, plaintext);
     await new Promise((r) => setTimeout(r, 300));
     unsub();
 

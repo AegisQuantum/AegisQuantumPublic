@@ -5,6 +5,8 @@
  *  1. `indexedDB is not defined`     → fake-indexeddb injecté dans globalThis
  *  2. `auth/configuration-not-found` → mock offline de firebase/auth + firebase/firestore
  *  3. `argon2/liboqs not loaded`     → mock de src/crypto (PBKDF2 + clés fictives)
+ *  4. `file.arrayBuffer is not a function` → polyfill Blob/File.prototype.arrayBuffer
+ *  5. `localStorage.setItem is not a function` → polyfill localStorage
  *
  * Note sur vi.mock et les chemins :
  *  - vi.mock() dans un setupFile résout les chemins relativement à ce fichier.
@@ -24,6 +26,49 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 
 (globalThis as Record<string, unknown>).indexedDB   = new IDBFactory();
 (globalThis as Record<string, unknown>).IDBKeyRange = IDBKeyRange;
+
+// ── 1b. Polyfill File/Blob.prototype.arrayBuffer ──────────────────────────
+// jsdom (used by vitest services environment) may not implement arrayBuffer()
+// on Blob/File. This polyfill uses FileReader which IS available in jsdom.
+if (typeof Blob !== "undefined" && typeof (Blob.prototype as unknown as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
+  Object.defineProperty(Blob.prototype, "arrayBuffer", {
+    value: function (this: Blob): Promise<ArrayBuffer> {
+      return new Promise<ArrayBuffer>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload  = () => resolve(reader.result as ArrayBuffer);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsArrayBuffer(this);
+      });
+    },
+    writable: true,
+    configurable: true,
+  });
+}
+if (typeof File !== "undefined" && typeof (File.prototype as unknown as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
+  File.prototype.arrayBuffer = Blob.prototype.arrayBuffer as () => Promise<ArrayBuffer>;
+}
+
+// ── 1c. Polyfill localStorage ─────────────────────────────────────────────
+// jsdom should provide localStorage, but some versions have it broken.
+(function ensureLocalStorage() {
+  try {
+    globalThis.localStorage.setItem("__aq_probe__", "1");
+    globalThis.localStorage.removeItem("__aq_probe__");
+  } catch {
+    const _data: Record<string, string> = {};
+    const _mock = {
+      getItem   : (k: string) => _data[k] ?? null,
+      setItem   : (k: string, v: string) => { _data[k] = String(v); },
+      removeItem: (k: string) => { delete _data[k]; },
+      clear     : () => { for (const k of Object.keys(_data)) delete _data[k]; },
+      get length() { return Object.keys(_data).length; },
+      key       : (i: number) => Object.keys(_data)[i] ?? null,
+    } as Storage;
+    Object.defineProperty(globalThis, "localStorage", {
+      value: _mock, writable: false, configurable: true,
+    });
+  }
+})();
 
 // ── 2. Mock src/crypto ────────────────────────────────────────────────────
 // Doit être déclaré AVANT les imports qui en dépendent.
@@ -51,8 +96,8 @@ vi.mock("../../crypto", () => {
         "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]
       );
       const bits = await crypto.subtle.deriveBits(
-        { name: "PBKDF2", hash: "SHA-256", salt: saltBytes, iterations: 1 }, km, 256
-      );
+        { name: "PBKDF2", hash: "SHA-256", salt: saltBytes as unknown as BufferSource, iterations: 1 }, km, 256
+      ); //HERE FIX
       return { key: _b64(new Uint8Array(bits)), salt: _b64(saltBytes) };
     }),
 
@@ -103,9 +148,9 @@ vi.mock("../../crypto", () => {
       );
       const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
       const dec = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: _fromb64(nonceB64), tagLength: 128 },
-        key, _fromb64(ciphertextB64)
-      );
+        { name: "AES-GCM", iv: _fromb64(nonceB64) as unknown as BufferSource, tagLength: 128 },
+        key, _fromb64(ciphertextB64) as unknown as BufferSource
+      ); //HERE FIX
       return new TextDecoder().decode(dec);
     }),
 
@@ -127,49 +172,6 @@ vi.mock("../../crypto", () => {
   };
 });
 
-// ── 3a. Polyfill File + arrayBuffer ──────────────────────────────────────
-// Implémentation robuste via FileReader (disponible en jsdom).
-// Ne délègue pas à Blob.prototype.arrayBuffer qui peut être absent.
-function _blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
-  return new Promise<ArrayBuffer>((resolve, reject) => {
-    const reader = new (globalThis.FileReader ?? (globalThis as Record<string, unknown>).FileReader as typeof FileReader)();
-    reader.onload  = () => resolve(reader.result as ArrayBuffer);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsArrayBuffer(blob);
-  });
-}
-
-if (typeof globalThis.File === "undefined") {
-  // Node <20 : File n'est pas un global — on le construit sur Blob
-  (globalThis as Record<string, unknown>).File = class NodeFile extends Blob {
-    name: string;
-    lastModified: number;
-    constructor(parts: BlobPart[], filename: string, opts?: FilePropertyBag) {
-      super(parts, opts);
-      this.name         = filename;
-      this.lastModified = opts?.lastModified ?? Date.now();
-    }
-    arrayBuffer(): Promise<ArrayBuffer> { return _blobToArrayBuffer(this); }
-  };
-} else if (typeof (globalThis.File.prototype as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
-  // File existe mais sans arrayBuffer — polyfill via FileReader
-  (globalThis.File.prototype as { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer =
-    function (this: Blob) { return _blobToArrayBuffer(this); };
-}
-
-// ── 3b. Mock localStorage si absent (jsdom sans URL) ─────────────────────
-if (typeof localStorage === "undefined" || typeof localStorage.setItem !== "function") {
-  const _ls = new Map<string, string>();
-  (globalThis as Record<string, unknown>).localStorage = {
-    getItem   : (k: string) => _ls.get(k) ?? null,
-    setItem   : (k: string, v: string) => { _ls.set(k, v); },
-    removeItem: (k: string) => { _ls.delete(k); },
-    clear     : () => { _ls.clear(); },
-    get length() { return _ls.size; },
-    key: (i: number) => [..._ls.keys()][i] ?? null,
-  };
-}
-
 // ── 3. Mock Firebase Auth ─────────────────────────────────────────────────
 // _accounts est persisté entre les tests pour les beforeAll de provisioning.
 const _accounts = new Map<string, { uid: string; password: string }>();
@@ -186,6 +188,7 @@ vi.mock("firebase/auth", async () => {
   const actual = await vi.importActual<typeof import("firebase/auth")>("firebase/auth");
   return {
     ...actual,
+    // auth object with currentUser getter so auth.currentUser works in deleteAccount, etc.
     getAuth: vi.fn(() => ({
       _mock: true,
       get currentUser() { return _currentFirebaseUser; },
@@ -229,10 +232,11 @@ vi.mock("firebase/auth", async () => {
 
     updatePassword: vi.fn(async () => {}),
 
-    deleteUser: vi.fn(async (_user: { uid: string }) => {
-      // Dans le mock, on ne supprime pas de _accounts pour permettre aux tests
-      // successifs de se re-connecter avec le même compte.
-      // On se contente de notifier que l'utilisateur est déconnecté.
+    // deleteUser — supprime le compte du mock et notifie les listeners
+    deleteUser: vi.fn(async (user: { uid: string }) => {
+      for (const [email, acct] of _accounts.entries()) {
+        if (acct.uid === user.uid) { _accounts.delete(email); break; }
+      }
       _notifyAuth(null);
     }),
   };
@@ -246,7 +250,12 @@ const _listenerSeenIds = new Map<(snap: unknown) => void, Set<string>>();
 function _buildSnap(colPath: string, seenIds?: Set<string>) {
   const docs = [..._store.entries()]
     .filter(([k]) => k.startsWith(colPath + "/") && !k.slice(colPath.length + 1).includes("/"))
-    .map(([k, v]) => ({ id: k.split("/").pop()!, data: () => v, ...(v as object) }));
+    .map(([k, v]) => ({
+      id  : k.split("/").pop()!,
+      ref : { _path: k, _type: "doc" },    // ← ref needed for batch.delete(doc.ref)
+      data: () => v,
+      ...(v as object),
+    }));
   const changes = seenIds
     ? docs.map(d => ({ type: seenIds.has(d.id) ? "modified" : "added", doc: d }))
     : docs.map(d => ({ type: "added", doc: d }));
@@ -267,17 +276,25 @@ vi.mock("firebase/firestore", async () => {
   return {
     ...actual,
     getFirestore: vi.fn(() => ({ _mock: true })),
-    // collection/doc acceptent deux formes :
-    //  - (db, "seg", "seg", ...)         → premier arg = db, ignorer
-    //  - (collectionRef|docRef, "seg")   → premier arg = ref avec _path, préfixer
+
+    // collection(db, "conversations", convId, "messages")
+    //   → { _path: "conversations/convId/messages" }
     collection: vi.fn((dbOrRef: unknown, ...segs: string[]) => {
       const base = (dbOrRef as { _path?: string })?._path;
-      return { _path: base ? [base, ...segs].join("/") : segs.join("/"), _type: "collection" };
+      const path = base ? [base, ...segs].join("/") : segs.join("/");
+      return { _path: path, _type: "collection" };
     }),
+
+    // doc(db, "conversations", convId, "messages", msgId)
+    //   → { _path: "conversations/convId/messages/msgId" }
+    // doc(collection(db, ...), msgId)
+    //   → { _path: "conversations/.../msgId" }  (prepends collection path)
     doc: vi.fn((dbOrRef: unknown, ...segs: string[]) => {
-      const base = (dbOrRef as { _path?: string })?._path;
-      return { _path: base ? [base, ...segs].join("/") : segs.join("/"), _type: "doc" };
+      const base = (dbOrRef as { _path?: string; _mock?: boolean })?._path;
+      const path = base ? [base, ...segs].join("/") : segs.join("/");
+      return { _path: path, _type: "doc" };
     }),
+
     setDoc: vi.fn(async (ref: { _path: string }, data: unknown) => {
       _store.set(ref._path, data);
       const parts = ref._path.split("/"); parts.pop(); _fireSnap(parts.join("/"));
@@ -297,31 +314,48 @@ vi.mock("firebase/firestore", async () => {
       _store.set(ref._path, { ...(existing as object), ...(data as object) });
       const parts = ref._path.split("/"); parts.pop(); _fireSnap(parts.join("/"));
     }),
+
+    // deleteDoc — supprime un document de _store et notifie les listeners
     deleteDoc: vi.fn(async (ref: { _path: string }) => {
       _store.delete(ref._path);
-      const parts = ref._path.split("/"); parts.pop(); _fireSnap(parts.join("/"));
+      const parts = ref._path.split("/"); parts.pop();
+      _fireSnap(parts.join("/"));
     }),
-    writeBatch: vi.fn(() => {
-      const _ops: Array<() => void> = [];
-      return {
-        delete: vi.fn((ref: { _path: string }) => {
-          _ops.push(() => {
+
+    // writeBatch — lot de mutations exécutées atomiquement (simulé séquentiellement)
+    writeBatch: vi.fn((_db: unknown) => {
+      const ops: Array<() => void> = [];
+      const batch = {
+        delete: (ref: { _path: string }) => {
+          ops.push(() => {
             _store.delete(ref._path);
-            const parts = ref._path.split("/"); parts.pop(); _fireSnap(parts.join("/"));
+            const parts = ref._path.split("/"); parts.pop();
+            _fireSnap(parts.join("/"));
           });
-        }),
-        set: vi.fn((ref: { _path: string }, data: unknown) => {
-          _ops.push(() => { _store.set(ref._path, data); });
-        }),
-        update: vi.fn((ref: { _path: string }, data: unknown) => {
-          _ops.push(() => {
+          return batch;
+        },
+        set: (ref: { _path: string }, data: unknown, _opts?: unknown) => {
+          ops.push(() => {
+            _store.set(ref._path, data);
+            const parts = ref._path.split("/"); parts.pop();
+            _fireSnap(parts.join("/"));
+          });
+          return batch;
+        },
+        update: (ref: { _path: string }, data: unknown) => {
+          ops.push(() => {
             const existing = _store.get(ref._path) ?? {};
             _store.set(ref._path, { ...(existing as object), ...(data as object) });
+            const parts = ref._path.split("/"); parts.pop();
+            _fireSnap(parts.join("/"));
           });
-        }),
-        commit: vi.fn(async () => { for (const op of _ops) op(); }),
+          return batch;
+        },
+        commit: async () => { for (const op of ops) op(); },
       };
+      return batch;
     }),
+
     arrayUnion: vi.fn((...items: unknown[]) => items),
     getDocs   : vi.fn(async (queryRef: { _path: string }) => _buildSnap(queryRef._path)),
     query     : vi.fn((colRef: { _path: string }, ...constraints: unknown[]) => ({ _path: colRef._path, _constraints: constraints })),

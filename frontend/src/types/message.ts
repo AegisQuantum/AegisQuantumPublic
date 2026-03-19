@@ -30,6 +30,8 @@ export interface EncryptedMessage {
    */
   kemCiphertext: string;
 
+  senderEphPub: string; // <-- ADD THIS: Base64 — clé publique éphémère ML-KEM-768 utilisée pour ce message.
+
   /**
    * Base64 — signature ML-DSA-65 du message (ciphertext + nonce + kemCiphertext).
    * Produit par dsaSign() dans crypto/dsa.ts
@@ -77,6 +79,29 @@ export interface EncryptedMessage {
   fileSize?: number;
   /** MIME type du fichier (non chiffré — métadonnée acceptée) */
   fileType?: string;
+
+  /**
+   * Type spécial de message système.
+   * "ratchet-reset" : signal de resynchronisation du Double Ratchet.
+   * Pas de ciphertext — pas de déchiffrement. Les deux clients effacent
+   * leur état ratchet local et repartent d'un bootstrap propre.
+   */
+  type?: "ratchet-reset";
+
+  /**
+   * true si le message a été supprimé pour tous (tombstone).
+   * Le ciphertext contient alors AES-GCM("__DELETED__", editKey).
+   */
+  deleted?: boolean;
+
+  /**
+   * true si le message a été modifié.
+   * Le ciphertext contient alors AES-GCM(nouvellePlaintext, editKey).
+   */
+  edited?: boolean;
+
+  /** Timestamp de la dernière modification. */
+  editedAt?: number;
 }
 
 /** Metadata d'une conversation (sans messages). */
@@ -100,6 +125,11 @@ export interface DecryptedMessage {
   verified: boolean;
   /** UIDs des utilisateurs qui ont lu ce message (depuis Firestore readBy). */
   readBy?: string[];
+  /**
+   * "system" : bulle système centrée (resync ratchet, etc.)
+   * Absent pour les messages normaux.
+   */
+  type?: "system";
   /** Pièce jointe déchiffrée — présente uniquement pour les messages fichier */
   file?: {
     /** Blob déchiffré du fichier (jamais transmis, reconstruit en mémoire) */
@@ -108,6 +138,22 @@ export interface DecryptedMessage {
     size : number;
     type : string;
   };
+
+  /** true si le message a été supprimé pour tous (affiche le tombstone). */
+  isDeleted?: boolean;
+
+  /** true si le message a été modifié par l'expéditeur. */
+  isEdited?: boolean;
+
+  /** Timestamp de la dernière modification (ms). */
+  editedAt?: number;
+
+  // ── Champs nécessaires pour delete/edit depuis l'UI ─────────────────────
+  // Stockés lors du déchiffrement pour permettre de dériver editKey
+  // sans re-lire Firestore.
+  kemCiphertext?    : string;
+  initKemCiphertext?: string;
+  messageIndex?     : number;
 }
 
 /** Document Firestore dans /conversations/{convId}/typing/{uid}. */

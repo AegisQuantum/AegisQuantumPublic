@@ -17,6 +17,7 @@ import {
   sendRatchetResetSignal,
   deleteMessageForBoth,
   deleteMessageForMe,
+  editMessage,
 }                                           from '../services/messaging';
 import { getHiddenMessages }               from '../services/idb-cache';
 import {
@@ -65,9 +66,13 @@ let _msgSearchQuery = '';
 let _sendInProgress = false;
 
 // Context menu — message ciblé par le clic droit courant
-let _ctxMsgId:    string | null = null;
-let _ctxConvId:   string | null = null;
-let _ctxIsMine:   boolean       = false;
+let _ctxMsgId:             string | null = null;
+let _ctxConvId:            string | null = null;
+let _ctxIsMine:            boolean       = false;
+let _ctxKemCiphertext:     string        = "";
+let _ctxInitKemCiphertext: string | undefined;
+let _ctxMessageIndex:      number        = 0;
+let _ctxPlaintext:         string        = "";
 
 // Messages cachés localement pour l'utilisateur courant
 let _hiddenMessages = new Set<string>();
@@ -164,6 +169,15 @@ export async function initChat(uid: string): Promise<void> {
   // ── Envoi fichier ──
   const fileInput = document.getElementById('file-input') as HTMLInputElement | null;
   fileInput?.addEventListener('change', async (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file || !_currentContactUid) return;
+    (e.target as HTMLInputElement).value = '';
+    await handleSendFile(file);
+  });
+
+  // ── Envoi image ──
+  const imageInput = document.getElementById('image-input') as HTMLInputElement | null;
+  imageInput?.addEventListener('change', async (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file || !_currentContactUid) return;
     (e.target as HTMLInputElement).value = '';
@@ -343,6 +357,12 @@ export async function initChat(uid: string): Promise<void> {
       }
     }
   });
+
+  // ── Avertissement fermeture ──
+  initCloseWarning();
+
+  // ── Notifications push ──
+  initPushNotifications();
 
   // ── Supprimer compte ──
   document.getElementById('btn-delete-account')?.addEventListener('click', openDeleteAccountModal);
@@ -1051,6 +1071,13 @@ function renderMessages(messages: DecryptedMessage[]): void {
     if (msg.senderUid === _myUid) _updateReadReceipt(msg.id, msg.readBy ?? []);
     const bubble = container.querySelector<HTMLElement>(`.message-bubble[data-msg-id="${msg.id}"]`);
     if (bubble) {
+      // ── Tombstone : message supprimé après coup ──────────────────────────
+      if (msg.isDeleted && !bubble.classList.contains('msg-deleted-bubble')) {
+        bubble.classList.add('msg-deleted-bubble');
+        const wrap = bubble.querySelector('.message-text-wrap');
+        if (wrap) wrap.innerHTML = `<p class="message-text msg-deleted-text"><em>Ce message a été supprimé</em></p>`;
+        continue;
+      }
       const textEl = bubble.querySelector<HTMLElement>('.message-text');
       if (textEl) {
         const current = textEl.textContent ?? '';
@@ -1064,6 +1091,14 @@ function renderMessages(messages: DecryptedMessage[]): void {
           }
           if (!msg.plaintext.startsWith('[\uD83D\uDD12')) {
             bubble.classList.remove('decryption-pending');
+          }
+        }
+        // ── Mise à jour du label "message modifié" ─────────────────────
+        if (msg.isEdited) {
+          textEl.textContent = msg.plaintext;
+          const wrap = textEl.closest('.message-text-wrap');
+          if (wrap && !wrap.querySelector('.msg-edited-label')) {
+            wrap.insertAdjacentHTML('beforeend', `<span class="msg-edited-label"><em>message modifié</em></span>`);
           }
         }
       }
@@ -1109,38 +1144,78 @@ function renderMessages(messages: DecryptedMessage[]): void {
         }
       </div>`;
 
-    if (msg.file) {
-      // ── Bulle fichier ──────────────────────────────────────────────────
+    if (msg.isDeleted) {
+      // ── Message supprimé (tombstone) ─────────────────────────────────────
+      bubble.classList.add('msg-deleted-bubble');
+      bubble.innerHTML = `
+        <div class="message-text-wrap">
+          <p class="message-text msg-deleted-text"><em>Ce message a été supprimé</em></p>
+        </div>`;
+    } else if (msg.file) {
+      // ── Bulle fichier ou image ─────────────────────────────────────────
       const f       = msg.file;
       const sizeStr = _fmtSize(f.size);
+      const isImage = f.type.startsWith('image/');
 
-      const fileDiv = document.createElement('div');
-      fileDiv.className = 'file-bubble';
-      fileDiv.title     = `Télécharger ${f.name}`;
-      fileDiv.innerHTML = `
-        <div class="file-bubble-icon">
-          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16">
-            <path d="M4 4h8l4 4v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"/>
-            <path d="M12 4v4h4"/>
-          </svg>
-        </div>
-        <div class="file-bubble-info">
-          <span class="file-bubble-name">${escapeHtml(f.name)}</span>
-          <span class="file-bubble-meta">${sizeStr} · ${escapeHtml(f.type.split('/')[1] ?? f.type)}</span>
-        </div>
-        <div class="file-bubble-dl">
-          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" width="12" height="12">
-            <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 12h10"/>
-          </svg>
-        </div>`;
+      if (isImage) {
+        // ── Aperçu image inline ──────────────────────────────────────────
+        const imgWrap = document.createElement('div');
+        imgWrap.className = 'image-bubble';
+        imgWrap.title     = `Cliquer pour télécharger ${escapeHtml(f.name)}`;
 
-      fileDiv.addEventListener('click', () => _downloadBlob(f.blob, f.name));
-      bubble.appendChild(fileDiv);
+        const objectUrl = URL.createObjectURL(f.blob);
+        const img       = document.createElement('img');
+        img.src          = objectUrl;
+        img.alt          = f.name;
+        img.className    = 'image-bubble-img';
+        img.style.cssText = 'max-width:260px;max-height:200px;border-radius:8px;display:block;cursor:pointer;object-fit:cover';
+        img.addEventListener('load', () => URL.revokeObjectURL(objectUrl));
+        img.addEventListener('error', () => {
+          URL.revokeObjectURL(objectUrl);
+          imgWrap.innerHTML = `<span style="font-size:11px;color:rgba(255,255,255,0.5)">[Image non affichable]</span>`;
+        });
+        img.addEventListener('click', () => _downloadBlob(f.blob, f.name));
+
+        const caption = document.createElement('div');
+        caption.style.cssText = 'font-size:10px;color:rgba(255,255,255,0.4);margin-top:4px';
+        caption.textContent   = `${escapeHtml(f.name)} · ${sizeStr}`;
+
+        imgWrap.appendChild(img);
+        imgWrap.appendChild(caption);
+        bubble.appendChild(imgWrap);
+      } else {
+        // ── Fichier générique ────────────────────────────────────────────
+        const fileDiv = document.createElement('div');
+        fileDiv.className = 'file-bubble';
+        fileDiv.title     = `Télécharger ${f.name}`;
+        fileDiv.innerHTML = `
+          <div class="file-bubble-icon">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16">
+              <path d="M4 4h8l4 4v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"/>
+              <path d="M12 4v4h4"/>
+            </svg>
+          </div>
+          <div class="file-bubble-info">
+            <span class="file-bubble-name">${escapeHtml(f.name)}</span>
+            <span class="file-bubble-meta">${sizeStr} · ${escapeHtml(f.type.split('/')[1] ?? f.type)}</span>
+          </div>
+          <div class="file-bubble-dl">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" width="12" height="12">
+              <path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 12h10"/>
+            </svg>
+          </div>`;
+        fileDiv.addEventListener('click', () => _downloadBlob(f.blob, f.name));
+        bubble.appendChild(fileDiv);
+      }
     } else {
-      // ── Bulle texte normale ──────────────────────────────────────────────
+      // ── Bulle texte normale (ou modifiée) ───────────────────────────────
+      const editedLabel = msg.isEdited
+        ? `<span class="msg-edited-label"><em>message modifié</em></span>`
+        : '';
       bubble.innerHTML = `
         <div class="message-text-wrap">
           <p class="message-text">${escapeHtml(msg.plaintext)}</p>
+          ${editedLabel}
         </div>`;
     }
 
@@ -1149,7 +1224,7 @@ function renderMessages(messages: DecryptedMessage[]): void {
     // Clic droit → menu contextuel
     bubble.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      showMessageContextMenu(e, msg.id, isMine);
+      showMessageContextMenu(e, msg.id, isMine, msg);
     });
 
     container.appendChild(bubble);
@@ -1166,6 +1241,8 @@ function renderMessages(messages: DecryptedMessage[]): void {
   if (hasNewFromOther) {
     setCryptoStatus('active');
     showCryptoSteps(RECV_STEPS, 'RÉCEPTION');
+    // Notification push si l'app est en arrière-plan
+    _maybePushNotification(newMessages.filter(m => m.senderUid !== _myUid));
   }
 }
 
@@ -1685,6 +1762,112 @@ async function confirmSessionImport(): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Avertissement fermeture d'onglet
+//
+// 1. `beforeunload` → dialog natif du navigateur (fermeture effective de l'onglet)
+// 2. Ctrl+W / Cmd+W → modal personnalisée ; non-fermable via Enter (seulement clic)
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _closeWarningActive = false;
+
+function initCloseWarning(): void {
+  // beforeunload — dialog natif pour fermeture effective
+  const onBeforeUnload = (e: BeforeUnloadEvent) => {
+    e.preventDefault();
+    e.returnValue = '';
+  };
+  window.addEventListener('beforeunload', onBeforeUnload);
+
+  // Ctrl+W / Cmd+W — intercepte avant que le navigateur ferme l'onglet
+  window.addEventListener('keydown', (e: KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
+      e.preventDefault();
+      showCloseWarningModal();
+    }
+  });
+
+  // Boutons du modal
+  document.getElementById('btn-close-cancel')?.addEventListener('click', hideCloseWarningModal);
+  document.getElementById('modal-close-warning')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'modal-close-warning') hideCloseWarningModal();
+  });
+
+  const btnCloseAnyway = document.getElementById('btn-close-anyway');
+  if (btnCloseAnyway) {
+    // Bloquer la fermeture via Enter — uniquement clic souris
+    btnCloseAnyway.addEventListener('keydown', (e) => e.preventDefault());
+    btnCloseAnyway.addEventListener('click', () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      hideCloseWarningModal();
+      window.close();
+    });
+  }
+}
+
+function showCloseWarningModal(): void {
+  if (_closeWarningActive) return;
+  _closeWarningActive = true;
+  const modal = document.getElementById('modal-close-warning');
+  if (modal) modal.style.display = 'flex';
+  // Focus sur "Rester" — pas sur "Fermer quand même" — pour éviter Enter accidentel
+  setTimeout(() => document.getElementById('btn-close-cancel')?.focus(), 60);
+}
+
+function hideCloseWarningModal(): void {
+  _closeWarningActive = false;
+  const modal = document.getElementById('modal-close-warning');
+  if (modal) modal.style.display = 'none';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Notifications push — affichées uniquement quand l'app est en arrière-plan
+//
+// Pas de notification si :
+//  - La page est visible (document.visibilityState === 'visible')
+//  - L'API Notification n'est pas disponible
+//  - La permission a été refusée
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _notificationPermission: NotificationPermission = 'default';
+
+function initPushNotifications(): void {
+  if (!('Notification' in window)) return;
+  // Demander la permission silencieusement sans bloquer l'UX
+  Notification.requestPermission()
+    .then(perm => { _notificationPermission = perm; })
+    .catch(() => { /* permission refusée ou API bloquée */ });
+}
+
+function _maybePushNotification(newFromOther: import('../types/message').DecryptedMessage[]): void {
+  if (!('Notification' in window)) return;
+  if (_notificationPermission !== 'granted') return;
+  if (document.visibilityState === 'visible') return;  // app au premier plan → pas de notif
+  if (newFromOther.length === 0) return;
+
+  // Regrouper toutes les nouvelles bulles en une seule notification
+  const msg = newFromOther[newFromOther.length - 1];
+  const senderLabel = msg.senderUid.slice(0, 8) + '…';
+  const preview = msg.file
+    ? `📎 ${msg.file.name}`
+    : msg.plaintext.startsWith('[\uD83D\uDD12')
+      ? '🔒 Message chiffré'
+      : msg.plaintext.slice(0, 60) + (msg.plaintext.length > 60 ? '…' : '');
+
+  try {
+    const n = new Notification(`AegisQuantum — ${senderLabel}`, {
+      body: preview,
+      icon: '/BIGLOGO.png',
+      tag : 'aq-msg',          // remplace la notif précédente (anti-spam)
+      silent: false,
+    });
+    // Clic sur la notification → focus l'onglet
+    n.onclick = () => { window.focus(); n.close(); };
+  } catch {
+    /* ServiceWorker manquant ou contexte non-sécurisé */
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Suppression de compte
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1740,28 +1923,72 @@ function initMessageContextMenu(): void {
   document.getElementById('ctx-delete-for-both')?.addEventListener('click', async () => {
     if (!_ctxMsgId || !_ctxConvId) return;
     hideContextMenu();
-    const msgId  = _ctxMsgId;
-    const convId = _ctxConvId;
+    const msgId            = _ctxMsgId;
+    const convId           = _ctxConvId;
+    const kemCiphertext    = _ctxKemCiphertext;
+    const initKemCiphertext = _ctxInitKemCiphertext;
+    const messageIndex     = _ctxMessageIndex;
     _ctxMsgId = null;
     try {
-      await deleteMessageForBoth(convId, msgId);
-      removeBubbleFromDom(msgId);
+      await deleteMessageForBoth(convId, msgId, kemCiphertext, initKemCiphertext, messageIndex);
+      // Ne pas retirer du DOM — subscribeToMessages va pousser le tombstone
     } catch (err) {
       showToast('Suppression échouée : ' + (err instanceof Error ? err.message : String(err)));
     }
   });
+
+  document.getElementById('ctx-edit-message')?.addEventListener('click', () => {
+    if (!_ctxMsgId) return;
+    hideContextMenu();
+    const textarea = document.getElementById('edit-message-input') as HTMLTextAreaElement | null;
+    if (textarea) textarea.value = _ctxPlaintext;
+    const modal = document.getElementById('modal-edit-message');
+    if (modal) modal.style.display = 'flex';
+    setTimeout(() => textarea?.focus(), 60);
+  });
+
+  document.getElementById('btn-edit-cancel')?.addEventListener('click', () => {
+    const modal = document.getElementById('modal-edit-message');
+    if (modal) modal.style.display = 'none';
+  });
+
+  document.getElementById('btn-edit-confirm')?.addEventListener('click', async () => {
+    const textarea = document.getElementById('edit-message-input') as HTMLTextAreaElement | null;
+    const newText  = textarea?.value.trim() ?? '';
+    if (!newText || !_ctxMsgId || !_ctxConvId) return;
+    const modal = document.getElementById('modal-edit-message');
+    if (modal) modal.style.display = 'none';
+    const msgId            = _ctxMsgId;
+    const convId           = _ctxConvId;
+    const kemCiphertext    = _ctxKemCiphertext;
+    const initKemCiphertext = _ctxInitKemCiphertext;
+    const messageIndex     = _ctxMessageIndex;
+    _ctxMsgId = null;
+    try {
+      await editMessage(convId, msgId, newText, kemCiphertext, initKemCiphertext, messageIndex);
+    } catch (err) {
+      showToast('Modification échouée : ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
 }
 
-function showMessageContextMenu(e: MouseEvent, msgId: string, isMine: boolean): void {
-  const menu        = document.getElementById('msg-context-menu');
-  const btnBoth     = document.getElementById('ctx-delete-for-both') as HTMLElement | null;
+function showMessageContextMenu(e: MouseEvent, msgId: string, isMine: boolean, msg: DecryptedMessage): void {
+  const menu    = document.getElementById('msg-context-menu');
+  const btnBoth = document.getElementById('ctx-delete-for-both') as HTMLElement | null;
+  const btnEdit = document.getElementById('ctx-edit-message')    as HTMLElement | null;
   if (!menu) return;
 
-  _ctxMsgId  = msgId;
-  _ctxConvId = _currentConvId;
-  _ctxIsMine = isMine;
+  _ctxMsgId              = msgId;
+  _ctxConvId             = _currentConvId;
+  _ctxIsMine             = isMine;
+  _ctxKemCiphertext      = msg.kemCiphertext      ?? "";
+  _ctxInitKemCiphertext  = msg.initKemCiphertext;
+  _ctxMessageIndex       = msg.messageIndex       ?? 0;
+  _ctxPlaintext          = msg.plaintext;
 
-  if (btnBoth) btnBoth.style.display = isMine ? '' : 'none';
+  const showOwnerActions = isMine && !msg.isDeleted;
+  if (btnBoth) btnBoth.style.display = showOwnerActions ? '' : 'none';
+  if (btnEdit) btnEdit.style.display = showOwnerActions ? '' : 'none';
 
   const x = Math.min(e.clientX, window.innerWidth  - 190);
   const y = Math.min(e.clientY, window.innerHeight - 80);

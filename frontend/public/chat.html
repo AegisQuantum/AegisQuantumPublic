@@ -3,6 +3,7 @@
 <!-- NOTE: pas de <link> CSS ici — le CSS est injecté par Vite dans le bundle en prod -->
 
 <div id="chat-root">
+  
 
   <!-- ══ TOP NAV ══ -->
   <header class="topnav">
@@ -188,12 +189,22 @@
         </div>
 
         <div class="input-bar">
+          <!-- Bouton pièce jointe (tous types de fichiers) -->
           <label class="btn-attach" id="btn-attach" title="Envoyer un fichier chiffré" for="file-input">
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" width="14" height="14">
               <path d="M16.5 9.5 9 17a5 5 0 0 1-7-7l8-8a3.3 3.3 0 0 1 4.7 4.7L7 14.2a1.7 1.7 0 0 1-2.4-2.4L11 5"/>
             </svg>
           </label>
           <input type="file" id="file-input" style="display:none" />
+          <!-- Bouton image (filtre image/*) -->
+          <label class="btn-attach" id="btn-attach-image" title="Envoyer une image chiffrée" for="image-input" style="margin-left:2px">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" width="14" height="14">
+              <rect x="2" y="4" width="16" height="12" rx="2"/>
+              <circle cx="7" cy="8.5" r="1.5"/>
+              <path d="M2 14l4-4 3 3 3-4 6 5"/>
+            </svg>
+          </label>
+          <input type="file" id="image-input" accept="image/*" style="display:none" />
           <textarea class="message-input" id="message-input" placeholder="Écrire un message chiffré…" rows="1"></textarea>
           <button class="btn-send" id="btn-send" title="Envoyer">
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" width="15" height="15">
@@ -416,8 +427,43 @@
   </div>
 </div>
 
+<!-- ══ MODAL — Avertissement fermeture ══ -->
+<div class="modal-overlay" id="modal-close-warning" style="display:none">
+  <div class="modal" style="max-width:400px">
+    <div class="modal-header">
+      <span class="modal-title" style="display:flex;align-items:center;gap:8px">
+        <svg viewBox="0 0 20 20" fill="none" stroke="#f6ad55" stroke-width="1.6" width="16" height="16">
+          <path d="M10 2L2 17h16L10 2Z"/><path d="M10 8v4M10 14v.5"/>
+        </svg>
+        Avant de partir…
+      </span>
+    </div>
+    <div style="font-size:13px;color:rgba(255,255,255,0.65);line-height:1.6;padding:4px 0 8px">
+      <p style="margin:0 0 10px">Vos clés cryptographiques sont stockées <strong>uniquement sur cet appareil</strong>.</p>
+      <p style="margin:0">Si vous fermez sans les exporter, vous ne pourrez plus déchiffrer vos messages depuis un autre appareil.</p>
+    </div>
+    <div style="background:rgba(246,173,85,0.08);border:1px solid rgba(246,173,85,0.2);border-radius:8px;padding:10px 12px;font-size:12px;color:rgba(246,173,85,0.85);margin-bottom:14px">
+      Paramètres → Clés de session → <strong>Exporter</strong>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-modal-confirm" id="btn-close-anyway" type="button" tabindex="0">
+        Fermer quand même
+      </button>
+      <button class="btn-modal-cancel" id="btn-close-cancel" type="button" style="order:-1">
+        Rester
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ══ MENU CONTEXTUEL — Message ══ -->
 <div class="msg-context-menu" id="msg-context-menu" style="display:none">
+  <button class="msg-context-item" id="ctx-edit-message" style="display:none">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="12" height="12">
+      <path d="M11.5 2.5l2 2L5 13H3v-2L11.5 2.5z"/>
+    </svg>
+    Modifier
+  </button>
   <button class="msg-context-item" id="ctx-delete-for-me">
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="12" height="12">
       <path d="M2 4h12M5 4V2h6v2M6 7v5M10 7v5M3 4l1 9a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1l1-9"/>
@@ -430,6 +476,18 @@
     </svg>
     Supprimer pour tous
   </button>
+</div>
+
+<!-- Modal d'édition de message -->
+<div class="modal-overlay" id="modal-edit-message" style="display:none" role="dialog" aria-modal="true" aria-labelledby="edit-message-title">
+  <div class="modal-box">
+    <h3 id="edit-message-title" class="modal-title">Modifier le message</h3>
+    <textarea id="edit-message-input" class="edit-message-textarea" rows="3" placeholder="Nouveau contenu…"></textarea>
+    <div class="modal-actions">
+      <button class="btn-modal-secondary" id="btn-edit-cancel">Annuler</button>
+      <button class="btn-primary" id="btn-edit-confirm">Enregistrer</button>
+    </div>
+  </div>
 </div>
 
 <!-- ══ MODAL — Nouvelle conversation ══ -->

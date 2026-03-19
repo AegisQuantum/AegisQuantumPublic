@@ -269,8 +269,14 @@ export async function sendFile(
     );
     await saveRatchetState(myUid, convId, _drResult.newStateJson);
 
+    // Dérivation de la clé fichier — sélectionne le premier matériau non-vide :
+    //  • kemCiphertext    : disponible en epoch KEM-ratchet
+    //  • initKemCiphertext: disponible en epoch bootstrap (premier message)
+    //  • nonce            : fallback pour epoch symétrique (ratchet avancé côté sym.)
+    //                       le nonce AES-GCM est toujours unique par message → clé unique
+    const _kemForFileKey = _drResult.kemCiphertext || _drResult.initKemCiphertext || _drResult.nonce;
     const _fileKey = await hkdfDerive(
-      _drResult.kemCiphertext,
+      _kemForFileKey,
       `AegisQuantum-v1-file-key:${convId}:${_drResult.messageIndex}`,
       32,
     );
@@ -313,6 +319,9 @@ export async function sendFile(
   _preloadSentMessage(convId, {
     id: msgId, senderUid: myUid, plaintext: placeholder,
     timestamp: ts, verified: true, readBy: [],
+    kemCiphertext    : drResult.kemCiphertext,
+    initKemCiphertext: drResult.initKemCiphertext,
+    messageIndex     : drResult.messageIndex,
   });
   saveMsgCache(msgId, { plaintext: placeholder, verified: true, senderUid: myUid, timestamp: ts }).catch(() => {});
   _notifyConvPreviewUpdate(convId, placeholder, ts);
@@ -391,6 +400,9 @@ export async function sendMessage(
   _preloadSentMessage(convId, {
     id: msgId, senderUid: myUid, plaintext,
     timestamp: ts, verified: true, readBy: [],
+    kemCiphertext    : drResult.kemCiphertext,
+    initKemCiphertext: drResult.initKemCiphertext,
+    messageIndex     : drResult.messageIndex,
   });
 
   // Persistance IDB — permet de ré-afficher ce message après rechargement de
@@ -423,6 +435,54 @@ export async function decryptMessage(
       verified  : false,
       readBy    : msg.readBy ?? [],
     };
+  }
+
+  // ── Tombstone (message supprimé pour tous) ─────────────────────────────────
+  // Le ciphertext contient AES-GCM("__DELETED__", editKey).
+  // On déchiffre pour vérifier l'intégrité, puis on retourne le placeholder.
+  if (msg.deleted) {
+    try {
+      const editKey = await deriveEditKey(msg.kemCiphertext, msg.initKemCiphertext, msg.conversationId, msg.messageIndex);
+      const marker  = await aesGcmDecrypt(msg.ciphertext, msg.nonce, editKey);
+      if (marker !== "__DELETED__") throw new Error("tombstone invalide");
+    } catch {
+      // tombstone corrompu ou forgé — on affiche quand même le placeholder
+    }
+    return {
+      id: msg.id, senderUid: msg.senderUid,
+      plaintext : "Ce message a \u00e9t\u00e9 supprim\u00e9",
+      timestamp : msg.timestamp, verified: false,
+      isDeleted : true, readBy: msg.readBy ?? [],
+      kemCiphertext: msg.kemCiphertext, initKemCiphertext: msg.initKemCiphertext,
+      messageIndex : msg.messageIndex,
+    };
+  }
+
+  // ── Message modifié ────────────────────────────────────────────────────────
+  // Le ciphertext contient AES-GCM(nouvellePlaintext, editKey).
+  if (msg.edited) {
+    try {
+      const editKey      = await deriveEditKey(msg.kemCiphertext, msg.initKemCiphertext, msg.conversationId, msg.messageIndex);
+      const newPlaintext = await aesGcmDecrypt(msg.ciphertext, msg.nonce, editKey);
+      return {
+        id: msg.id, senderUid: msg.senderUid,
+        plaintext : newPlaintext,
+        timestamp : msg.timestamp, verified: false,
+        isEdited  : true, editedAt: msg.editedAt,
+        readBy    : msg.readBy ?? [],
+        kemCiphertext: msg.kemCiphertext, initKemCiphertext: msg.initKemCiphertext,
+        messageIndex : msg.messageIndex,
+      };
+    } catch {
+      return {
+        id: msg.id, senderUid: msg.senderUid,
+        plaintext : "[\uD83D\uDD12 Message modifi\u00e9 — d\u00e9chiffrement \u00e9chou\u00e9]",
+        timestamp : msg.timestamp, verified: false,
+        isEdited  : true, readBy: msg.readBy ?? [],
+        kemCiphertext: msg.kemCiphertext, initKemCiphertext: msg.initKemCiphertext,
+        messageIndex : msg.messageIndex,
+      };
+    }
   }
 
   const senderKeys = await getPublicKeys(msg.senderUid);
@@ -476,8 +536,10 @@ export async function decryptMessage(
   let fileAttachment: DecryptedMessage["file"] | undefined;
   if (msg.hasFile && msg.fileCiphertext && msg.fileNonce && msg.fileName) {
     try {
+      // Même priorité que sendFile : kemCiphertext > initKemCiphertext > nonce
+      const kemForFileKey = msg.kemCiphertext || msg.initKemCiphertext || msg.nonce;
       const fileKey  = await hkdfDerive(
-        msg.kemCiphertext,
+        kemForFileKey,
         `AegisQuantum-v1-file-key:${msg.conversationId}:${msg.messageIndex}`,
         32,
       );
@@ -500,6 +562,10 @@ export async function decryptMessage(
     id: msg.id, senderUid: msg.senderUid, plaintext: drResult.plaintext,
     timestamp: msg.timestamp, verified, readBy: msg.readBy ?? [],
     file: fileAttachment,
+    // Métadonnées de clé — permettent delete/edit depuis l'UI sans re-lire Firestore
+    kemCiphertext    : msg.kemCiphertext,
+    initKemCiphertext: msg.initKemCiphertext,
+    messageIndex     : msg.messageIndex,
   };
 }
 
@@ -694,12 +760,29 @@ export function subscribeToMessages(
 
     let hasNewWork = false;
 
-    // ── Modifications (readBy uniquement) ─────────────────────────────────
+    // ── Modifications ─────────────────────────────────────────────────────
     for (const change of changes) {
       if (change.type !== "modified" || _retrySet.has(change.doc.id)) continue;
+      const data   = change.doc.data();
       const cached = decryptedCache.get(change.doc.id);
+
+      // Tombstone (supprimé) ou édité → re-déchiffrer complètement
+      if ((data.deleted || data.edited) && !cached?.isDeleted) {
+        const msgData = { id: change.doc.id, ...data } as EncryptedMessage;
+        try {
+          const decrypted = await decryptMessage(myUid, msgData);
+          decryptedCache.set(change.doc.id, decrypted);
+          deleteMsgCache(change.doc.id).catch(() => {}); // invalider cache IDB
+          hasNewWork = true;
+        } catch (e) {
+          console.warn(`[AQ] Re-decrypt deleted/edited msg ${change.doc.id}:`, e);
+        }
+        continue;
+      }
+
+      // Sinon : mise à jour readBy uniquement
       if (cached) {
-        const freshReadBy = (change.doc.data().readBy ?? []) as string[];
+        const freshReadBy = (data.readBy ?? []) as string[];
         const current     = cached.readBy ?? [];
         if (freshReadBy.length !== current.length || freshReadBy.some(u => !current.includes(u))) {
           decryptedCache.set(change.doc.id, { ...cached, readBy: freshReadBy });
@@ -725,6 +808,8 @@ export function subscribeToMessages(
       if (decryptedCache.has(d.id)) continue;
       const cached = await loadMsgCache(d.id);
       if (cached) {
+        // Inclure les métadonnées Firestore pour permettre delete/edit depuis l'UI
+        const msgFirestore = d as unknown as EncryptedMessage;
         decryptedCache.set(d.id, {
           id       : d.id,
           senderUid: cached.senderUid,
@@ -732,6 +817,9 @@ export function subscribeToMessages(
           timestamp: cached.timestamp,
           verified : cached.verified,
           readBy   : [],
+          kemCiphertext    : msgFirestore.kemCiphertext,
+          initKemCiphertext: msgFirestore.initKemCiphertext,
+          messageIndex     : msgFirestore.messageIndex,
         });
         hasNewWork = true;
       }
@@ -843,14 +931,97 @@ export function subscribeToMessages(
 // document Firestore ne compromet ni la forward secrecy ni les messages futurs.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Clé de modification de message — dérivée des métadonnées Firestore
+//
+// La même clé est dérivée côté envoyeur (deleteMessageForBoth / editMessage)
+// ET côté récepteur (decryptMessage quand msg.deleted ou msg.edited).
+//
+// Sécurité : seuls les participants qui peuvent lire la conversation Firestore
+// (règles Firestore) peuvent accéder à kemCiphertext / initKemCiphertext /
+// messageIndex et donc dériver cette clé. Forward secrecy de l'original préservée.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function deriveEditKey(
+  kemCiphertext    : string,
+  initKemCiphertext: string | undefined,
+  convId           : string,
+  messageIndex     : number,
+): Promise<string> {
+  // IKM : premier matériau non-vide disponible dans Firestore
+  //   • kemCiphertext     : epoch KEM-ratchet (déjà base64)
+  //   • initKemCiphertext : epoch bootstrap (déjà base64)
+  //   • convId encodé b64 : fallback epoch symétrique (messageIndex dans l'info rend la clé unique)
+  const ikm = kemCiphertext || initKemCiphertext || btoa(convId);
+  return hkdfDerive(
+    ikm,
+    `AegisQuantum-v1-msg-modify-key:${convId}:${messageIndex}`,
+    32,
+  );
+}
+
 /**
  * Supprime un message pour les deux participants.
- * - Supprime le document Firestore (les deux ne le voient plus).
- * - Supprime le plaintext du cache IDB local.
- * N'affecte pas l'état du Double Ratchet.
+ *
+ * Au lieu de deleteDoc (1 write → perte de contexte), on écrase le ciphertext
+ * avec un tombstone chiffré "__DELETED__" via la editKey dérivée des métadonnées
+ * Firestore. Le récepteur voit "*Ce message a été supprimé*" en italique.
+ *
+ * 1 updateDoc → économie de reads/writes Firebase.
  */
-export async function deleteMessageForBoth(convId: string, msgId: string): Promise<void> {
-  await deleteDoc(doc(db, "conversations", convId, "messages", msgId));
+export async function deleteMessageForBoth(
+  convId           : string,
+  msgId            : string,
+  kemCiphertext    : string,
+  initKemCiphertext: string | undefined,
+  messageIndex     : number,
+): Promise<void> {
+  const editKey = await deriveEditKey(kemCiphertext, initKemCiphertext, convId, messageIndex);
+  const { ciphertext: tombstoneCt, nonce: tombstoneNonce } = await aesGcmEncrypt("__DELETED__", editKey);
+
+  const msgRef = doc(messagesCol(convId), msgId);
+  await updateDoc(msgRef, {
+    ciphertext : tombstoneCt,
+    nonce      : tombstoneNonce,
+    deleted    : true,
+    // Effacer les pièces jointes — pas de doc/blob d'un message supprimé
+    hasFile        : false,
+    fileCiphertext : "",
+    fileNonce      : "",
+    fileName       : "",
+    signature      : "",
+  } as Partial<EncryptedMessage>);
+
+  await deleteMsgCache(msgId);
+}
+
+/**
+ * Modifie un message (pour les deux participants).
+ *
+ * Le ciphertext est remplacé par AES-GCM(nouvellePlaintext, editKey).
+ * Le flag `edited: true` et `editedAt` sont ajoutés.
+ * 1 updateDoc — aucun read Firestore supplémentaire.
+ */
+export async function editMessage(
+  convId           : string,
+  msgId            : string,
+  newPlaintext     : string,
+  kemCiphertext    : string,
+  initKemCiphertext: string | undefined,
+  messageIndex     : number,
+): Promise<void> {
+  const editKey = await deriveEditKey(kemCiphertext, initKemCiphertext, convId, messageIndex);
+  const { ciphertext: editCt, nonce: editNonce } = await aesGcmEncrypt(newPlaintext, editKey);
+
+  const msgRef = doc(messagesCol(convId), msgId);
+  await updateDoc(msgRef, {
+    ciphertext : editCt,
+    nonce      : editNonce,
+    edited     : true,
+    editedAt   : Date.now(),
+  } as Partial<EncryptedMessage>);
+
+  // Invalider le cache IDB — le prochain chargement re-déchiffrera
   await deleteMsgCache(msgId);
 }
 

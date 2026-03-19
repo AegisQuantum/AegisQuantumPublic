@@ -1807,3 +1807,20 @@
 .msg-context-item-danger:hover {
   background: rgba(252, 129, 129, 0.1);
 }
+
+/* ── Message supprimé (tombstone) ────────────────────────────────────────── */
+.msg-deleted-bubble {
+  opacity: 0.6;
+}
+.msg-deleted-text {
+  color: var(--c-muted) !important;
+  font-style: italic;
+}
+
+/* ── Label "message modifié" ─────────────────────────────────────────────── */
+.msg-edited-label {
+  display: block;
+  font-size: 10px;
+  color: var(--c-muted);
+  margin-top: 2px;
+}
