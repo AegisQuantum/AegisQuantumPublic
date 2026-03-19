@@ -1080,6 +1080,46 @@ function renderMessages(messages: DecryptedMessage[]): void {
         if (wrap) wrap.innerHTML = `<p class="message-text msg-deleted-text"><em>Ce message a été supprimé</em></p>`;
         continue;
       }
+      // ── Transition texte-placeholder → bulle image/fichier ──────────────
+      // Quand le preload injecte msg.file après le rendu initial (texte placeholder)
+      if (msg.file && !bubble.querySelector('.image-bubble, .file-bubble')) {
+        const existingWrap = bubble.querySelector('.message-text-wrap');
+        if (existingWrap) existingWrap.remove();
+        const f       = msg.file;
+        const sizeStr = _fmtSize(f.size);
+        const isImage = f.type.startsWith('image/');
+        if (isImage) {
+          const imgWrap = document.createElement('div');
+          imgWrap.className = 'image-bubble';
+          imgWrap.title     = escapeHtml(f.name);
+          const objectUrl = URL.createObjectURL(f.blob);
+          const img       = document.createElement('img');
+          img.src          = objectUrl;
+          img.alt          = f.name;
+          img.className    = 'image-bubble-img';
+          img.style.cssText = 'max-width:260px;max-height:200px;border-radius:8px;display:block;cursor:pointer;object-fit:cover';
+          img.addEventListener('load', () => URL.revokeObjectURL(objectUrl));
+          img.addEventListener('error', () => { URL.revokeObjectURL(objectUrl); imgWrap.innerHTML = `<span style="font-size:11px;color:rgba(255,255,255,0.5)">[Image non affichable]</span>`; });
+          img.addEventListener('click', () => _openLightbox(f.blob, f.name, f.size));
+          const caption = document.createElement('div');
+          caption.style.cssText = 'font-size:10px;color:rgba(255,255,255,0.4);margin-top:4px';
+          caption.textContent   = `${escapeHtml(f.name)} · ${sizeStr}`;
+          imgWrap.appendChild(img);
+          imgWrap.appendChild(caption);
+          bubble.insertBefore(imgWrap, bubble.querySelector('.message-meta'));
+        } else {
+          const fileDiv = document.createElement('div');
+          fileDiv.className = 'file-bubble';
+          fileDiv.title     = `Télécharger ${f.name}`;
+          fileDiv.innerHTML = `
+            <div class="file-bubble-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><path d="M4 4h8l4 4v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"/><path d="M12 4v4h4"/></svg></div>
+            <div class="file-bubble-info"><span class="file-bubble-name">${escapeHtml(f.name)}</span><span class="file-bubble-meta">${sizeStr} · ${escapeHtml(f.type.split('/')[1] ?? f.type)}</span></div>
+            <div class="file-bubble-dl"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" width="12" height="12"><path d="M7 2v7M4 7l3 3 3-3"/><path d="M2 12h10"/></svg></div>`;
+          fileDiv.addEventListener('click', () => _downloadBlob(f.blob, f.name));
+          bubble.insertBefore(fileDiv, bubble.querySelector('.message-meta'));
+        }
+        continue;
+      }
       const textEl = bubble.querySelector<HTMLElement>('.message-text');
       if (textEl) {
         const current = textEl.textContent ?? '';
