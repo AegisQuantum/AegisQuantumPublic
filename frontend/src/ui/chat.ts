@@ -361,6 +361,7 @@ export async function initChat(uid: string): Promise<void> {
   // ── Avertissement fermeture + bandeau export clés ──
   initCloseWarning();
   initExportWarningBanner();
+  initLightbox();
 
   // ── Notifications push ──
   initPushNotifications();
@@ -1162,7 +1163,7 @@ function renderMessages(messages: DecryptedMessage[]): void {
         // ── Aperçu image inline ──────────────────────────────────────────
         const imgWrap = document.createElement('div');
         imgWrap.className = 'image-bubble';
-        imgWrap.title     = `Cliquer pour télécharger ${escapeHtml(f.name)}`;
+        imgWrap.title     = escapeHtml(f.name);
 
         const objectUrl = URL.createObjectURL(f.blob);
         const img       = document.createElement('img');
@@ -1175,7 +1176,7 @@ function renderMessages(messages: DecryptedMessage[]): void {
           URL.revokeObjectURL(objectUrl);
           imgWrap.innerHTML = `<span style="font-size:11px;color:rgba(255,255,255,0.5)">[Image non affichable]</span>`;
         });
-        img.addEventListener('click', () => _downloadBlob(f.blob, f.name));
+        img.addEventListener('click', () => _openLightbox(f.blob, f.name, f.size));
 
         const caption = document.createElement('div');
         caption.style.cssText = 'font-size:10px;color:rgba(255,255,255,0.4);margin-top:4px';
@@ -1289,6 +1290,57 @@ function _downloadBlob(blob: Blob, name: string): void {
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+// ── Lightbox image ──────────────────────────────────────────────────────────
+let _lightboxBlob: Blob | null = null;
+let _lightboxName = '';
+
+function _openLightbox(blob: Blob, name: string, size: number): void {
+  _lightboxBlob = blob;
+  _lightboxName = name;
+
+  const overlay  = document.getElementById('lightbox-overlay')!;
+  const img      = document.getElementById('lightbox-img') as HTMLImageElement;
+  const fname    = document.getElementById('lightbox-filename')!;
+  const footer   = document.getElementById('lightbox-footer')!;
+
+  const url = URL.createObjectURL(blob);
+  img.src = url;
+  img.alt = name;
+  img.addEventListener('load', () => URL.revokeObjectURL(url), { once: true });
+
+  fname.textContent  = name;
+  footer.textContent = _fmtSize(size);
+
+  overlay.classList.add('active');
+  overlay.style.display = 'flex';
+  document.addEventListener('keydown', _lightboxKeyHandler);
+}
+
+function _closeLightbox(): void {
+  const overlay = document.getElementById('lightbox-overlay')!;
+  const img     = document.getElementById('lightbox-img') as HTMLImageElement;
+  overlay.classList.remove('active');
+  overlay.style.display = 'none';
+  img.src = '';
+  _lightboxBlob = null;
+  document.removeEventListener('keydown', _lightboxKeyHandler);
+}
+
+function _lightboxKeyHandler(e: KeyboardEvent): void {
+  if (e.key === 'Escape') _closeLightbox();
+}
+
+function initLightbox(): void {
+  document.getElementById('lightbox-close')?.addEventListener('click', _closeLightbox);
+  document.getElementById('lightbox-download')?.addEventListener('click', () => {
+    if (_lightboxBlob) _downloadBlob(_lightboxBlob, _lightboxName);
+  });
+  // Clic sur le fond (hors container) ferme le lightbox
+  document.getElementById('lightbox-overlay')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'lightbox-overlay') _closeLightbox();
+  });
 }
 
 function _fmtSize(bytes: number): string {

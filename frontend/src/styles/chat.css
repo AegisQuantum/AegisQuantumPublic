@@ -1247,6 +1247,118 @@
 }
 
 /* ═══════════════════════════════════════
+   LIGHTBOX IMAGE
+═══════════════════════════════════════ */
+
+#lightbox-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0,0,0,0.88);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.15s ease;
+}
+#lightbox-overlay.active { display: flex !important; }
+
+.lightbox-container {
+  display: flex;
+  flex-direction: column;
+  max-width: min(92vw, 900px);
+  max-height: 92vh;
+  width: auto;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--c-panel2);
+  box-shadow: 0 24px 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.06);
+  animation: scaleIn 0.18s cubic-bezier(0.34,1.56,0.64,1);
+}
+
+@keyframes scaleIn {
+  from { transform: scale(0.88); opacity: 0; }
+  to   { transform: scale(1);    opacity: 1; }
+}
+
+.lightbox-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border2);
+  flex-shrink: 0;
+  gap: 12px;
+}
+
+.lightbox-filename {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--c-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.lightbox-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.lightbox-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--c-border2);
+  background: var(--c-panel2);
+  color: var(--c-text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), color var(--transition);
+}
+.lightbox-btn:hover { background: rgba(123,159,249,0.15); color: var(--c-accent); }
+.lightbox-close-btn:hover { background: rgba(239,68,68,0.15); color: #f87171; }
+
+.lightbox-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  overflow: hidden;
+  padding: 16px;
+  min-height: 0;
+}
+
+.lightbox-img {
+  max-width: 100%;
+  max-height: calc(92vh - 120px);
+  object-fit: contain;
+  border-radius: 6px;
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.lightbox-footer {
+  padding: 8px 14px;
+  font-size: 11px;
+  color: var(--c-muted);
+  font-family: var(--mono);
+  border-top: 1px solid var(--c-border2);
+  background: var(--c-surface);
+  flex-shrink: 0;
+  text-align: center;
+}
+.lightbox-footer:empty { display: none; }
+
+/* ═══════════════════════════════════════
    TOAST
 ═══════════════════════════════════════ */
 
