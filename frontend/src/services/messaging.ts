@@ -316,12 +316,16 @@ export async function sendFile(
     if (code !== 'already-exists') throw err;
   }
 
+  const sentBlob = new Blob([fileBytes.buffer as ArrayBuffer], {
+    type: file.type || "application/octet-stream",
+  });
   _preloadSentMessage(convId, {
     id: msgId, senderUid: myUid, plaintext: placeholder,
     timestamp: ts, verified: true, readBy: [],
     kemCiphertext    : drResult.kemCiphertext,
     initKemCiphertext: drResult.initKemCiphertext,
     messageIndex     : drResult.messageIndex,
+    file: { blob: sentBlob, name: file.name, size: file.size, type: file.type || "application/octet-stream" },
   });
   saveMsgCache(msgId, { plaintext: placeholder, verified: true, senderUid: myUid, timestamp: ts }).catch(() => {});
   _notifyConvPreviewUpdate(convId, placeholder, ts);
@@ -568,7 +572,9 @@ export async function decryptMessage(
         type: msg.fileType ?? "application/octet-stream",
       };
     } catch (e) {
-      console.warn(`[AQ] Dechiffrement fichier echoue pour ${msg.id}:`, e);
+      console.error(`[AQ] Dechiffrement fichier echoue pour ${msg.id}:`, e,
+        `\n  hasFile=${msg.hasFile} kemCT=${msg.kemCiphertext?.slice(0,16)}…`,
+        `\n  convId=${msg.conversationId} index=${msg.messageIndex}`);
     }
   }
 
