@@ -186,8 +186,9 @@ export async function initChat(uid: string): Promise<void> {
 
   // ── Bouton × — annule le pending (audio ou image) ──
   document.getElementById('btn-cancel-pending')?.addEventListener('click', () => {
+    /* DÉSACTIVÉ — appels audio
     if (_pendingAudioFile)  cancelPendingAudio();
-    else if (_pendingImageFile) cancelPendingImage();
+    else */ if (_pendingImageFile) cancelPendingImage();
   });
 
   // ── Navigation settings ──
@@ -368,7 +369,9 @@ export async function initChat(uid: string): Promise<void> {
   initCloseWarning();
   initExportWarningBanner();
   initLightbox();
+  /* DÉSACTIVÉ — appels audio
   initVoiceRecording();
+  */
 
   // ── Notifications push ──
   initPushNotifications();
@@ -1095,9 +1098,10 @@ function renderMessages(messages: DecryptedMessage[]): void {
         const f       = msg.file;
         const sizeStr = _fmtSize(f.size);
         const isImage = f.type.startsWith('image/');
+        /* DÉSACTIVÉ — appels audio
         if (f.type.startsWith('audio/')) {
           bubble.insertBefore(buildAudioBubble(f.blob, f.name), bubble.querySelector('.message-meta'));
-        } else if (isImage) {
+        } else */ if (isImage) {
           const imgWrap = document.createElement('div');
           imgWrap.className = 'image-bubble';
           imgWrap.title     = escapeHtml(f.name);
@@ -1235,9 +1239,11 @@ function renderMessages(messages: DecryptedMessage[]): void {
         imgWrap.appendChild(img);
         imgWrap.appendChild(caption);
         bubble.appendChild(imgWrap);
+      /* DÉSACTIVÉ — appels audio
       } else if (isAudio) {
         // ── Player audio ─────────────────────────────────────────────────
         bubble.appendChild(buildAudioBubble(f.blob, f.name));
+      */
       } else {
         // ── Fichier générique ────────────────────────────────────────────
         const fileDiv = document.createElement('div');
@@ -2185,6 +2191,7 @@ function showToast(msg: string): void {
   setTimeout(() => toast.remove(), 4000);
 }
 
+/* DÉSACTIVÉ — APPELS AUDIO (voice recording + audio player)
 // ─────────────────────────────────────────────────────────────────────────────
 // MESSAGES VOCAUX — enregistrement + rendu audio player
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2456,3 +2463,4 @@ export function buildAudioBubble(blob: Blob, name: string): HTMLElement {
 
   return wrap;
 }
+*/ // FIN DÉSACTIVÉ — APPELS AUDIO

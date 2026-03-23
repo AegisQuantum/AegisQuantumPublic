@@ -5,8 +5,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "create-user": "node create-user.js",
-    "list-users":  "node list-users.js"
+    "create-user":    "node create-user.js",
+    "list-users":     "node list-users.js",
+    "delete-user":    "node delete-user.js",
+    "reset-password": "node reset-password.js"
   },
   "dependencies": {
     "firebase-admin": "^12.0.0"
